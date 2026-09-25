@@ -316,7 +316,7 @@ fn load() -> Vec<Record> {
     let reader = BufReader::new(file);
     reader
         .lines()
-        .filter_map(std::result::Result::ok)
+        .map_while(std::result::Result::ok)
         .filter_map(|line| serde_json::from_str(&line).ok())
         .collect()
 }
