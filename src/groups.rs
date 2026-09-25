@@ -17,9 +17,7 @@ pub fn command(args: &[String]) -> Result<()> {
         [verb, reference] if matches!(verb.as_str(), "rm" | "remove" | "delete") => {
             remove(reference)
         }
-        [verb, reference] if matches!(verb.as_str(), "restore" | "unhide") => {
-            restore(reference)
-        }
+        [verb, reference] if matches!(verb.as_str(), "restore" | "unhide") => restore(reference),
         [verb, reference] if verb == "show" => show(reference),
         [reference] => show(reference),
         [verb, ..] => bail!("unknown group command {verb:?}\n\n{}", usage()),
@@ -48,7 +46,10 @@ fn add(args: &[String]) -> Result<()> {
             group.id
         );
     }
-    ensure!(!group.members.is_empty(), "a group needs at least one model");
+    ensure!(
+        !group.members.is_empty(),
+        "a group needs at least one model"
+    );
     provider::save_group(group.clone())?;
     println!("✓ added {} (group/{})", group.name, group.id);
     show_group(&group, &entries)
@@ -58,7 +59,10 @@ fn set(args: &[String]) -> Result<()> {
     let [reference, pairs @ ..] = args else {
         bail!("usage: magpie group set <id> name=… models=… routing=… stays=…");
     };
-    ensure!(!pairs.is_empty(), "provide at least one group field to update");
+    ensure!(
+        !pairs.is_empty(),
+        "provide at least one group field to update"
+    );
     let mut group = find_group(reference)?;
     ensure!(
         !group.hidden,
@@ -68,14 +72,11 @@ fn set(args: &[String]) -> Result<()> {
     );
     let entries = provider::available_model_entries()?;
     let existing_members = group.members.clone();
-    apply_pairs(
-        &mut group,
-        pairs,
-        &entries,
-        &existing_members,
-        false,
-    )?;
-    ensure!(!group.members.is_empty(), "a group needs at least one model");
+    apply_pairs(&mut group, pairs, &entries, &existing_members, false)?;
+    ensure!(
+        !group.members.is_empty(),
+        "a group needs at least one model"
+    );
     provider::save_group(group.clone())?;
     println!("✓ saved {}", group.name);
     show_group(&group, &entries)
@@ -86,7 +87,10 @@ fn remove(reference: &str) -> Result<()> {
     ensure!(!group.hidden, "{} is already removed", group.id);
     provider::delete_group(&group.id)?;
     if group.auto {
-        println!("✓ hid automatically found group {}; restore with `magpie group restore {}`", group.id, group.id);
+        println!(
+            "✓ hid automatically found group {}; restore with `magpie group restore {}`",
+            group.id, group.id
+        );
     } else {
         println!("✓ removed group {}", group.id);
     }
@@ -106,7 +110,10 @@ fn restore(reference: &str) -> Result<()> {
 fn list() -> Result<()> {
     let groups = provider::groups()?;
     let entries = provider::available_model_entries()?;
-    let visible = groups.iter().filter(|group| !group.hidden).collect::<Vec<_>>();
+    let visible = groups
+        .iter()
+        .filter(|group| !group.hidden)
+        .collect::<Vec<_>>();
     if visible.is_empty() {
         println!("no routing groups yet · `magpie group add <name> models=<m1>,<m2>`");
     }
@@ -131,11 +138,18 @@ fn list() -> Result<()> {
             } else {
                 format!(" · stays {affinity}")
             },
-            members.join(if group.routing == "order" { " → " } else { " · " }),
+            members.join(if group.routing == "order" {
+                " → "
+            } else {
+                " · "
+            }),
             if group.auto { " · found" } else { "" }
         );
     }
-    let hidden = groups.iter().filter(|group| group.hidden).collect::<Vec<_>>();
+    let hidden = groups
+        .iter()
+        .filter(|group| group.hidden)
+        .collect::<Vec<_>>();
     if !hidden.is_empty() {
         println!(
             "removed: {} · restore with `magpie group restore <id>`",
@@ -163,7 +177,10 @@ fn show_group(group: &Group, entries: &[ModelEntry]) -> Result<()> {
         println!("  source   automatically discovered; editing makes it yours");
     }
     if group.hidden {
-        println!("  status   removed; restore with `magpie group restore {}`", group.id);
+        println!(
+            "  status   removed; restore with `magpie group restore {}`",
+            group.id
+        );
     }
     for (index, member) in group.members.iter().enumerate() {
         let label = entries
@@ -177,7 +194,10 @@ fn show_group(group: &Group, entries: &[ModelEntry]) -> Result<()> {
 }
 
 fn find_group(reference: &str) -> Result<Group> {
-    let reference = reference.trim().strip_prefix("magpie/").unwrap_or(reference.trim());
+    let reference = reference
+        .trim()
+        .strip_prefix("magpie/")
+        .unwrap_or(reference.trim());
     let reference = reference.strip_prefix(GROUP_PREFIX).unwrap_or(reference);
     let groups = provider::groups()?;
     groups
@@ -189,9 +209,9 @@ fn find_group(reference: &str) -> Result<Group> {
                 .find(|group| group.id.eq_ignore_ascii_case(reference))
         })
         .or_else(|| {
-            groups.iter().find(|group| {
-                !group.hidden && group.name.eq_ignore_ascii_case(reference)
-            })
+            groups
+                .iter()
+                .find(|group| !group.hidden && group.name.eq_ignore_ascii_case(reference))
         })
         .cloned()
         .with_context(|| {
@@ -401,10 +421,7 @@ mod tests {
     #[test]
     fn model_members_resolve_qualified_and_unique_ids() {
         let entries = [entry("a", "same"), entry("b", "different")];
-        assert_eq!(
-            resolve_member("a/same", &entries, &[]).unwrap(),
-            "a/same"
-        );
+        assert_eq!(resolve_member("a/same", &entries, &[]).unwrap(), "a/same");
         assert_eq!(
             resolve_member("different", &entries, &[]).unwrap(),
             "b/different"
@@ -416,10 +433,7 @@ mod tests {
     fn ambiguous_bare_model_names_require_a_provider() {
         let entries = [entry("a", "same"), entry("b", "same")];
         assert!(resolve_member("same", &entries, &[]).is_err());
-        assert_eq!(
-            resolve_member("b/same", &entries, &[]).unwrap(),
-            "b/same"
-        );
+        assert_eq!(resolve_member("b/same", &entries, &[]).unwrap(), "b/same");
     }
 
     #[test]

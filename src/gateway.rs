@@ -306,10 +306,7 @@ async fn forward(
                     );
                     continue;
                 };
-                if seen.insert((
-                    fallback_target.0.id.clone(),
-                    fallback_target.1.to_owned(),
-                )) {
+                if seen.insert((fallback_target.0.id.clone(), fallback_target.1.to_owned())) {
                     routed.push(fallback_target);
                 }
             }

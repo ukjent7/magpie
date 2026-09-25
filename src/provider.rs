@@ -1,4 +1,8 @@
-use std::{collections::{BTreeMap, HashMap, HashSet}, fs, str::FromStr};
+use std::{
+    collections::{BTreeMap, HashMap, HashSet},
+    fs,
+    str::FromStr,
+};
 
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
@@ -1199,11 +1203,9 @@ fn model_entries(providers: &[Provider]) -> Vec<ModelEntry> {
                 || !provider.responses.is_empty()
                 || !provider.anthropic.is_empty())
     }) {
-        for model in crate::catalog::exposed_models(
-            &provider.id,
-            provider.catalog_id(),
-            &provider.models,
-        ) {
+        for model in
+            crate::catalog::exposed_models(&provider.id, provider.catalog_id(), &provider.models)
+        {
             entries.push(ModelEntry {
                 id: format!("{}/{}", provider.id, model.id),
                 model,
@@ -1223,8 +1225,7 @@ fn has_ready_member(member: &str, providers: &[Provider]) -> bool {
     !model.is_empty()
         && providers.iter().any(|provider| {
             !provider.hidden
-                && (provider.id == provider_ref
-                    || provider.name.eq_ignore_ascii_case(provider_ref))
+                && (provider.id == provider_ref || provider.name.eq_ignore_ascii_case(provider_ref))
                 && (!provider.key.is_empty() || provider.is_local())
                 && (!provider.chat.is_empty()
                     || !provider.responses.is_empty()
@@ -1421,7 +1422,11 @@ mod tests {
     #[test]
     fn automatic_groups_keep_provider_order_and_prefer_catalog_names() {
         let groups = auto_groups(&[
-            model_entry("openrouter", "anthropic/claude-opus-5.5", "anthropic/claude-opus-5.5"),
+            model_entry(
+                "openrouter",
+                "anthropic/claude-opus-5.5",
+                "anthropic/claude-opus-5.5",
+            ),
             model_entry("copilot", "claude-opus-5.5", "claude-opus-5.5"),
             model_entry("claude", "claude-opus-5-5", "Claude Opus 5.5"),
         ]);
