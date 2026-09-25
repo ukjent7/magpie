@@ -500,7 +500,7 @@ mod tests {
         assert_eq!(provider.name, "My Relay");
         assert_eq!(provider.chat, "https://relay.example/v1");
         assert_eq!(provider.anthropic, "https://relay.example");
-        assert_eq!(provider.website, "https://relay.example");
+        assert_eq!(provider.website, "https://relay.example/");
         assert!(provider.keys_url.is_empty());
         assert_eq!(provider.catalog, "openai");
         assert_eq!(provider.icon, "openai");
