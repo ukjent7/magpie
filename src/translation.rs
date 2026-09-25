@@ -403,14 +403,16 @@ fn chat_event_to_anthropic(
         .and_then(Value::as_array)
         .and_then(|choices| choices.first())
     {
-        if let Some(content) = choice.pointer("/delta/content").and_then(Value::as_str) {
-            if !content.is_empty() {
-                let index = ensure_text_block(state, model, &mut output);
-                output.push(event_frame(
-                    "content_block_delta",
-                    &json!({"type":"content_block_delta","index":index,"delta":{"type":"text_delta","text":content}}),
-                ));
-            }
+        if let Some(content) = choice
+            .pointer("/delta/content")
+            .and_then(Value::as_str)
+            .filter(|content| !content.is_empty())
+        {
+            let index = ensure_text_block(state, model, &mut output);
+            output.push(event_frame(
+                "content_block_delta",
+                &json!({"type":"content_block_delta","index":index,"delta":{"type":"text_delta","text":content}}),
+            ));
         }
         if let Some(calls) = choice
             .pointer("/delta/tool_calls")
