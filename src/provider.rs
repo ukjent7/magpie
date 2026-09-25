@@ -439,9 +439,9 @@ pub(crate) fn gateway_providers() -> Result<Vec<GatewayProvider>> {
                 provider.catalog_id(),
                 &provider.models,
             )
-                .into_iter()
-                .map(|model| model.id)
-                .collect();
+            .into_iter()
+            .map(|model| model.id)
+            .collect();
             GatewayProvider {
                 id: provider.id,
                 name: provider.name,
@@ -477,12 +477,8 @@ pub fn list() -> Result<()> {
             provider.id,
             host,
             key,
-            crate::catalog::exposed_models(
-                &provider.id,
-                provider.catalog_id(),
-                &provider.models,
-            )
-            .len(),
+            crate::catalog::exposed_models(&provider.id, provider.catalog_id(), &provider.models,)
+                .len(),
             if provider.hidden { "  [hidden]" } else { "" }
         );
     }
@@ -514,11 +510,8 @@ pub fn models() -> Result<()> {
         .iter()
         .filter(|provider| !provider.hidden && (!provider.key.is_empty() || provider.is_local()))
     {
-        let models = crate::catalog::exposed_models(
-            &provider.id,
-            provider.catalog_id(),
-            &provider.models,
-        );
+        let models =
+            crate::catalog::exposed_models(&provider.id, provider.catalog_id(), &provider.models);
         if models.is_empty() {
             continue;
         }

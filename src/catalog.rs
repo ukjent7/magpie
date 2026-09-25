@@ -314,7 +314,8 @@ pub async fn sync_models_dev() -> Result<usize> {
     let catalog = parse_catalog(&bytes)?;
     let path = catalog_path();
     let parent = path.parent().context("catalog path has no parent")?;
-    fs::create_dir_all(parent).with_context(|| format!("create catalog directory {}", parent.display()))?;
+    fs::create_dir_all(parent)
+        .with_context(|| format!("create catalog directory {}", parent.display()))?;
     config::atomic_write_for_settings(&path, &bytes)
         .with_context(|| format!("write models.dev catalog {}", path.display()))?;
     Ok(catalog.len())
