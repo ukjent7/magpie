@@ -632,8 +632,8 @@ impl App {
             self.set_status("This agent has no editable fields yet", false);
             return;
         };
-        let mut items = field_options(field);
-        if let Err(error) = add_model_options(field, &mut items) {
+        let mut items = field_options(&field);
+        if let Err(error) = add_model_options(&field, &mut items) {
             self.set_status(&format!("Could not load model choices: {error:#}"), false);
             return;
         }
