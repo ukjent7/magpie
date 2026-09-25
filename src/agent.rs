@@ -253,11 +253,7 @@ pub fn find(query: &str) -> Result<Agent> {
     let all = all();
 
     if let Some(found) = all.iter().find(|agent| {
-        agent.spec.id == query.as_str()
-            || agent
-                .spec
-                .aliases
-                .contains(&query.as_str())
+        agent.spec.id == query.as_str() || agent.spec.aliases.contains(&query.as_str())
     }) {
         return Ok(found.clone());
     }

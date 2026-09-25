@@ -295,7 +295,9 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
             Ok(mut file) => {
                 let mut result = file.write_all(bytes).map_err(anyhow::Error::from);
                 #[cfg(unix)]
-                if result.is_ok() && let Some(mode) = mode {
+                if result.is_ok()
+                    && let Some(mode) = mode
+                {
                     result = file
                         .set_permissions(fs::Permissions::from_mode(mode))
                         .with_context(|| format!("preserve permissions on {}", path.display()));
