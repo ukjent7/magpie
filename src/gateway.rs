@@ -71,6 +71,11 @@ async fn serve(addr: &str) -> Result<()> {
         .route("/models", get(models))
         .route("/v1/chat/completions", post(chat_completions))
         .route("/chat/completions", post(chat_completions))
+        .route("/v1/responses", post(responses))
+        .route("/responses", post(responses))
+        .route("/v1/messages", post(messages))
+        .route("/messages", post(messages))
+        .route("/v1/messages/count_tokens", post(count_tokens))
         .fallback(not_found)
         .with_state(state);
 
@@ -114,7 +119,12 @@ async fn info() -> std::result::Result<Json<Value>, ApiError> {
         "name": "magpie",
         "version": env!("CARGO_PKG_VERSION"),
         "models": count,
-        "apis": ["/v1/chat/completions", "/v1/models"]
+        "apis": [
+            "/v1/chat/completions",
+            "/v1/responses",
+            "/v1/messages",
+            "/v1/models"
+        ]
     })))
 }
 
@@ -154,7 +164,7 @@ async fn models() -> std::result::Result<Json<Value>, ApiError> {
 fn exposed_models(providers: &[GatewayProvider]) -> impl Iterator<Item = (&GatewayProvider, &str)> {
     providers
         .iter()
-        .filter(|provider| !provider.hidden && !provider.chat.is_empty())
+        .filter(|provider| !provider.hidden && has_endpoint(provider))
         .flat_map(|provider| {
             provider
                 .models
@@ -164,11 +174,39 @@ fn exposed_models(providers: &[GatewayProvider]) -> impl Iterator<Item = (&Gatew
 }
 
 async fn chat_completions(State(state): State<GatewayState>, request: Request<Body>) -> Response {
+    forward(&state, request, ApiProtocol::Chat, None).await
+}
+
+async fn responses(State(state): State<GatewayState>, request: Request<Body>) -> Response {
+    forward(&state, request, ApiProtocol::Responses, None).await
+}
+
+async fn messages(State(state): State<GatewayState>, request: Request<Body>) -> Response {
+    forward(&state, request, ApiProtocol::Anthropic, None).await
+}
+
+async fn count_tokens(State(state): State<GatewayState>, request: Request<Body>) -> Response {
+    forward(
+        &state,
+        request,
+        ApiProtocol::Anthropic,
+        Some("/v1/messages/count_tokens"),
+    )
+    .await
+}
+
+async fn forward(
+    state: &GatewayState,
+    request: Request<Body>,
+    protocol: ApiProtocol,
+    path_override: Option<&str>,
+) -> Response {
     let (parts, body) = request.into_parts();
     let bytes = match to_bytes(body, MAX_REQUEST_BYTES).await {
         Ok(bytes) => bytes,
         Err(error) => {
-            return api_error(
+            return api_error_for(
+                protocol,
                 if error.to_string().contains("length limit") {
                     StatusCode::PAYLOAD_TOO_LARGE
                 } else {
@@ -180,32 +218,45 @@ async fn chat_completions(State(state): State<GatewayState>, request: Request<Bo
     };
     let mut body: Value = match serde_json::from_slice(&bytes) {
         Ok(body) => body,
-        Err(_) => return api_error(StatusCode::BAD_REQUEST, "request body must be valid JSON"),
+        Err(_) => {
+            return api_error_for(
+                protocol,
+                StatusCode::BAD_REQUEST,
+                "request body must be valid JSON",
+            );
+        }
     };
     let Some(model) = body.get("model").and_then(Value::as_str).map(str::to_owned) else {
-        return api_error(StatusCode::BAD_REQUEST, "request must include a model");
+        return api_error_for(
+            protocol,
+            StatusCode::BAD_REQUEST,
+            "request must include a model",
+        );
     };
     let providers = match configured_providers().await {
         Ok(providers) => providers,
-        Err(error) => return error.into_response(),
+        Err(error) => return api_error_for(protocol, error.status, error.message),
     };
-    let (provider, upstream_model) = match resolve_model(&model, &providers) {
+    let (provider, upstream_model) = match resolve_model(&model, &providers, protocol) {
         Ok(result) => result,
         Err(ResolveError::Unknown) => {
-            return api_error(
+            return api_error_for(
+                protocol,
                 StatusCode::NOT_FOUND,
                 &format!("unknown model {model:?}; use provider/model or list available models"),
             );
         }
         Err(ResolveError::Ambiguous) => {
-            return api_error(
+            return api_error_for(
+                protocol,
                 StatusCode::BAD_REQUEST,
                 &format!("model {model:?} belongs to more than one provider; use provider/model"),
             );
         }
     };
     let Some(object) = body.as_object_mut() else {
-        return api_error(
+        return api_error_for(
+            protocol,
             StatusCode::BAD_REQUEST,
             "request body must be a JSON object",
         );
@@ -215,29 +266,35 @@ async fn chat_completions(State(state): State<GatewayState>, request: Request<Bo
         Ok(body) => body,
         Err(error) => {
             eprintln!("magpie: serialize upstream request: {error}");
-            return api_error(
+            return api_error_for(
+                protocol,
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "could not prepare request",
             );
         }
     };
 
-    let upstream_url = match upstream_url(&provider.chat, parts.uri.query()) {
+    let upstream_url = match upstream_url(
+        protocol.base(provider),
+        path_override.unwrap_or_else(|| protocol.path()),
+        parts.uri.query(),
+    ) {
         Ok(url) => url,
         Err(error) => {
             eprintln!(
                 "magpie: invalid URL for provider {}: {error:#}",
                 provider.id
             );
-            return api_error(
+            return api_error_for(
+                protocol,
                 StatusCode::BAD_GATEWAY,
-                "provider has an invalid chat completion URL",
+                "provider has an invalid API URL",
             );
         }
     };
-    let headers = match upstream_headers(provider) {
+    let headers = match upstream_headers(provider, protocol, &parts.headers) {
         Ok(headers) => headers,
-        Err(message) => return api_error(StatusCode::BAD_GATEWAY, message),
+        Err(message) => return api_error_for(protocol, StatusCode::BAD_GATEWAY, message),
     };
     let response = match state
         .client
@@ -254,10 +311,41 @@ async fn chat_completions(State(state): State<GatewayState>, request: Request<Bo
                 "magpie: upstream request to {} failed: {error}",
                 provider.id
             );
-            return api_error(StatusCode::BAD_GATEWAY, "provider request failed");
+            return api_error_for(protocol, StatusCode::BAD_GATEWAY, "provider request failed");
         }
     };
     relay(response)
+}
+
+#[derive(Clone, Copy)]
+enum ApiProtocol {
+    Chat,
+    Responses,
+    Anthropic,
+}
+
+impl ApiProtocol {
+    fn base(self, provider: &GatewayProvider) -> &str {
+        match self {
+            Self::Chat => &provider.chat,
+            Self::Responses => &provider.responses,
+            Self::Anthropic => &provider.anthropic,
+        }
+    }
+
+    const fn path(self) -> &'static str {
+        match self {
+            Self::Chat => "/chat/completions",
+            Self::Responses => "/responses",
+            Self::Anthropic => "/v1/messages",
+        }
+    }
+}
+
+fn has_endpoint(provider: &GatewayProvider) -> bool {
+    !provider.chat.is_empty()
+        || !provider.responses.is_empty()
+        || !provider.anthropic.is_empty()
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -269,6 +357,7 @@ enum ResolveError {
 fn resolve_model<'a>(
     requested: &'a str,
     providers: &'a [GatewayProvider],
+    protocol: ApiProtocol,
 ) -> std::result::Result<(&'a GatewayProvider, &'a str), ResolveError> {
     if let Some((provider_id, model)) = requested.split_once('/') {
         if model.is_empty() {
@@ -278,7 +367,7 @@ fn resolve_model<'a>(
             .iter()
             .find(|provider| {
                 !provider.hidden
-                    && !provider.chat.is_empty()
+                    && !protocol.base(provider).is_empty()
                     && (provider.id == provider_id
                         || provider.name.eq_ignore_ascii_case(provider_id))
             })
@@ -288,7 +377,7 @@ fn resolve_model<'a>(
 
     let mut matches = providers.iter().filter(|provider| {
         !provider.hidden
-            && !provider.chat.is_empty()
+            && !protocol.base(provider).is_empty()
             && provider.models.iter().any(|model| model == requested)
     });
     let provider = matches.next().ok_or(ResolveError::Unknown)?;
@@ -298,12 +387,12 @@ fn resolve_model<'a>(
     Ok((provider, requested))
 }
 
-fn upstream_url(base: &str, query: Option<&str>) -> Result<Url> {
+fn upstream_url(base: &str, path_suffix: &str, query: Option<&str>) -> Result<Url> {
     let mut url = Url::parse(base).context("parse provider URL")?;
     if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
         bail!("provider URL must use http:// or https://");
     }
-    let path = format!("{}/chat/completions", url.path().trim_end_matches('/'));
+    let path = format!("{}{path_suffix}", url.path().trim_end_matches('/'));
     url.set_path(&path);
     if let Some(query) = query.filter(|query| !query.is_empty()) {
         let combined = match url.query() {
@@ -316,16 +405,37 @@ fn upstream_url(base: &str, query: Option<&str>) -> Result<Url> {
     Ok(url)
 }
 
-fn upstream_headers(provider: &GatewayProvider) -> std::result::Result<HeaderMap, &'static str> {
+fn upstream_headers(
+    provider: &GatewayProvider,
+    protocol: ApiProtocol,
+    incoming: &HeaderMap,
+) -> std::result::Result<HeaderMap, &'static str> {
     let mut headers = HeaderMap::new();
     headers.insert(
         header::CONTENT_TYPE,
         HeaderValue::from_static("application/json"),
     );
     if !provider.key.is_empty() {
-        let value = HeaderValue::from_str(&format!("Bearer {}", provider.key))
+        let (name, raw_value) = match protocol {
+            ApiProtocol::Anthropic => (HeaderName::from_static("x-api-key"), provider.key.clone()),
+            ApiProtocol::Chat | ApiProtocol::Responses => (
+                header::AUTHORIZATION,
+                format!("Bearer {}", provider.key),
+            ),
+        };
+        let value = HeaderValue::from_str(&raw_value)
             .map_err(|_| "provider API key cannot be used as an HTTP header")?;
-        headers.insert(header::AUTHORIZATION, value);
+        headers.insert(name, value);
+    }
+    if matches!(protocol, ApiProtocol::Anthropic) {
+        let version = incoming
+            .get("anthropic-version")
+            .cloned()
+            .unwrap_or_else(|| HeaderValue::from_static("2023-06-01"));
+        headers.insert("anthropic-version", version);
+        if let Some(beta) = incoming.get("anthropic-beta") {
+            headers.insert("anthropic-beta", beta.clone());
+        }
     }
     for (name, value) in &provider.headers {
         let name = HeaderName::from_bytes(name.as_bytes())
@@ -390,6 +500,26 @@ fn api_error(status: StatusCode, message: &str) -> Response {
         .into_response()
 }
 
+fn api_error_for(protocol: ApiProtocol, status: StatusCode, message: &str) -> Response {
+    let body = match protocol {
+        ApiProtocol::Anthropic => json!({
+            "type": "error",
+            "error": {
+                "type": "invalid_request_error",
+                "message": message
+            }
+        }),
+        ApiProtocol::Chat | ApiProtocol::Responses => json!({
+            "error": {
+                "message": message,
+                "type": "invalid_request_error",
+                "code": null
+            }
+        }),
+    };
+    (status, Json(body)).into_response()
+}
+
 #[derive(Clone, Copy)]
 struct ApiError {
     status: StatusCode,
@@ -414,6 +544,8 @@ mod tests {
             name: name.to_owned(),
             key: String::new(),
             chat: "https://api.example/v1".to_owned(),
+            responses: String::new(),
+            anthropic: String::new(),
             headers: BTreeMap::new(),
             models: models.iter().map(|model| (*model).to_owned()).collect(),
             hidden: false,
@@ -422,8 +554,12 @@ mod tests {
 
     #[test]
     fn appends_chat_path_and_preserves_query() {
-        let url = upstream_url("https://api.example/v1/", Some("stream=true&n=2"))
-            .expect("provider URL should be valid");
+        let url = upstream_url(
+            "https://api.example/v1/",
+            ApiProtocol::Chat.path(),
+            Some("stream=true&n=2"),
+        )
+        .expect("provider URL should be valid");
         assert_eq!(
             url.as_str(),
             "https://api.example/v1/chat/completions?stream=true&n=2"
@@ -431,10 +567,18 @@ mod tests {
     }
 
     #[test]
+    fn uses_protocol_specific_upstream_paths() {
+        let url = upstream_url("https://api.example", ApiProtocol::Anthropic.path(), None)
+            .expect("provider URL should be valid");
+        assert_eq!(url.as_str(), "https://api.example/v1/messages");
+    }
+
+    #[test]
     fn resolves_qualified_models_without_truncating_model_id() {
         let providers = [provider("relay", "Relay", &["visible-model"])];
-        let (provider, model) = resolve_model("relay/vendor/model", &providers)
-            .expect("qualified provider/model should resolve");
+        let (provider, model) =
+            resolve_model("relay/vendor/model", &providers, ApiProtocol::Chat)
+                .expect("qualified provider/model should resolve");
         assert_eq!(provider.id, "relay");
         assert_eq!(model, "vendor/model");
     }
@@ -446,9 +590,23 @@ mod tests {
             provider("second", "Second", &["shared-model"]),
         ];
         assert!(matches!(
-            resolve_model("shared-model", &providers),
+            resolve_model("shared-model", &providers, ApiProtocol::Chat),
             Err(ResolveError::Ambiguous)
         ));
+    }
+
+    #[test]
+    fn resolves_only_providers_that_speak_the_requested_protocol() {
+        let mut provider = provider("relay", "Relay", &["model"]);
+        provider.chat.clear();
+        provider.responses = "https://api.example/v1".to_owned();
+        let providers = [provider];
+
+        assert!(matches!(
+            resolve_model("relay/model", &providers, ApiProtocol::Chat),
+            Err(ResolveError::Unknown)
+        ));
+        assert!(resolve_model("relay/model", &providers, ApiProtocol::Responses).is_ok());
     }
 
     #[test]
@@ -459,7 +617,25 @@ mod tests {
             .headers
             .insert("authorization".to_owned(), "Token custom-scheme".to_owned());
 
-        let headers = upstream_headers(&provider).expect("headers should be valid");
+        let headers = upstream_headers(&provider, ApiProtocol::Chat, &HeaderMap::new())
+            .expect("headers should be valid");
         assert_eq!(headers[header::AUTHORIZATION], "Token custom-scheme");
+    }
+
+    #[test]
+    fn anthropic_auth_uses_its_protocol_headers() {
+        let mut provider = provider("relay", "Relay", &[]);
+        provider.key = "secret".to_owned();
+        let mut incoming = HeaderMap::new();
+        incoming.insert(
+            "anthropic-version",
+            HeaderValue::from_static("2024-01-01"),
+        );
+
+        let headers = upstream_headers(&provider, ApiProtocol::Anthropic, &incoming)
+            .expect("headers should be valid");
+        assert_eq!(headers["x-api-key"], "secret");
+        assert_eq!(headers["anthropic-version"], "2024-01-01");
+        assert!(!headers.contains_key(header::AUTHORIZATION));
     }
 }
