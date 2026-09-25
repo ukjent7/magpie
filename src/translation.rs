@@ -220,7 +220,7 @@ impl SseTranslator {
                 chat_event_to_anthropic(state, &self.model, &value)
             }
             StreamDirection::ResponsesToChat(state) => {
-                responses_event_to_chat(state, &self.model, &value)
+                responses_event_to_chat(state, &self.model, kind, &value)
             }
             StreamDirection::ChatToResponses(state) => {
                 chat_event_to_responses(state, &self.model, &value)
