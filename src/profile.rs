@@ -41,7 +41,10 @@ pub fn list_entries() -> Result<Vec<(String, String)>> {
 
 pub fn snapshot_entries() -> Result<Vec<(String, String)>> {
     let mut snapshot = Vec::new();
-    for current in agent::all().into_iter().filter(|current| current.is_detected()) {
+    for current in agent::all()
+        .into_iter()
+        .filter(|current| current.is_detected())
+    {
         for (field, value) in current.values()? {
             if !value.is_empty() {
                 snapshot.push((format!("{}.{field}", current.spec.id), value));

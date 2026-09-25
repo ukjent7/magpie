@@ -10,5 +10,5 @@ pub mod groups;
 pub mod profile;
 pub mod provider;
 pub mod settings;
-pub mod tui;
 mod translation;
+pub mod tui;

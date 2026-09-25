@@ -312,7 +312,9 @@ impl App {
         frame.render_widget(
             Paragraph::new(Span::styled(
                 title.to_owned(),
-                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
             ))
             .block(Block::default().borders(Borders::BOTTOM)),
             chunks[0],
@@ -396,7 +398,10 @@ impl App {
 
         if picker.matches.is_empty() {
             let message = if picker.custom && !picker.input.value.trim().is_empty() {
-                format!("Press Enter to use {:?} as a custom value", picker.input.value.trim())
+                format!(
+                    "Press Enter to use {:?} as a custom value",
+                    picker.input.value.trim()
+                )
             } else if picker.items.is_empty() {
                 "No choices are available yet".to_owned()
             } else {
@@ -623,13 +628,7 @@ impl App {
 
     fn open_field_picker(&mut self) {
         let row = self.row;
-        let Some(field) = self.rows[row]
-            .agent
-            .spec
-            .fields
-            .get(self.column)
-            .copied()
-        else {
+        let Some(field) = self.rows[row].agent.spec.fields.get(self.column).copied() else {
             self.set_status("This agent has no editable fields yet", false);
             return;
         };
@@ -701,7 +700,10 @@ impl App {
         match profile::snapshot_entries() {
             Ok(preview) => self.preview = preview,
             Err(error) => {
-                self.set_status(&format!("Could not read current settings: {error:#}"), false);
+                self.set_status(
+                    &format!("Could not read current settings: {error:#}"),
+                    false,
+                );
                 return;
             }
         }
@@ -717,7 +719,8 @@ impl App {
         };
         self.screen = Screen::Agents;
         match picker.purpose {
-            PickerPurpose::Field { row, key, label } => match self.rows[row].agent.set(key, &value) {
+            PickerPurpose::Field { row, key, label } => match self.rows[row].agent.set(key, &value)
+            {
                 Ok(()) => {
                     self.reload_values();
                     self.set_status(&format!("{label} → {value}"), true);
@@ -762,7 +765,10 @@ impl App {
             match values_for(&row.agent) {
                 Ok(values) => row.values = values,
                 Err(error) => {
-                    failure = Some(format!("Could not reload {}: {error:#}", row.agent.spec.name));
+                    failure = Some(format!(
+                        "Could not reload {}: {error:#}",
+                        row.agent.spec.name
+                    ));
                     break;
                 }
             }
@@ -795,12 +801,19 @@ impl App {
                 self.syncing = true;
                 self.status.clear();
             }
-            Err(error) => self.set_status(&format!("Catalog sync needs an async runtime: {error}"), false),
+            Err(error) => self.set_status(
+                &format!("Catalog sync needs an async runtime: {error}"),
+                false,
+            ),
         }
     }
 
     fn receive_sync_result(&mut self) {
-        let result = match self.sync_receiver.as_ref().map(|receiver| receiver.try_recv()) {
+        let result = match self
+            .sync_receiver
+            .as_ref()
+            .map(|receiver| receiver.try_recv())
+        {
             Some(Ok(result)) => Some(result),
             Some(Err(TryRecvError::Disconnected)) => {
                 Some(Err("catalog sync worker stopped".to_owned()))
@@ -813,7 +826,9 @@ impl App {
         self.sync_receiver = None;
         self.syncing = false;
         match result {
-            Ok(Some(count)) => self.set_status(&format!("Model catalog synced for {count} providers"), true),
+            Ok(Some(count)) => {
+                self.set_status(&format!("Model catalog synced for {count} providers"), true)
+            }
             Ok(None) => {}
             Err(error) => self.set_status(&format!("Catalog sync failed: {error}"), false),
         }
@@ -856,7 +871,10 @@ fn add_model_options(field: &agent::FieldSpec, items: &mut Vec<PickerOption>) ->
             });
         }
     }
-    for group in provider::groups()?.into_iter().filter(|group| !group.hidden) {
+    for group in provider::groups()?
+        .into_iter()
+        .filter(|group| !group.hidden)
+    {
         let value = format!("group/{}", group.id);
         if seen.insert(value.clone()) {
             items.push(PickerOption {
@@ -878,7 +896,10 @@ fn search_score(value: &str, note: &str, query: &str) -> Option<usize> {
         return Some(1 + index);
     }
     let mut chars = value.chars();
-    if query.chars().all(|needle| chars.by_ref().any(|character| character == needle)) {
+    if query
+        .chars()
+        .all(|needle| chars.by_ref().any(|character| character == needle))
+    {
         return Some(1000);
     }
     note.contains(query).then_some(2000)
