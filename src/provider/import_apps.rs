@@ -335,14 +335,20 @@ fn codex_imports(contents: &str, config_path: &Path) -> Result<Vec<Candidate>> {
             });
             continue;
         }
-        if base.is_empty() && token.is_empty() {
+        let has_environment_key = string(table, "env_key").is_some();
+        let local_endpoint = Provider {
+            chat: clean_base(base),
+            ..Provider::default()
+        }
+        .is_local();
+        if token.is_empty() && (base.is_empty() || (has_environment_key && !local_endpoint)) {
             candidates.push(Candidate {
                 source: format!("Codex config.toml · {id}"),
                 provider: Provider {
                     name: name.to_owned(),
                     ..Provider::default()
                 },
-                skipped: Some(if string(table, "env_key").is_some() {
+                skipped: Some(if has_environment_key {
                     "it names an env_key; Magpie imports only credentials written in the config"
                         .to_owned()
                 } else {
