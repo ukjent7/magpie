@@ -14,11 +14,12 @@ use url::Url;
 
 use crate::settings;
 
+mod icon;
 mod import;
 mod test;
 pub(crate) use import::command as import_command;
 
-const USAGE: &str = "usage: magpie presets | magpie providers | magpie models | magpie provider <id> | magpie provider add <preset> [key] | magpie provider add <name> id=<id> url=<url> key=<key> | magpie provider models <id> [ids…] | magpie provider test <id> | magpie provider key <id> <key> | magpie provider keys <id> [add <key> [name=<name>] [protocol=<protocol>] | use|on|off|rm <key-id> | rename <key-id> <name> | protocol <key-id> <protocol|any>] | magpie provider routing <id> [smart|order|rotate|usage] | magpie provider affinity <id> [auto|session|turn|off] | magpie provider fallback <id> [provider/model… | none] | magpie provider rm <id>";
+const USAGE: &str = "usage: magpie presets | magpie providers | magpie models | magpie provider <id> | magpie provider add <preset> [key] | magpie provider add <name> id=<id> url=<url> key=<key> | magpie provider models <id> [ids…] | magpie provider test <id> | magpie provider icon <id> <file|name> | magpie provider key <id> <key> | magpie provider keys <id> [add <key> [name=<name>] [protocol=<protocol>] | use|on|off|rm <key-id> | rename <key-id> <name> | protocol <key-id> <protocol|any>] | magpie provider routing <id> [smart|order|rotate|usage] | magpie provider affinity <id> [auto|session|turn|off] | magpie provider fallback <id> [provider/model… | none] | magpie provider rm <id>";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum PresetKind {
@@ -846,10 +847,40 @@ pub async fn command(args: &[String]) -> Result<()> {
         [verb, id, fallback @ ..] if verb == "fallback" => set_fallback(id, fallback),
         [verb, id, rest @ ..] if verb == "models" => models_command(id, rest).await,
         [verb, id] if verb == "test" => test::test_provider(id).await,
+        [verb, id, value] if verb == "icon" => set_icon(id, value),
         [verb, id] if verb == "rm" => remove(id),
         [id] => show(id),
         _ => bail!("{USAGE}"),
     }
+}
+
+fn set_icon(id: &str, value: &str) -> Result<()> {
+    let mut file = load()?;
+    let provider = file
+        .providers
+        .iter_mut()
+        .find(|provider| provider.id == id || provider.name.eq_ignore_ascii_case(id))
+        .with_context(|| format!("no provider {id:?}"))?;
+    ensure!(
+        provider.preset.is_empty(),
+        "{} has its own icon; only a custom provider takes one",
+        provider.name
+    );
+    let icon = if value.is_empty() {
+        "generic".to_owned()
+    } else {
+        icon::from_value(value)?
+    };
+    provider.icon = if icon.is_empty() {
+        "generic".to_owned()
+    } else {
+        icon
+    };
+    let provider_name = provider.name.clone();
+    let icon_name = provider.icon.clone();
+    store(file)?;
+    println!("✓ {provider_name} icon {icon_name}");
+    Ok(())
 }
 
 async fn models_command(id: &str, selected: &[String]) -> Result<()> {
@@ -1054,7 +1085,7 @@ fn add(args: &[String]) -> Result<()> {
             "responses" => provider.responses = value.to_owned(),
             "anthropic" => provider.anthropic = value.to_owned(),
             "key" => provider.key = value.to_owned(),
-            "icon" => provider.icon = value.to_owned(),
+            "icon" => provider.icon = icon::from_value(value)?,
             "catalog" => provider.catalog = value.to_owned(),
             "website" => provider.website = value.to_owned(),
             "keysurl" => provider.keys_url = value.to_owned(),
