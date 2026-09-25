@@ -277,6 +277,7 @@ fn usage() -> String {
         "  magpie provider add <preset> [key]",
         "  magpie provider add <name> url=<url> key=<key>",
         "  magpie provider models <id> [model ids…]",
+        "  magpie provider test <id>     test every configured provider API",
         "  magpie provider key <id> <key>  change its API key",
         "  magpie provider keys <id>       manage its API keys",
         "  magpie provider routing <id> [smart|order|rotate|usage]",
