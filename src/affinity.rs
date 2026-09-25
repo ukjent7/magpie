@@ -320,7 +320,7 @@ pub(crate) struct UsageScanner {
     body: Vec<u8>,
     line: Vec<u8>,
     event_data: Vec<u8>,
-    cache_read: usize,
+    usage: crate::usage::TokenUsage,
     overflowed: bool,
 }
 
@@ -332,7 +332,7 @@ impl UsageScanner {
             body: Vec::new(),
             line: Vec::new(),
             event_data: Vec::new(),
-            cache_read: 0,
+            usage: crate::usage::TokenUsage::default(),
             overflowed: false,
         }
     }
@@ -366,7 +366,7 @@ impl UsageScanner {
         }
     }
 
-    pub(crate) fn finish(&mut self) -> usize {
+    pub(crate) fn finish_usage(&mut self) -> crate::usage::TokenUsage {
         if self.sse {
             if !self.line.is_empty() {
                 self.process_line();
@@ -377,7 +377,7 @@ impl UsageScanner {
             let body = std::mem::take(&mut self.body);
             self.parse(&body);
         }
-        self.cache_read
+        self.usage
     }
 
     fn process_line(&mut self) {
@@ -427,37 +427,68 @@ impl UsageScanner {
             .flatten()
             .collect(),
         };
-        for usage in usage {
-            self.cache_read = self.cache_read.max(cache_read_tokens(usage));
+        for entry in usage {
+            self.usage.merge(parse_usage(self.protocol, entry));
         }
     }
 }
 
 pub(crate) fn cache_read_from_value(protocol: ApiProtocol, value: &Value) -> usize {
-    let mut scanner = UsageScanner::new(protocol, None);
-    scanner.parse(&serde_json::to_vec(value).unwrap_or_default());
-    scanner.cache_read
+    usage_from_value(protocol, value).cache_read
 }
 
-fn cache_read_tokens(usage: &Value) -> usize {
-    let direct = usage
-        .get("cache_read_input_tokens")
-        .and_then(Value::as_u64)
-        .and_then(|tokens| usize::try_from(tokens).ok())
-        .unwrap_or_default();
-    let chat = usage
-        .get("prompt_tokens_details")
-        .and_then(|details| details.get("cached_tokens"))
-        .and_then(Value::as_u64)
-        .and_then(|tokens| usize::try_from(tokens).ok())
-        .unwrap_or_default();
-    let responses = usage
-        .get("input_tokens_details")
-        .and_then(|details| details.get("cached_tokens"))
-        .and_then(Value::as_u64)
-        .and_then(|tokens| usize::try_from(tokens).ok())
-        .unwrap_or_default();
-    direct.max(chat).max(responses)
+pub(crate) fn usage_from_value(protocol: ApiProtocol, value: &Value) -> crate::usage::TokenUsage {
+    let mut scanner = UsageScanner::new(protocol, None);
+    scanner.parse(&serde_json::to_vec(value).unwrap_or_default());
+    scanner.usage
+}
+
+fn parse_usage(protocol: ApiProtocol, value: &Value) -> crate::usage::TokenUsage {
+    let count = |name: &str| {
+        value
+            .get(name)
+            .and_then(Value::as_u64)
+            .and_then(|tokens| usize::try_from(tokens).ok())
+            .unwrap_or_default()
+    };
+    let nested_count = |parent: &str, name: &str| {
+        value
+            .get(parent)
+            .and_then(|details| details.get(name))
+            .and_then(Value::as_u64)
+            .and_then(|tokens| usize::try_from(tokens).ok())
+            .unwrap_or_default()
+    };
+
+    match protocol {
+        ApiProtocol::Chat => {
+            let cache_read = nested_count("prompt_tokens_details", "cached_tokens");
+            crate::usage::TokenUsage {
+                input: count("prompt_tokens").saturating_sub(cache_read),
+                output: count("completion_tokens"),
+                cache_read,
+                cache_write: count("cache_creation_input_tokens"),
+                reasoning: nested_count("completion_tokens_details", "reasoning_tokens"),
+            }
+        }
+        ApiProtocol::Responses => {
+            let cache_read = nested_count("input_tokens_details", "cached_tokens");
+            crate::usage::TokenUsage {
+                input: count("input_tokens").saturating_sub(cache_read),
+                output: count("output_tokens"),
+                cache_read,
+                cache_write: 0,
+                reasoning: nested_count("output_tokens_details", "reasoning_tokens"),
+            }
+        }
+        ApiProtocol::Anthropic => crate::usage::TokenUsage {
+            input: count("input_tokens"),
+            output: count("output_tokens"),
+            cache_read: count("cache_read_input_tokens"),
+            cache_write: count("cache_creation_input_tokens"),
+            reasoning: 0,
+        },
+    }
 }
 
 #[cfg(test)]
@@ -561,12 +592,12 @@ mod tests {
     fn usage_scanner_reads_chat_json_and_anthropic_sse_across_chunks() {
         let mut chat = UsageScanner::new(ApiProtocol::Chat, Some("application/json"));
         chat.push(br#"{"usage":{"prompt_tokens_details":{"cached_tokens":3072}}}"#);
-        assert_eq!(chat.finish(), 3072);
+        assert_eq!(chat.finish_usage().cache_read, 3072);
 
         let mut anthropic = UsageScanner::new(ApiProtocol::Anthropic, Some("text/event-stream"));
         anthropic.push(b"event: message_start\r\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"cache_read_input_tokens\":");
         anthropic.push(b"2048}}}\r\n\r\nevent: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":1}}\n\n");
-        assert_eq!(anthropic.finish(), 2048);
+        assert_eq!(anthropic.finish_usage().cache_read, 2048);
     }
 
     #[test]

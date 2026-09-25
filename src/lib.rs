@@ -19,3 +19,4 @@ pub mod settings;
 mod translation;
 pub mod tui;
 pub mod update;
+pub mod usage;

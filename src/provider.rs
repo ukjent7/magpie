@@ -1921,6 +1921,15 @@ fn model_entries(providers: &[Provider]) -> Vec<ModelEntry> {
     entries
 }
 
+pub(crate) fn catalog_id_for_usage(provider_id: &str) -> Option<String> {
+    load()
+        .ok()?
+        .providers
+        .into_iter()
+        .find(|provider| provider.id == provider_id)
+        .map(|provider| provider.catalog_id().to_owned())
+}
+
 fn has_ready_member(member: &str, providers: &[Provider]) -> bool {
     let Some((provider_ref, model)) = member.split_once('/') else {
         return false;

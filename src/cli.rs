@@ -98,6 +98,7 @@ async fn run(cli: Cli) -> Result<()> {
             }
             Ok(())
         }
+        [command, rest @ ..] if command == "usage" => crate::usage::command(rest),
         [command, rest @ ..] if command == "serve" => crate::gateway::command(rest).await,
         [command, rest @ ..] if command == "backup" => crate::backup::backup_command(rest),
         [command, rest @ ..] if command == "restore" => crate::backup::restore_command(rest),
@@ -269,6 +270,7 @@ fn usage() -> String {
         "  magpie group rm <id>            remove a routing group",
         "  magpie presets                  list provider presets",
         "  magpie sync                     refresh the model catalog",
+        "  magpie usage [today|7d|30d|all] summarize gateway tokens and cost",
         "  magpie update [check]           check for or install an update",
         "  magpie serve                    run the local API gateway",
         "  magpie provider <id>            show a provider",

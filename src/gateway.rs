@@ -218,6 +218,7 @@ async fn forward(
     protocol: ApiProtocol,
     path_override: Option<&str>,
 ) -> Response {
+    let request_started = Instant::now();
     let (parts, body) = request.into_parts();
     let bytes = match to_bytes(body, MAX_REQUEST_BYTES).await {
         Ok(bytes) => bytes,
@@ -445,6 +446,17 @@ async fn forward(
     let Some((response, candidate)) = selected else {
         return api_error_for(protocol, StatusCode::BAD_GATEWAY, "provider request failed");
     };
+    let usage_request = path_override.is_none().then(|| {
+        crate::usage::Request::new(
+            parts
+                .headers
+                .get(header::USER_AGENT)
+                .and_then(|value| value.to_str().ok()),
+            &candidate.provider.id,
+            candidate.model,
+            request_started,
+        )
+    });
     let affinity_record = response
         .status()
         .is_success()
@@ -456,7 +468,7 @@ async fn forward(
     let upstream_protocol = candidate.upstream;
     let translated = upstream_protocol != protocol;
     if !translated || !response.status().is_success() {
-        return relay(response, upstream_protocol, affinity_record);
+        return relay(response, upstream_protocol, affinity_record, usage_request);
     }
     let upstream_sse = response
         .headers()
@@ -475,6 +487,7 @@ async fn forward(
             protocol,
             &model,
             affinity_record,
+            usage_request,
         );
     }
 
@@ -526,6 +539,13 @@ async fn forward(
             &context,
             route,
             affinity::cache_read_from_value(upstream_protocol, &upstream_body),
+        );
+    }
+    if let Some(request) = usage_request {
+        crate::usage::record(
+            request,
+            status.as_u16(),
+            affinity::usage_from_value(upstream_protocol, &upstream_body),
         );
     }
     let translated_body = match crate::translation::response(
@@ -1126,18 +1146,23 @@ fn relay(
     upstream: reqwest::Response,
     protocol: ApiProtocol,
     affinity_record: Option<(AffinityContext, String)>,
+    usage_request: Option<crate::usage::Request>,
 ) -> Response {
     let status = upstream.status();
+    let record_status = status.as_u16();
     let headers = upstream.headers().clone();
     let content_type = headers
         .get(header::CONTENT_TYPE)
         .and_then(|value| value.to_str().ok());
-    let scanner = affinity_record
-        .as_ref()
-        .map(|_| UsageScanner::new(protocol, content_type));
+    let scanner = Some(UsageScanner::new(protocol, content_type));
     let body_stream = stream::unfold(
-        (upstream.bytes_stream(), scanner, affinity_record),
-        |(mut input, mut scanner, mut affinity_record)| async move {
+        (
+            upstream.bytes_stream(),
+            scanner,
+            affinity_record,
+            usage_request,
+        ),
+        |(mut input, mut scanner, mut affinity_record, mut usage_request)| async move {
             match input.next().await {
                 Some(Ok(chunk)) => {
                     if let Some(scanner) = scanner.as_mut() {
@@ -1145,14 +1170,23 @@ fn relay(
                     }
                     Some((
                         Ok::<_, reqwest::Error>(chunk),
-                        (input, scanner, affinity_record),
+                        (input, scanner, affinity_record, usage_request),
                     ))
                 }
-                Some(Err(error)) => Some((Err(error), (input, None, None))),
+                Some(Err(error)) => {
+                    let usage = finish_scanner(&mut scanner);
+                    if let Some(request) = usage_request.take() {
+                        crate::usage::record(request, record_status, usage);
+                    }
+                    Some((Err(error), (input, None, None, None)))
+                }
                 None => {
+                    let usage = finish_scanner(&mut scanner);
+                    if let Some(request) = usage_request.take() {
+                        crate::usage::record(request, record_status, usage);
+                    }
                     if let Some((context, route)) = affinity_record.take() {
-                        let cache_read = scanner.as_mut().map_or(0, UsageScanner::finish);
-                        affinity::record(&context, route, cache_read);
+                        affinity::record(&context, route, usage.cache_read);
                     }
                     None
                 }
@@ -1197,8 +1231,10 @@ fn translated_stream_response(
     to: ApiProtocol,
     model: &str,
     affinity_record: Option<(AffinityContext, String)>,
+    usage_request: Option<crate::usage::Request>,
 ) -> Response {
     let status = upstream.status();
+    let record_status = status.as_u16();
     let upstream_headers = upstream.headers().clone();
     let Some(translator) = crate::translation::SseTranslator::new(from, to, model) else {
         return api_error_for(
@@ -1207,7 +1243,7 @@ fn translated_stream_response(
             "streaming translation is not supported for this protocol pair",
         );
     };
-    let scanner = affinity_record.as_ref().map(|_| {
+    let scanner = Some({
         UsageScanner::new(
             from,
             upstream_headers
@@ -1223,19 +1259,39 @@ fn translated_stream_response(
             false,
             scanner,
             affinity_record,
+            usage_request,
         ),
-        |(mut input, mut translator, mut pending, mut ended, mut scanner, mut affinity_record)| async move {
+        |(
+            mut input,
+            mut translator,
+            mut pending,
+            mut ended,
+            mut scanner,
+            mut affinity_record,
+            mut usage_request,
+        )| async move {
             loop {
                 if let Some(frame) = pending.pop_front() {
                     return Some((
                         Ok::<_, reqwest::Error>(frame),
-                        (input, translator, pending, ended, scanner, affinity_record),
+                        (
+                            input,
+                            translator,
+                            pending,
+                            ended,
+                            scanner,
+                            affinity_record,
+                            usage_request,
+                        ),
                     ));
                 }
                 if ended {
+                    let usage = finish_scanner(&mut scanner);
                     if let Some((context, route)) = affinity_record.take() {
-                        let cache_read = scanner.as_mut().map_or(0, UsageScanner::finish);
-                        affinity::record(&context, route, cache_read);
+                        affinity::record(&context, route, usage.cache_read);
+                    }
+                    if let Some(request) = usage_request.take() {
+                        crate::usage::record(request, record_status, usage);
                     }
                     return None;
                 }
@@ -1248,10 +1304,14 @@ fn translated_stream_response(
                         ended = translator.is_ended();
                     }
                     Some(Err(error)) => {
+                        let usage = finish_scanner(&mut scanner);
+                        if let Some(request) = usage_request.take() {
+                            crate::usage::record(request, record_status, usage);
+                        }
                         ended = true;
                         return Some((
                             Err(error),
-                            (input, translator, pending, ended, scanner, None),
+                            (input, translator, pending, ended, None, None, None),
                         ));
                     }
                     None => {
@@ -1278,6 +1338,14 @@ fn translated_stream_response(
         HeaderValue::from_static("no"),
     );
     response
+}
+
+fn finish_scanner(scanner: &mut Option<UsageScanner>) -> crate::usage::TokenUsage {
+    scanner
+        .take()
+        .map_or_else(crate::usage::TokenUsage::default, |mut scanner| {
+            scanner.finish_usage()
+        })
 }
 
 fn translated_response(

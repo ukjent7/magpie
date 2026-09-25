@@ -31,6 +31,8 @@ pub struct Model {
     pub efforts: Vec<String>,
     #[serde(alias = "Temperature")]
     pub temperature: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub price: Option<Price>,
     #[serde(alias = "Images")]
     pub images: bool,
     #[serde(rename = "imageInput", alias = "ImageInput")]
@@ -39,6 +41,25 @@ pub struct Model {
     pub context: usize,
     #[serde(alias = "Keys", skip_serializing_if = "Vec::is_empty")]
     pub keys: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize)]
+#[serde(default)]
+pub struct Price {
+    pub input: f64,
+    pub output: f64,
+    pub cache_read: f64,
+    pub cache_write: f64,
+}
+
+impl Price {
+    pub fn cost(self, input: usize, output: usize, cache_read: usize, cache_write: usize) -> f64 {
+        (input as f64 * self.input
+            + output as f64 * self.output
+            + cache_read as f64 * self.cache_read
+            + cache_write as f64 * self.cache_write)
+            / 1_000_000.0
+    }
 }
 
 #[derive(Default, Deserialize, Serialize)]
@@ -92,6 +113,7 @@ struct CatalogModel {
     temperature: Option<bool>,
     reasoning_options: Vec<ReasoningOption>,
     modalities: Modalities,
+    cost: Option<Price>,
     limit: ModelLimit,
 }
 
@@ -160,6 +182,9 @@ pub fn available_models(provider_id: &str, catalog_id: &str) -> Vec<Model> {
                 if model.context == 0 {
                     model.context = known.context;
                 }
+                if model.price.is_none() {
+                    model.price = known.price;
+                }
                 if known.temperature.is_some() {
                     model.temperature = known.temperature;
                 }
@@ -192,6 +217,13 @@ pub fn exposed_models(provider_id: &str, catalog_id: &str, selected: &[String]) 
     }
 
     available.into_iter().take(MAX_EXPOSED_MODELS).collect()
+}
+
+pub fn price_of(provider_id: &str, model_id: &str) -> Option<Price> {
+    catalog_models(provider_id)
+        .into_iter()
+        .find(|model| model.id == model_id)
+        .and_then(|model| model.price)
 }
 
 pub async fn fetch_models(
@@ -396,6 +428,7 @@ fn catalog_models(provider_id: &str) -> Vec<Model> {
                     released: raw.release_date.clone(),
                     efforts,
                     temperature: raw.temperature,
+                    price: raw.cost,
                     images,
                     image_input: (!raw.modalities.input.is_empty()).then_some(images),
                     context: if raw.limit.input > 0 {
