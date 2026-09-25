@@ -42,6 +42,18 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+      - name: Format sources on CI
+        run: cargo fmt --all
+
+      - name: Upload formatted gateway source
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@v7
+        with:
+          name: formatted-gateway-source
+          path: src/gateway.rs
+          if-no-files-found: error
+          retention-days: 1
+
       - name: Check formatting
         run: cargo fmt --all -- --check
 
