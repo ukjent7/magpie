@@ -719,25 +719,152 @@ pub fn list() -> Result<()> {
         return Ok(());
     }
 
-    for provider in providers {
-        let host = provider.host();
-        let key = if provider.key.is_empty() {
-            "no key".to_owned()
-        } else {
-            mask(&provider.key)
-        };
+    struct Row {
+        name: String,
+        id: String,
+        host: String,
+        key: String,
+        models: String,
+        uses: String,
+    }
+
+    let uses = uses_by_provider();
+    let rows = providers
+        .into_iter()
+        .map(|provider| {
+            let mut name = provider.name.clone();
+            if provider.preset.is_empty() {
+                name.push_str(" (custom)");
+            }
+            let id = if provider.hidden {
+                format!("{} [hidden]", provider.id)
+            } else {
+                provider.id.clone()
+            };
+            let key = if provider.key.is_empty() {
+                provider
+                    .keys
+                    .iter()
+                    .find(|key| !key.off && !key.key.is_empty())
+                    .map(|key| key.key.as_str())
+            } else {
+                Some(provider.key.as_str())
+            };
+            let key = match key {
+                Some(key) => format!("● {}", mask(key)),
+                None if provider.is_local() => "● no key needed".to_owned(),
+                None => "○ no key".to_owned(),
+            };
+            let exposed = crate::catalog::exposed_models(
+                &provider.id,
+                provider.catalog_id(),
+                &provider.models,
+            )
+            .len();
+            let live = crate::catalog::live_models(&provider.id);
+            let models = if live.is_empty() {
+                format!("{exposed} models")
+            } else {
+                format!(
+                    "{exposed} of {} models",
+                    crate::catalog::available_models(&provider.id, provider.catalog_id()).len()
+                )
+            };
+            let mut usage = uses
+                .get(&provider.id)
+                .filter(|agents| !agents.is_empty())
+                .map_or_else(String::new, |agents| format!("← {}", agents.join(", ")));
+            if !provider.fallback.is_empty() {
+                if !usage.is_empty() {
+                    usage.push_str("  ");
+                }
+                usage.push_str("↳ ");
+                usage.push_str(&provider.fallback.join(" → "));
+            }
+
+            Row {
+                name,
+                id,
+                host: provider.host(),
+                key,
+                models,
+                uses: usage,
+            }
+        })
+        .collect::<Vec<_>>();
+    let widths = [
+        rows.iter()
+            .map(|row| row.name.chars().count())
+            .max()
+            .unwrap_or_default(),
+        rows.iter()
+            .map(|row| row.id.chars().count())
+            .max()
+            .unwrap_or_default(),
+        rows.iter()
+            .map(|row| row.host.chars().count())
+            .max()
+            .unwrap_or_default(),
+        rows.iter()
+            .map(|row| row.key.chars().count())
+            .max()
+            .unwrap_or_default(),
+        rows.iter()
+            .map(|row| row.models.chars().count())
+            .max()
+            .unwrap_or_default(),
+    ];
+    for row in rows {
         println!(
-            "  {:20} {:16} {:28} {:20} {} models{}",
-            provider.name,
-            provider.id,
-            host,
-            key,
-            crate::catalog::exposed_models(&provider.id, provider.catalog_id(), &provider.models,)
-                .len(),
-            if provider.hidden { "  [hidden]" } else { "" }
+            "  {}  {}  {}  {}  {}  {}",
+            pad_cell(&row.name, widths[0]),
+            pad_cell(&row.id, widths[1]),
+            pad_cell(&row.host, widths[2]),
+            pad_cell(&row.key, widths[3]),
+            pad_cell(&row.models, widths[4]),
+            row.uses
         );
     }
     Ok(())
+}
+
+fn uses_by_provider() -> HashMap<String, Vec<String>> {
+    let mut uses = HashMap::<String, Vec<String>>::new();
+    for agent in crate::agent::all()
+        .into_iter()
+        .filter(crate::agent::Agent::is_detected)
+    {
+        let Some(field) = agent.spec.fields.first() else {
+            continue;
+        };
+        let Ok(values) = agent.values() else {
+            continue;
+        };
+        let Some(value) = values
+            .iter()
+            .find(|(key, _)| *key == field.key)
+            .map(|(_, value)| value)
+        else {
+            continue;
+        };
+        let value = value.strip_prefix("magpie/").unwrap_or(value);
+        if value.starts_with("group/") {
+            continue;
+        }
+        if let Some((provider, _)) = value.split_once('/') {
+            uses.entry(provider.to_owned())
+                .or_default()
+                .push(agent.spec.name.to_owned());
+        }
+    }
+    uses
+}
+
+fn pad_cell(value: &str, width: usize) -> String {
+    format!(
+        "{value}{}",
+        " ".repeat(width.saturating_sub(value.chars().count()))
+    )
 }
 
 pub fn presets() -> Result<()> {
