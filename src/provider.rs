@@ -823,8 +823,7 @@ async fn models_command(id: &str, selected: &[String]) -> Result<()> {
     let provider_headers = &provider.headers;
     let fetched = futures_util::future::join_all(keys.iter().map(|(key, protocol)| async move {
         let endpoints = model_endpoints(provider_ref, protocol)?;
-        crate::catalog::fetch_models(&endpoints, key, provider_headers)
-            .await
+        crate::catalog::fetch_models(&endpoints, key, provider_headers).await
     }))
     .await;
 
