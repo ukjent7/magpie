@@ -664,7 +664,7 @@ async fn send_upstream(
             )
         }
         Some(provider::ProviderAccount::Copilot { account }) => {
-            let session = crate::copilot::session(&state.client, &account.github_token).await?;
+            let session = crate::copilot::session(&state.client, account).await?;
             crate::copilot::accept_model(&state.client, account, &session, model).await;
             let base = if session.api_endpoint.is_empty() {
                 upstream_protocol.base(provider)

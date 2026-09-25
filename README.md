@@ -178,7 +178,8 @@ An agent you have signed in to is a subscription with models behind it, so
 magpie offers it as a provider too. Claude Code (an OAuth login in the macOS
 Keychain or `~/.claude/.credentials.json`), Codex (a ChatGPT login in
 `~/.codex/auth.json`), Copilot (a GitHub login in
-`~/.config/github-copilot/apps.json`) and Devin (`devin auth login`, kept in
+`~/.config/github-copilot/apps.json` or the Copilot CLI's
+`~/.copilot/config.json`) and Devin (`devin auth login`, kept in
 `~/.local/share/devin/credentials.toml`) appear in `magpie providers` and in
 the Providers tab as *signed in as …*, with their models spelled
 `claude/claude-sonnet-5`, `codex/gpt-5.5`, `copilot/claude-sonnet-4.5` or

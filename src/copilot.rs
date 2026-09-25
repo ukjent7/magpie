@@ -2,36 +2,45 @@ use std::{
     collections::{HashMap, HashSet},
     env,
     path::PathBuf,
-    sync::LazyLock,
-    time::Duration,
+    sync::{LazyLock, Mutex as StdMutex},
+    time::{Duration, Instant},
 };
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+use std::process::Command;
+
 use anyhow::{Context, Result, ensure};
+use jsonc_parser::{ParseOptions, cst::CstRootNode};
 use reqwest::{Client, header};
 use serde::Deserialize;
 use serde_json::Value;
 use tokio::sync::Mutex;
 
 const TOKEN_URL: &str = "https://api.github.com/copilot_internal/v2/token";
+const COPILOT_USER_URL: &str = "https://api.github.com/copilot_internal/user";
 const DEFAULT_API: &str = "https://api.githubcopilot.com";
 const MAX_TOKEN_RESPONSE_BYTES: usize = 1 << 20;
 const MAX_MODEL_RESPONSE_BYTES: usize = 4 << 20;
 
-static SESSION_CACHE: LazyLock<Mutex<HashMap<String, Session>>> =
+static SESSION_CACHE: LazyLock<Mutex<HashMap<(String, bool), Session>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 static PENDING_TERMS: LazyLock<Mutex<HashMap<String, HashSet<String>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+static CLI_SECRET_CACHE: LazyLock<StdMutex<HashMap<String, (Instant, Option<String>)>>> =
+    LazyLock::new(|| StdMutex::new(HashMap::new()));
 
 #[derive(Clone)]
 pub(crate) struct Account {
     pub(crate) github_token: String,
     pub(crate) user: String,
+    direct: bool,
 }
 
 #[derive(Clone)]
 pub(crate) struct Session {
     pub(crate) token: String,
     pub(crate) api_endpoint: String,
+    direct: bool,
     expires_at: i64,
 }
 
@@ -54,6 +63,27 @@ struct TokenResponse {
 #[serde(default)]
 struct TokenEndpoints {
     api: String,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct CopilotUserResponse {
+    endpoints: TokenEndpoints,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct CopilotCliUser {
+    host: String,
+    login: String,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+struct CopilotCliConfig {
+    last_logged_in_user: Option<CopilotCliUser>,
+    logged_in_users: Vec<CopilotCliUser>,
+    copilot_tokens: HashMap<String, String>,
 }
 
 #[derive(Default, Deserialize)]
@@ -97,30 +127,114 @@ struct ModelPolicy {
 }
 
 pub(crate) fn signed_in_account() -> Option<Account> {
-    let config_dir = config_directory()?;
-    for filename in ["apps.json", "hosts.json"] {
-        let Ok(contents) = std::fs::read(config_dir.join("github-copilot").join(filename)) else {
-            continue;
-        };
-        let Ok(apps) = serde_json::from_slice::<HashMap<String, StoredApp>>(&contents) else {
-            continue;
-        };
-        let mut hosts = apps.into_iter().collect::<Vec<_>>();
-        hosts.sort_by(|left, right| left.0.cmp(&right.0));
-        for (host, app) in hosts {
-            if host.starts_with("github.com") && !app.oauth_token.is_empty() {
-                return Some(Account {
-                    github_token: app.oauth_token,
-                    user: app.user,
-                });
+    if let Some(config_dir) = config_directory() {
+        for filename in ["apps.json", "hosts.json"] {
+            let Ok(contents) = std::fs::read(config_dir.join("github-copilot").join(filename))
+            else {
+                continue;
+            };
+            let Ok(apps) = serde_json::from_slice::<HashMap<String, StoredApp>>(&contents) else {
+                continue;
+            };
+            let mut hosts = apps.into_iter().collect::<Vec<_>>();
+            hosts.sort_by(|left, right| left.0.cmp(&right.0));
+            for (host, app) in hosts {
+                if host.starts_with("github.com") && !app.oauth_token.is_empty() {
+                    return Some(Account {
+                        github_token: app.oauth_token,
+                        user: app.user,
+                        direct: false,
+                    });
+                }
             }
         }
+    }
+    copilot_cli_account()
+}
+
+fn copilot_cli_account() -> Option<Account> {
+    let home = env::var_os("COPILOT_HOME")
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| home_directory().map(|home| home.join(".copilot")))?;
+    let contents = std::fs::read_to_string(home.join("config.json")).ok()?;
+    let root = CstRootNode::parse(&contents, &ParseOptions::default()).ok()?;
+    let config: CopilotCliConfig = serde_json::from_value(root.value()?.to_serde_value()?).ok()?;
+    let users = config
+        .last_logged_in_user
+        .into_iter()
+        .chain(config.logged_in_users);
+    for user in users {
+        if user.login.is_empty() || (!user.host.is_empty() && user.host != "https://github.com") {
+            continue;
+        }
+        let key = format!("https://github.com:{}", user.login);
+        let token = config
+            .copilot_tokens
+            .get(&key)
+            .filter(|token| !token.is_empty())
+            .cloned()
+            .or_else(|| copilot_cli_secret(&key));
+        let Some(token) = token else {
+            continue;
+        };
+        return Some(Account {
+            github_token: token,
+            user: user.login,
+            direct: true,
+        });
     }
     None
 }
 
+fn copilot_cli_secret(account: &str) -> Option<String> {
+    let mut cache = CLI_SECRET_CACHE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let now = Instant::now();
+    if let Some((at, token)) = cache.get(account) {
+        let ttl = if token.is_some() {
+            Duration::from_secs(60 * 60)
+        } else {
+            Duration::from_secs(10 * 60)
+        };
+        if now.saturating_duration_since(*at) < ttl {
+            return token.clone();
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    let output = Command::new("security")
+        .args([
+            "find-generic-password",
+            "-s",
+            "copilot-cli",
+            "-a",
+            account,
+            "-w",
+        ])
+        .output();
+    #[cfg(target_os = "linux")]
+    let output = Command::new("secret-tool")
+        .args(["lookup", "service", "copilot-cli", "account", account])
+        .output();
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    let output: std::io::Result<std::process::Output> = Err(std::io::ErrorKind::Unsupported.into());
+
+    let token = output
+        .ok()
+        .filter(|result| result.status.success())
+        .and_then(|result| {
+            let token = String::from_utf8_lossy(&result.stdout).trim().to_owned();
+            (!token.is_empty()).then_some(token)
+        });
+    cache.insert(account.to_owned(), (now, token.clone()));
+    token
+}
+
 fn config_directory() -> Option<PathBuf> {
     env::var_os("XDG_CONFIG_HOME")
+        .filter(|path| !path.is_empty())
         .map(PathBuf::from)
         .or_else(|| home_directory().map(|home| home.join(".config")))
 }
@@ -133,12 +247,43 @@ fn home_directory() -> Option<PathBuf> {
     env::var_os(variable).map(PathBuf::from)
 }
 
-pub(crate) async fn session(client: &Client, github_token: &str) -> Result<Session> {
+pub(crate) async fn session(client: &Client, account: &Account) -> Result<Session> {
+    let github_token = &account.github_token;
     let mut sessions = SESSION_CACHE.lock().await;
-    if let Some(session) = sessions.get(github_token).filter(|session| {
+    let cache_key = (github_token.clone(), account.direct);
+    if let Some(session) = sessions.get(&cache_key).filter(|session| {
         session.expires_at > time::OffsetDateTime::now_utc().unix_timestamp() + 120
     }) {
         return Ok(session.clone());
+    }
+
+    if account.direct {
+        let mut response = client
+            .get(COPILOT_USER_URL)
+            .header(header::AUTHORIZATION, format!("token {github_token}"))
+            .header(header::ACCEPT, "application/json")
+            .header("Editor-Version", "copilot/1.0.88")
+            .header("Copilot-Integration-Id", "copilot-developer-cli")
+            .header("X-GitHub-Api-Version", "2026-07-01")
+            .header("User-Agent", "copilot/1.0.88")
+            .send()
+            .await
+            .context("request Copilot CLI account endpoint")?;
+        ensure!(
+            response.status().is_success(),
+            "Copilot CLI sign-in was refused; run `copilot login` again"
+        );
+        let contents = read_limited(&mut response, MAX_TOKEN_RESPONSE_BYTES).await?;
+        let user: CopilotUserResponse =
+            serde_json::from_slice(&contents).context("parse Copilot CLI account endpoint")?;
+        let session = Session {
+            token: github_token.clone(),
+            api_endpoint: user.endpoints.api,
+            direct: true,
+            expires_at: time::OffsetDateTime::now_utc().unix_timestamp() + 30 * 60,
+        };
+        sessions.insert(cache_key, session.clone());
+        return Ok(session);
     }
 
     let mut response = client
@@ -166,9 +311,10 @@ pub(crate) async fn session(client: &Client, github_token: &str) -> Result<Sessi
     let session = Session {
         token: token.token,
         api_endpoint: token.endpoints.api,
+        direct: false,
         expires_at: token.expires_at,
     };
-    sessions.insert(github_token.to_owned(), session.clone());
+    sessions.insert(cache_key, session.clone());
     Ok(session)
 }
 
@@ -186,22 +332,41 @@ pub(crate) fn upstream_headers(
         reqwest::header::HeaderValue::from_str(&format!("Bearer {}", session.token))
             .context("Copilot session token cannot be used as an HTTP header")?,
     );
-    headers.insert(
-        "Editor-Version",
-        reqwest::header::HeaderValue::from_static("vscode/1.104.0"),
-    );
-    headers.insert(
-        "Editor-Plugin-Version",
-        reqwest::header::HeaderValue::from_static("copilot-chat/0.31.0"),
-    );
-    headers.insert(
-        "Copilot-Integration-Id",
-        reqwest::header::HeaderValue::from_static("vscode-chat"),
-    );
-    headers.insert(
-        "User-Agent",
-        reqwest::header::HeaderValue::from_static("GitHubCopilotChat/0.31.0"),
-    );
+    if session.direct {
+        headers.insert(
+            "Editor-Version",
+            reqwest::header::HeaderValue::from_static("copilot/1.0.88"),
+        );
+        headers.insert(
+            "Copilot-Integration-Id",
+            reqwest::header::HeaderValue::from_static("copilot-developer-cli"),
+        );
+        headers.insert(
+            "X-GitHub-Api-Version",
+            reqwest::header::HeaderValue::from_static("2026-07-01"),
+        );
+        headers.insert(
+            "User-Agent",
+            reqwest::header::HeaderValue::from_static("copilot/1.0.88"),
+        );
+    } else {
+        headers.insert(
+            "Editor-Version",
+            reqwest::header::HeaderValue::from_static("vscode/1.104.0"),
+        );
+        headers.insert(
+            "Editor-Plugin-Version",
+            reqwest::header::HeaderValue::from_static("copilot-chat/0.31.0"),
+        );
+        headers.insert(
+            "Copilot-Integration-Id",
+            reqwest::header::HeaderValue::from_static("vscode-chat"),
+        );
+        headers.insert(
+            "User-Agent",
+            reqwest::header::HeaderValue::from_static("GitHubCopilotChat/0.31.0"),
+        );
+    }
     headers.insert(
         "Openai-Intent",
         reqwest::header::HeaderValue::from_static("conversation-panel"),
@@ -262,7 +427,7 @@ pub(crate) async fn refresh_models(account: &Account) -> Result<usize> {
         .timeout(Duration::from_secs(8))
         .build()
         .context("create Copilot models client")?;
-    let session = session(&client, &account.github_token).await?;
+    let session = session(&client, account).await?;
     let base = if session.api_endpoint.is_empty() {
         DEFAULT_API
     } else {
