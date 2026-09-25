@@ -50,7 +50,9 @@ pub fn load() -> Settings {
 }
 
 pub fn write_json(path: &std::path::Path, value: &impl Serialize) -> Result<()> {
-    let parent = path.parent().context("settings path has no parent directory")?;
+    let parent = path
+        .parent()
+        .context("settings path has no parent directory")?;
     fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     let mut bytes = serde_json::to_vec_pretty(value).context("serialize settings")?;
     bytes.push(b'\n');

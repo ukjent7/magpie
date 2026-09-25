@@ -255,13 +255,13 @@ fn delete_yaml_many(text: &str, key_paths: &[&str]) -> Result<Option<String>> {
 }
 
 fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
     use std::{
         fs::{self, OpenOptions},
         io::Write,
         sync::atomic::{AtomicU64, Ordering},
     };
-    #[cfg(unix)]
-    use std::os::unix::fs::PermissionsExt;
 
     static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
 
@@ -272,9 +272,13 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
 
     #[cfg(unix)]
-    let mode = fs::metadata(path).ok().map(|metadata| metadata.permissions().mode() & 0o777);
+    let mode = fs::metadata(path)
+        .ok()
+        .map(|metadata| metadata.permissions().mode() & 0o777);
 
-    let file_name = path.file_name().context("configuration path has no file name")?;
+    let file_name = path
+        .file_name()
+        .context("configuration path has no file name")?;
     let mut temp_path = None;
     for _ in 0..16 {
         let id = NEXT_TEMP.fetch_add(1, Ordering::Relaxed);
@@ -284,7 +288,11 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
             std::process::id(),
             id
         ));
-        match OpenOptions::new().write(true).create_new(true).open(&candidate) {
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&candidate)
+        {
             Ok(mut file) => {
                 let mut result = file.write_all(bytes).map_err(anyhow::Error::from);
                 #[cfg(unix)]
@@ -335,7 +343,10 @@ mod tests {
 
         assert!(updated.contains("// keep this note"));
         assert!(updated.contains("\"other\": true"));
-        assert_eq!(get_jsonc(&updated, "model").unwrap().as_deref(), Some("new"));
+        assert_eq!(
+            get_jsonc(&updated, "model").unwrap().as_deref(),
+            Some("new")
+        );
     }
 
     #[test]
@@ -344,6 +355,9 @@ mod tests {
         let updated = set_yaml_many(original, &[("model.name", "new")]).unwrap();
 
         assert!(updated.contains("# keep this note"));
-        assert_eq!(get_yaml(&updated, "model.name").unwrap().as_deref(), Some("new"));
+        assert_eq!(
+            get_yaml(&updated, "model.name").unwrap().as_deref(),
+            Some("new")
+        );
     }
 }

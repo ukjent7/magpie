@@ -31,7 +31,13 @@ pub struct Agent {
 }
 
 const fn field(key: &'static str, label: &'static str, path: &'static str) -> FieldSpec {
-    FieldSpec { key, label, path, provider_path: None, choices: &[] }
+    FieldSpec {
+        key,
+        label,
+        path,
+        provider_path: None,
+        choices: &[],
+    }
 }
 
 const fn choices_field(
@@ -40,7 +46,13 @@ const fn choices_field(
     path: &'static str,
     choices: &'static [&'static str],
 ) -> FieldSpec {
-    FieldSpec { key, label, path, provider_path: None, choices }
+    FieldSpec {
+        key,
+        label,
+        path,
+        provider_path: None,
+        choices,
+    }
 }
 
 const fn provider_model(
@@ -49,7 +61,13 @@ const fn provider_model(
     provider_path: &'static str,
     model_path: &'static str,
 ) -> FieldSpec {
-    FieldSpec { key, label, path: model_path, provider_path: Some(provider_path), choices: &[] }
+    FieldSpec {
+        key,
+        label,
+        path: model_path,
+        provider_path: Some(provider_path),
+        choices: &[],
+    }
 }
 
 const CLAUDE_MODEL: FieldSpec = field("model", "model", "model");
@@ -74,10 +92,18 @@ const PI_EFFORT: FieldSpec = choices_field(
 const GOOSE_MODEL: FieldSpec = provider_model("model", "model", "GOOSE_PROVIDER", "GOOSE_MODEL");
 const CURSOR_MODEL: FieldSpec = field("model", "model", "model.modelId");
 const COPILOT_MODEL: FieldSpec = field("model", "model", "model");
-const CRUSH_LARGE: FieldSpec =
-    provider_model("model", "large", "models.large.provider", "models.large.model");
-const CRUSH_SMALL: FieldSpec =
-    provider_model("small", "small", "models.small.provider", "models.small.model");
+const CRUSH_LARGE: FieldSpec = provider_model(
+    "model",
+    "large",
+    "models.large.provider",
+    "models.large.model",
+);
+const CRUSH_SMALL: FieldSpec = provider_model(
+    "small",
+    "small",
+    "models.small.provider",
+    "models.small.model",
+);
 const COMMAND_CODE_MODEL: FieldSpec = field("model", "model", "model");
 const OMP_MODEL: FieldSpec = field("model", "model", "modelRoles.default");
 const DEVIN_MODEL: FieldSpec = field("model", "model", "agent.model");
@@ -215,7 +241,10 @@ pub static ALL_AGENTS: &[AgentSpec] = &[
 pub fn all() -> Vec<Agent> {
     ALL_AGENTS
         .iter()
-        .map(|spec| Agent { spec, path: resolve_path(spec) })
+        .map(|spec| Agent {
+            spec,
+            path: resolve_path(spec),
+        })
         .collect()
 }
 
@@ -245,11 +274,18 @@ pub fn find(query: &str) -> Result<Agent> {
         [agent] => Ok((*agent).clone()),
         [] => bail!(
             "unknown agent {query:?}; supported agents: {}",
-            ALL_AGENTS.iter().map(|agent| agent.id).collect::<Vec<_>>().join(", ")
+            ALL_AGENTS
+                .iter()
+                .map(|agent| agent.id)
+                .collect::<Vec<_>>()
+                .join(", ")
         ),
         many => bail!(
             "{query:?} is ambiguous: {}",
-            many.iter().map(|agent| agent.spec.id).collect::<Vec<_>>().join(", ")
+            many.iter()
+                .map(|agent| agent.spec.id)
+                .collect::<Vec<_>>()
+                .join(", ")
         ),
     }
 }
@@ -267,8 +303,8 @@ impl Agent {
             .fields
             .iter()
             .map(|field| {
-                let model = config::get(&self.path, self.spec.format, field.path)?
-                    .unwrap_or_default();
+                let model =
+                    config::get(&self.path, self.spec.format, field.path)?.unwrap_or_default();
                 let value = match field.provider_path {
                     Some(provider_path) => {
                         let provider = config::get(&self.path, self.spec.format, provider_path)?
@@ -298,17 +334,18 @@ impl Agent {
                 anyhow::anyhow!(
                     "{} has no field {field_name:?}; fields: {}",
                     self.spec.name,
-                    self.spec.fields.iter().map(|field| field.key).collect::<Vec<_>>().join(", ")
+                    self.spec
+                        .fields
+                        .iter()
+                        .map(|field| field.key)
+                        .collect::<Vec<_>>()
+                        .join(", ")
                 )
             })?;
 
         if value.is_empty() {
             if let Some(provider_path) = field.provider_path {
-                config::delete_many(
-                    &self.path,
-                    self.spec.format,
-                    &[field.path, provider_path],
-                )?;
+                config::delete_many(&self.path, self.spec.format, &[field.path, provider_path])?;
             } else {
                 config::delete(&self.path, self.spec.format, field.path)?;
             }
@@ -395,7 +432,13 @@ fn executable_exists(name: &str) -> bool {
     };
     let suffixes = if cfg!(windows) {
         env::var_os("PATHEXT")
-            .map(|value| value.to_string_lossy().split(';').map(str::to_owned).collect::<Vec<_>>())
+            .map(|value| {
+                value
+                    .to_string_lossy()
+                    .split(';')
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>()
+            })
             .unwrap_or_else(|| vec![".EXE".to_owned(), ".BAT".to_owned(), ".CMD".to_owned()])
     } else {
         vec![String::new()]

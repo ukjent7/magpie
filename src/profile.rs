@@ -17,7 +17,10 @@ pub fn list(args: &[String]) -> Result<()> {
         return Ok(());
     }
     for (name, values) in profiles {
-        let count = values.keys().filter(|key| key.as_str() != "library").count();
+        let count = values
+            .keys()
+            .filter(|key| key.as_str() != "library")
+            .count();
         println!("  {name}  {count} settings");
     }
     Ok(())
@@ -89,7 +92,12 @@ pub fn apply(args: &[String]) -> Result<()> {
         };
         match agent::find(agent_id) {
             Ok(current) if current.is_detected() => {
-                if !current.spec.fields.iter().any(|candidate| candidate.key == field) {
+                if !current
+                    .spec
+                    .fields
+                    .iter()
+                    .any(|candidate| candidate.key == field)
+                {
                     continue;
                 }
                 let current_value = current

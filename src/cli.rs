@@ -132,7 +132,13 @@ fn list_agents(detected_only: bool) -> Result<()> {
             fields.join("  ·  ")
         };
         let marker = if hidden { " [hidden]" } else { "" };
-        println!("  {:20} {}{}  {}", agent.spec.name, current, marker, agent.path.display());
+        println!(
+            "  {:20} {}{}  {}",
+            agent.spec.name,
+            current,
+            marker,
+            agent.path.display()
+        );
     }
     Ok(())
 }
@@ -148,7 +154,11 @@ fn handle_agent(name: &str, args: &[String]) -> Result<()> {
                     .iter()
                     .find(|(key, _)| *key == field.key)
                     .map_or("", |(_, value)| value.as_str());
-                println!("  {:12} {}", field.label, if value.is_empty() { "—" } else { value });
+                println!(
+                    "  {:12} {}",
+                    field.label,
+                    if value.is_empty() { "—" } else { value }
+                );
             }
             Ok(())
         }
@@ -165,11 +175,17 @@ fn handle_agent(name: &str, args: &[String]) -> Result<()> {
                     .or_else(|| agent.spec.fields.first())
             }
             .context("agent has no editable fields in the Rust migration")?;
-            set_agent_field(&agent, field.key, if value == "default" { "" } else { value })
+            set_agent_field(
+                &agent,
+                field.key,
+                if value == "default" { "" } else { value },
+            )
         }
-        [field_name, value] => {
-            set_agent_field(&agent, field_name, if value == "default" { "" } else { value })
-        }
+        [field_name, value] => set_agent_field(
+            &agent,
+            field_name,
+            if value == "default" { "" } else { value },
+        ),
         _ => bail!("usage: magpie <agent> [field] [value]"),
     }
 }
