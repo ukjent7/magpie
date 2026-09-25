@@ -2,7 +2,6 @@ use std::{
     collections::HashSet,
     fs,
     path::PathBuf,
-    str::FromStr,
     time::{Duration, Instant},
 };
 
