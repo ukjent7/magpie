@@ -66,10 +66,7 @@ async fn run(cli: Cli) -> Result<()> {
     }
 
     match args.as_slice() {
-        [] => {
-            println!("{}", usage());
-            Ok(())
-        }
+        [] => crate::tui::command(&[]).await,
         [command] if command == "help" => {
             println!("{}", usage());
             Ok(())
@@ -247,6 +244,7 @@ fn usage() -> String {
     [
         "magpie — one place to pick every agent's model",
         "",
+        "  magpie                          open the terminal interface",
         "  magpie agents                   list every supported agent",
         "  magpie ls                       list agents detected on this machine",
         "  magpie tui                      open the terminal interface",
