@@ -108,7 +108,7 @@ fn list_agents(detected_only: bool) -> Result<()> {
     for (agent, detected) in entries {
         let hidden = settings.agents_hidden.iter().any(|id| id == agent.spec.id);
         if !detected {
-            println!("  {:20} {}", agent.spec.name, "not detected");
+            println!("  {:20} not detected", agent.spec.name);
             continue;
         }
 

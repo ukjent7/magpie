@@ -257,8 +257,7 @@ pub fn find(query: &str) -> Result<Agent> {
             || agent
                 .spec
                 .aliases
-                .iter()
-                .any(|alias| *alias == query.as_str())
+                .contains(&query.as_str())
     }) {
         return Ok(found.clone());
     }

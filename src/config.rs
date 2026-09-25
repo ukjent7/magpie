@@ -187,7 +187,7 @@ fn set_toml_many(text: &str, assignments: &[(&str, &str)]) -> Result<String> {
         let mut table = document.as_table_mut();
         for key in &parts[..parts.len() - 1] {
             let item = table
-                .entry(*key)
+                .entry(key)
                 .or_insert_with(|| Item::Table(Table::new()));
             table = item
                 .as_table_mut()
@@ -213,11 +213,11 @@ fn remove_toml_path(table: &mut Table, parts: &[&str]) -> bool {
         return false;
     };
     if tail.is_empty() {
-        return table.remove(*head).is_some();
+        return table.remove(head).is_some();
     }
 
     table
-        .get_mut(*head)
+        .get_mut(head)
         .and_then(Item::as_table_mut)
         .is_some_and(|nested| remove_toml_path(nested, tail))
 }
@@ -295,12 +295,10 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
             Ok(mut file) => {
                 let mut result = file.write_all(bytes).map_err(anyhow::Error::from);
                 #[cfg(unix)]
-                if result.is_ok() {
-                    if let Some(mode) = mode {
-                        result = file
-                            .set_permissions(fs::Permissions::from_mode(mode))
-                            .with_context(|| format!("preserve permissions on {}", path.display()));
-                    }
+                if result.is_ok() && let Some(mode) = mode {
+                    result = file
+                        .set_permissions(fs::Permissions::from_mode(mode))
+                        .with_context(|| format!("preserve permissions on {}", path.display()));
                 }
                 if result.is_ok() {
                     result = file.sync_all().map_err(anyhow::Error::from);
