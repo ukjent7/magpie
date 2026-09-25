@@ -17,6 +17,7 @@ use crate::provider::{self, GatewayProvider};
 
 const DEFAULT_ADDR: &str = "127.0.0.1:3425";
 const MAX_REQUEST_BYTES: usize = 64 * 1024 * 1024;
+const MAX_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
 const UPSTREAM_TIMEOUT: Duration = Duration::from_secs(600);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 
@@ -233,7 +234,12 @@ async fn forward(
         Ok(providers) => providers,
         Err(error) => return api_error_for(protocol, error.status, error.message),
     };
-    let (provider, upstream_model) = match resolve_model(&model, &providers, protocol) {
+    let (provider, upstream_model, upstream_protocol) = match resolve_model(
+        &model,
+        &providers,
+        protocol,
+        path_override.is_none(),
+    ) {
         Ok(result) => result,
         Err(ResolveError::Unknown) => {
             return api_error_for(
@@ -250,14 +256,29 @@ async fn forward(
             );
         }
     };
-    let Some(object) = body.as_object_mut() else {
+    let streaming = body.get("stream").and_then(Value::as_bool).unwrap_or(false);
+    let translated = upstream_protocol != protocol;
+    if translated {
+        body = match crate::translation::request(&body, protocol, upstream_protocol, upstream_model) {
+            Ok(body) => body,
+            Err(error) => {
+                eprintln!("magpie: translate request from {protocol:?} to {upstream_protocol:?}: {error:#}");
+                return api_error_for(
+                    protocol,
+                    StatusCode::BAD_REQUEST,
+                    "request cannot be represented by the selected provider API",
+                );
+            }
+        };
+    } else if let Some(object) = body.as_object_mut() {
+        object.insert("model".to_owned(), json!(upstream_model));
+    } else {
         return api_error_for(
             protocol,
             StatusCode::BAD_REQUEST,
             "request body must be a JSON object",
         );
-    };
-    object.insert("model".to_owned(), json!(upstream_model));
+    }
     let body = match serde_json::to_vec(&body) {
         Ok(body) => body,
         Err(error) => {
@@ -271,8 +292,8 @@ async fn forward(
     };
 
     let upstream_url = match upstream_url(
-        protocol.base(provider),
-        path_override.unwrap_or_else(|| protocol.path()),
+        upstream_protocol.base(provider),
+        path_override.unwrap_or_else(|| upstream_protocol.path()),
         parts.uri.query(),
     ) {
         Ok(url) => url,
@@ -288,7 +309,7 @@ async fn forward(
             );
         }
     };
-    let headers = match upstream_headers(provider, protocol, &parts.headers) {
+    let headers = match upstream_headers(provider, upstream_protocol, &parts.headers) {
         Ok(headers) => headers,
         Err(message) => return api_error_for(protocol, StatusCode::BAD_GATEWAY, message),
     };
@@ -310,11 +331,73 @@ async fn forward(
             return api_error_for(protocol, StatusCode::BAD_GATEWAY, "provider request failed");
         }
     };
-    relay(response)
+    if !translated || !response.status().is_success() {
+        return relay(response);
+    }
+
+    let status = response.status();
+    let upstream_headers = response.headers().clone();
+    let mut response = response;
+    let mut bytes = Vec::new();
+    loop {
+        let chunk = match response.chunk().await {
+            Ok(Some(chunk)) => chunk,
+            Ok(None) => break,
+            Err(error) => {
+                eprintln!("magpie: read translated response from {}: {error}", provider.id);
+                return api_error_for(protocol, StatusCode::BAD_GATEWAY, "provider response failed");
+            }
+        };
+        if bytes.len().saturating_add(chunk.len()) > MAX_RESPONSE_BYTES {
+            return api_error_for(
+                protocol,
+                StatusCode::BAD_GATEWAY,
+                "provider response exceeds the gateway size limit",
+            );
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    let upstream_body: Value = match serde_json::from_slice(&bytes) {
+        Ok(body) => body,
+        Err(error) => {
+            eprintln!("magpie: parse translated response from {}: {error}", provider.id);
+            return api_error_for(protocol, StatusCode::BAD_GATEWAY, "provider returned invalid JSON");
+        }
+    };
+    let translated_body = match crate::translation::response(
+        &upstream_body,
+        upstream_protocol,
+        protocol,
+        &model,
+    ) {
+        Ok(body) => body,
+        Err(error) => {
+            eprintln!("magpie: translate response from {upstream_protocol:?} to {protocol:?}: {error:#}");
+            return api_error_for(protocol, StatusCode::BAD_GATEWAY, "provider response could not be translated");
+        }
+    };
+    let bytes = if streaming {
+        match crate::translation::stream(&translated_body, protocol, &model) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                eprintln!("magpie: encode translated stream for {protocol:?}: {error:#}");
+                return api_error_for(protocol, StatusCode::BAD_GATEWAY, "provider response could not be streamed");
+            }
+        }
+    } else {
+        match serde_json::to_vec(&translated_body) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                eprintln!("magpie: serialize translated response: {error}");
+                return api_error_for(protocol, StatusCode::BAD_GATEWAY, "provider response could not be translated");
+            }
+        }
+    };
+    translated_response(status, &upstream_headers, bytes, streaming)
 }
 
-#[derive(Clone, Copy)]
-enum ApiProtocol {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ApiProtocol {
     Chat,
     Responses,
     Anthropic,
@@ -352,33 +435,56 @@ fn resolve_model<'a>(
     requested: &'a str,
     providers: &'a [GatewayProvider],
     protocol: ApiProtocol,
-) -> std::result::Result<(&'a GatewayProvider, &'a str), ResolveError> {
+    allow_translation: bool,
+) -> std::result::Result<(&'a GatewayProvider, &'a str, ApiProtocol), ResolveError> {
     if let Some((provider_id, model)) = requested.split_once('/') {
         if model.is_empty() {
             return Err(ResolveError::Unknown);
         }
         return providers
             .iter()
-            .find(|provider| {
+            .filter(|provider| {
                 !provider.hidden
-                    && !protocol.base(provider).is_empty()
                     && (provider.id == provider_id
                         || provider.name.eq_ignore_ascii_case(provider_id))
             })
-            .map(|provider| (provider, model))
+            .find_map(|provider| {
+                endpoint_for(protocol, provider, allow_translation)
+                    .map(|upstream| (provider, model, upstream))
+            })
             .ok_or(ResolveError::Unknown);
     }
 
-    let mut matches = providers.iter().filter(|provider| {
-        !provider.hidden
-            && !protocol.base(provider).is_empty()
-            && provider.models.iter().any(|model| model == requested)
+    let mut matches = providers.iter().filter_map(|provider| {
+        if provider.hidden || !provider.models.iter().any(|model| model == requested) {
+            return None;
+        }
+        endpoint_for(protocol, provider, allow_translation).map(|upstream| (provider, upstream))
     });
-    let provider = matches.next().ok_or(ResolveError::Unknown)?;
+    let (provider, upstream) = matches.next().ok_or(ResolveError::Unknown)?;
     if matches.next().is_some() {
         return Err(ResolveError::Ambiguous);
     }
-    Ok((provider, requested))
+    Ok((provider, requested, upstream))
+}
+
+fn endpoint_for(
+    protocol: ApiProtocol,
+    provider: &GatewayProvider,
+    allow_translation: bool,
+) -> Option<ApiProtocol> {
+    if !protocol.base(provider).is_empty() {
+        return Some(protocol);
+    }
+    if !allow_translation {
+        return None;
+    }
+    let alternative = match protocol {
+        ApiProtocol::Chat => ApiProtocol::Anthropic,
+        ApiProtocol::Anthropic => ApiProtocol::Chat,
+        ApiProtocol::Responses => return None,
+    };
+    (!alternative.base(provider).is_empty()).then_some(alternative)
 }
 
 fn upstream_url(base: &str, path_suffix: &str, query: Option<&str>) -> Result<Url> {
@@ -471,6 +577,64 @@ fn relay(upstream: reqwest::Response) -> Response {
             continue;
         }
         response.headers_mut().append(name.clone(), value.clone());
+    }
+    response
+}
+
+fn translated_response(
+    status: StatusCode,
+    upstream_headers: &HeaderMap,
+    body: Vec<u8>,
+    streaming: bool,
+) -> Response {
+    let mut response = Response::new(Body::from(body));
+    *response.status_mut() = status;
+
+    let connection_tokens = upstream_headers
+        .get_all(header::CONNECTION)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|value| value.split(','))
+        .map(str::trim)
+        .collect::<HashSet<_>>();
+    for (name, value) in upstream_headers {
+        let name_text = name.as_str();
+        if matches!(
+            name_text,
+            "connection"
+                | "content-encoding"
+                | "content-length"
+                | "content-type"
+                | "keep-alive"
+                | "proxy-authenticate"
+                | "proxy-authorization"
+                | "te"
+                | "trailer"
+                | "transfer-encoding"
+                | "upgrade"
+        ) || connection_tokens.contains(name_text)
+        {
+            continue;
+        }
+        response.headers_mut().append(name.clone(), value.clone());
+    }
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        if streaming {
+            HeaderValue::from_static("text/event-stream; charset=utf-8")
+        } else {
+            HeaderValue::from_static("application/json")
+        },
+    );
+    if streaming {
+        response.headers_mut().insert(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static("no-cache, no-transform"),
+        );
+        response.headers_mut().insert(
+            HeaderName::from_static("x-accel-buffering"),
+            HeaderValue::from_static("no"),
+        );
     }
     response
 }
@@ -569,10 +733,16 @@ mod tests {
     #[test]
     fn resolves_qualified_models_without_truncating_model_id() {
         let providers = [provider("relay", "Relay", &["visible-model"])];
-        let (provider, model) = resolve_model("relay/vendor/model", &providers, ApiProtocol::Chat)
-            .expect("qualified provider/model should resolve");
+        let (provider, model, upstream) = resolve_model(
+            "relay/vendor/model",
+            &providers,
+            ApiProtocol::Chat,
+            true,
+        )
+        .expect("qualified provider/model should resolve");
         assert_eq!(provider.id, "relay");
         assert_eq!(model, "vendor/model");
+        assert_eq!(upstream, ApiProtocol::Chat);
     }
 
     #[test]
@@ -582,7 +752,7 @@ mod tests {
             provider("second", "Second", &["shared-model"]),
         ];
         assert!(matches!(
-            resolve_model("shared-model", &providers, ApiProtocol::Chat),
+            resolve_model("shared-model", &providers, ApiProtocol::Chat, true),
             Err(ResolveError::Ambiguous)
         ));
     }
@@ -595,10 +765,26 @@ mod tests {
         let providers = [provider];
 
         assert!(matches!(
-            resolve_model("relay/model", &providers, ApiProtocol::Chat),
+            resolve_model("relay/model", &providers, ApiProtocol::Chat, true),
             Err(ResolveError::Unknown)
         ));
-        assert!(resolve_model("relay/model", &providers, ApiProtocol::Responses).is_ok());
+        assert!(resolve_model("relay/model", &providers, ApiProtocol::Responses, true).is_ok());
+    }
+
+    #[test]
+    fn resolves_a_translatable_endpoint_when_the_native_api_is_missing() {
+        let mut provider = provider("relay", "Relay", &["model"]);
+        provider.chat.clear();
+        provider.anthropic = "https://api.example".to_owned();
+        let providers = [provider];
+
+        let (_, _, upstream) = resolve_model("relay/model", &providers, ApiProtocol::Chat, true)
+            .expect("Chat requests can be translated to Anthropic");
+        assert_eq!(upstream, ApiProtocol::Anthropic);
+        assert!(matches!(
+            resolve_model("relay/model", &providers, ApiProtocol::Chat, false),
+            Err(ResolveError::Unknown)
+        ));
     }
 
     #[test]

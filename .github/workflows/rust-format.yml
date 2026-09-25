@@ -1,0 +1,27 @@
+name: Rust format
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  format:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@1.98.1
+        with:
+          components: rustfmt
+
+      - name: Format Rust sources
+        run: cargo fmt --all
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: formatted-rust-sources
+          path: src/
+          if-no-files-found: error
+          retention-days: 1

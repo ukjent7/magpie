@@ -8,3 +8,4 @@ pub mod gateway;
 pub mod profile;
 pub mod provider;
 pub mod settings;
+mod translation;
