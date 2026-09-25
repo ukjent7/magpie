@@ -1,6 +1,7 @@
 use std::{
-    collections::{HashSet, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     env,
+    sync::{LazyLock, Mutex},
     time::Duration,
 };
 
@@ -18,7 +19,7 @@ use reqwest::Client;
 use serde_json::{Value, json};
 use url::Url;
 
-use crate::provider::{self, GatewayProvider};
+use crate::provider::{self, GatewayCatalog, GatewayProvider};
 
 const DEFAULT_ADDR: &str = "127.0.0.1:3425";
 const MAX_REQUEST_BYTES: usize = 64 * 1024 * 1024;
@@ -97,9 +98,9 @@ async fn shutdown_signal() {
     let _ = tokio::signal::ctrl_c().await;
 }
 
-async fn configured_providers() -> std::result::Result<Vec<GatewayProvider>, ApiError> {
-    match tokio::task::spawn_blocking(provider::gateway_providers).await {
-        Ok(Ok(providers)) => Ok(providers),
+async fn configured_catalog() -> std::result::Result<GatewayCatalog, ApiError> {
+    match tokio::task::spawn_blocking(provider::gateway_catalog).await {
+        Ok(Ok(catalog)) => Ok(catalog),
         Ok(Err(error)) => {
             eprintln!("magpie: load provider configuration: {error:#}");
             Err(ApiError {
@@ -115,8 +116,8 @@ async fn configured_providers() -> std::result::Result<Vec<GatewayProvider>, Api
 }
 
 async fn info() -> std::result::Result<Json<Value>, ApiError> {
-    let providers = configured_providers().await?;
-    let count = exposed_models(&providers).count();
+    let catalog = configured_catalog().await?;
+    let count = exposed_models(&catalog.providers).count() + catalog.groups.len();
     Ok(Json(json!({
         "name": "magpie",
         "version": env!("CARGO_PKG_VERSION"),
@@ -131,8 +132,8 @@ async fn info() -> std::result::Result<Json<Value>, ApiError> {
 }
 
 async fn models() -> std::result::Result<Json<Value>, ApiError> {
-    let providers = configured_providers().await?;
-    let data = exposed_models(&providers)
+    let catalog = configured_catalog().await?;
+    let mut data = exposed_models(&catalog.providers)
         .map(|(provider, model)| {
             json!({
                 "id": format!("{}/{}", provider.id, model),
@@ -145,6 +146,17 @@ async fn models() -> std::result::Result<Json<Value>, ApiError> {
             })
         })
         .collect::<Vec<_>>();
+    data.extend(catalog.groups.iter().map(|group| {
+        json!({
+            "id": format!("group/{}", group.id),
+            "object": "model",
+            "type": "model",
+            "created": 0,
+            "created_at": "2025-01-01T00:00:00Z",
+            "owned_by": "magpie",
+            "display_name": group.name
+        })
+    }));
     let first_id = data
         .first()
         .and_then(|model| model["id"].as_str())
@@ -235,12 +247,20 @@ async fn forward(
             "request must include a model",
         );
     };
-    let providers = match configured_providers().await {
-        Ok(providers) => providers,
+    let catalog = match configured_catalog().await {
+        Ok(catalog) => catalog,
         Err(error) => return api_error_for(protocol, error.status, error.message),
     };
-    let (primary, primary_model, primary_protocol) =
-        match resolve_model(&model, &providers, protocol, path_override.is_none()) {
+    let providers = &catalog.providers;
+    let group = model
+        .strip_prefix("group/")
+        .and_then(|id| catalog.groups.iter().find(|group| group.id == id));
+    let mut candidates = if let Some(group) = group {
+        group_candidates(group, providers, protocol, path_override.is_none())
+    } else if model.starts_with("group/") {
+        Vec::new()
+    } else {
+        let target = match resolve_model(&model, providers, protocol, path_override.is_none()) {
             Ok(result) => result,
             Err(ResolveError::Unknown) => {
                 return api_error_for(
@@ -261,22 +281,40 @@ async fn forward(
                 );
             }
         };
+        vec![target]
+    };
+    if candidates.is_empty() {
+        return api_error_for(
+            protocol,
+            StatusCode::NOT_FOUND,
+            &format!("unknown or unavailable model {model:?}; list available models"),
+        );
+    }
     let streaming = body.get("stream").and_then(Value::as_bool).unwrap_or(false);
-    let mut candidates = vec![(primary, primary_model, primary_protocol)];
     if path_override.is_none() {
-        let mut seen = HashSet::from([(primary.id.clone(), primary_model.to_owned())]);
-        for fallback in &primary.fallback {
-            let Ok(target) = resolve_model(fallback, &providers, protocol, true) else {
-                eprintln!(
-                    "magpie: skip unavailable fallback {fallback:?} configured for {}",
-                    primary.id
-                );
-                continue;
-            };
+        let mut seen = HashSet::new();
+        let mut routed = Vec::new();
+        for target in candidates {
             if seen.insert((target.0.id.clone(), target.1.to_owned())) {
-                candidates.push(target);
+                routed.push(target);
+            }
+            for fallback in &target.0.fallback {
+                let Ok(fallback_target) = resolve_model(fallback, providers, protocol, true) else {
+                    eprintln!(
+                        "magpie: skip unavailable fallback {fallback:?} configured for {}",
+                        target.0.id
+                    );
+                    continue;
+                };
+                if seen.insert((
+                    fallback_target.0.id.clone(),
+                    fallback_target.1.to_owned(),
+                )) {
+                    routed.push(fallback_target);
+                }
             }
         }
+        candidates = routed;
     }
 
     let mut selected = None;
@@ -510,6 +548,44 @@ async fn send_upstream(
 
 fn retryable_status(status: StatusCode) -> bool {
     status.is_server_error() || matches!(status.as_u16(), 401 | 402 | 403 | 404 | 408 | 429)
+}
+
+static GROUP_ROTATION: LazyLock<Mutex<HashMap<String, usize>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn rotate_group_candidates<'a>(
+    group_id: &str,
+    candidates: &mut [(&'a GatewayProvider, &'a str, ApiProtocol)],
+) {
+    if candidates.len() < 2 {
+        return;
+    }
+    let mut rotations = GROUP_ROTATION
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let next = rotations.entry(group_id.to_owned()).or_default();
+    let offset = *next % candidates.len();
+    *next = (*next + 1) % candidates.len();
+    candidates.rotate_left(offset);
+}
+
+fn group_candidates<'a>(
+    group: &'a provider::GatewayGroup,
+    providers: &'a [GatewayProvider],
+    protocol: ApiProtocol,
+    allow_translation: bool,
+) -> Vec<(&'a GatewayProvider, &'a str, ApiProtocol)> {
+    let mut seen = HashSet::new();
+    let mut candidates = group
+        .members
+        .iter()
+        .filter_map(|member| resolve_model(member, providers, protocol, allow_translation).ok())
+        .filter(|(provider, model, _)| seen.insert((provider.id.as_str(), *model)))
+        .collect::<Vec<_>>();
+    if group.routing == "rotate" {
+        rotate_group_candidates(&group.id, &mut candidates);
+    }
+    candidates
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -934,6 +1010,54 @@ mod tests {
             resolve_model("shared-model", &providers, ApiProtocol::Chat, true),
             Err(ResolveError::Ambiguous)
         ));
+    }
+
+    #[test]
+    fn group_rotation_advances_the_first_member_per_request() {
+        let providers = [
+            provider("first", "First", &["model"]),
+            provider("second", "Second", &["model"]),
+            provider("third", "Third", &["model"]),
+        ];
+        let targets = || {
+            providers
+                .iter()
+                .map(|provider| (provider, "model", ApiProtocol::Chat))
+                .collect::<Vec<_>>()
+        };
+        let mut first = targets();
+        rotate_group_candidates("rotation-test-group", &mut first);
+        assert_eq!(first[0].0.id, "first");
+
+        let mut second = targets();
+        rotate_group_candidates("rotation-test-group", &mut second);
+        assert_eq!(second[0].0.id, "second");
+        assert_eq!(second[1].0.id, "third");
+        assert_eq!(second[2].0.id, "first");
+    }
+
+    #[test]
+    fn group_candidates_keep_configured_order_and_skip_unavailable_duplicates() {
+        let providers = [
+            provider("first", "First", &["model"]),
+            provider("second", "Second", &["model"]),
+        ];
+        let group = provider::GatewayGroup {
+            id: "ordered-test-group".to_owned(),
+            name: "Ordered".to_owned(),
+            members: vec![
+                "second/model".to_owned(),
+                "missing/model".to_owned(),
+                "first/model".to_owned(),
+                "second/model".to_owned(),
+            ],
+            routing: "order".to_owned(),
+        };
+
+        let candidates = group_candidates(&group, &providers, ApiProtocol::Chat, true);
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(candidates[0].0.id, "second");
+        assert_eq!(candidates[1].0.id, "first");
     }
 
     #[test]

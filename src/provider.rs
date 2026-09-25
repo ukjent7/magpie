@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, fs, str::FromStr};
+use std::{collections::{BTreeMap, HashMap, HashSet}, fs, str::FromStr};
 
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
@@ -364,9 +364,36 @@ const PRESETS: &[Preset] = &[
 struct ProviderFile {
     providers: Vec<Provider>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    groups: Vec<Value>,
+    groups: Vec<Group>,
     #[serde(flatten)]
     extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(default)]
+pub struct Group {
+    pub id: String,
+    pub name: String,
+    pub members: Vec<String>,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub routing: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub affinity: String,
+    #[serde(skip_serializing_if = "is_false")]
+    pub auto: bool,
+    #[serde(skip_serializing_if = "is_false")]
+    pub hidden: bool,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug)]
+pub struct ModelEntry {
+    pub id: String,
+    pub model: crate::catalog::Model,
+    pub provider_id: String,
+    pub provider_name: String,
+    pub icon: String,
 }
 
 #[derive(Clone, Default, Deserialize, Serialize)]
@@ -430,8 +457,38 @@ pub(crate) struct GatewayProvider {
     pub(crate) hidden: bool,
 }
 
-pub(crate) fn gateway_providers() -> Result<Vec<GatewayProvider>> {
-    Ok(load()?
+pub(crate) struct GatewayGroup {
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) members: Vec<String>,
+    pub(crate) routing: String,
+}
+
+pub(crate) struct GatewayCatalog {
+    pub(crate) providers: Vec<GatewayProvider>,
+    pub(crate) groups: Vec<GatewayGroup>,
+}
+
+pub(crate) fn gateway_catalog() -> Result<GatewayCatalog> {
+    let file = load()?;
+    let entries = model_entries(&file.providers);
+    let groups = groups_in(&file.groups, &entries)
+        .into_iter()
+        .filter(|group| {
+            !group.hidden
+                && group
+                    .members
+                    .iter()
+                    .any(|member| has_ready_member(member, &file.providers))
+        })
+        .map(|group| GatewayGroup {
+            id: group.id,
+            name: group.name,
+            members: group.members,
+            routing: group.routing,
+        })
+        .collect();
+    let providers = file
         .providers
         .into_iter()
         .map(|provider| {
@@ -456,7 +513,89 @@ pub(crate) fn gateway_providers() -> Result<Vec<GatewayProvider>> {
                 hidden: provider.hidden,
             }
         })
-        .collect())
+        .collect();
+    Ok(GatewayCatalog { providers, groups })
+}
+
+pub fn available_model_entries() -> Result<Vec<ModelEntry>> {
+    Ok(model_entries(&load()?.providers))
+}
+
+pub fn groups() -> Result<Vec<Group>> {
+    let file = load()?;
+    let entries = model_entries(&file.providers);
+    Ok(groups_in(&file.groups, &entries))
+}
+
+pub fn save_group(mut group: Group) -> Result<()> {
+    group.id = group.id.trim().to_ascii_lowercase();
+    if group.id.is_empty() {
+        group.id = slug(&group.name);
+    }
+    ensure!(
+        !group.id.is_empty() && slug(&group.id) == group.id,
+        "a group's id must be lowercase letters, digits and dashes, not {:?}",
+        group.id
+    );
+    group.name = group.name.trim().to_owned();
+    if group.name.is_empty() {
+        group.name.clone_from(&group.id);
+    }
+    group.members = group
+        .members
+        .into_iter()
+        .map(|member| member.trim().to_owned())
+        .filter(|member| !member.is_empty() && !member.starts_with("group/"))
+        .fold(Vec::new(), |mut members, member| {
+            if !members.contains(&member) {
+                members.push(member);
+            }
+            members
+        });
+    ensure!(!group.members.is_empty(), "a group needs a model in it");
+    if !matches!(group.routing.as_str(), "order" | "rotate" | "usage") {
+        group.routing.clear();
+    }
+    if !matches!(group.affinity.as_str(), "session" | "turn" | "off" | "") {
+        group.affinity.clear();
+    }
+    group.auto = false;
+    group.hidden = false;
+
+    let mut file = load()?;
+    if let Some(existing) = file.groups.iter_mut().find(|saved| saved.id == group.id) {
+        *existing = group;
+    } else {
+        file.groups.push(group);
+    }
+    store(file)
+}
+
+pub fn delete_group(id: &str) -> Result<()> {
+    let mut file = load()?;
+    let original_len = file.groups.len();
+    file.groups.retain(|group| group.id != id);
+    let auto_exists = auto_groups(&model_entries(&file.providers))
+        .iter()
+        .any(|group| group.id == id);
+    ensure!(
+        file.groups.len() != original_len || auto_exists,
+        "no group {id:?}"
+    );
+    if auto_exists {
+        let mut hidden = Group::default();
+        hidden.id = id.to_owned();
+        hidden.hidden = true;
+        file.groups.push(hidden);
+    }
+    store(file)
+}
+
+pub fn restore_group(id: &str) -> Result<()> {
+    let mut file = load()?;
+    file.groups
+        .retain(|group| !(group.id == id && group.hidden));
+    store(file)
 }
 
 pub fn list() -> Result<()> {
@@ -535,6 +674,20 @@ pub async fn models() -> Result<()> {
             };
             println!("  {}{name}{efforts}", model.id);
         }
+    }
+    let available = available_model_entries()?;
+    for group in groups()?.into_iter().filter(|group| !group.hidden) {
+        let members = group
+            .members
+            .iter()
+            .filter(|member| available.iter().any(|entry| entry.id == **member))
+            .count();
+        if members == 0 {
+            continue;
+        }
+        found = true;
+        println!("{} (routing group)", group.name);
+        println!("  group/{}  ({} ready members)", group.id, members);
     }
     if !found {
         if providers.is_empty() {
@@ -1037,6 +1190,137 @@ impl Provider {
     }
 }
 
+fn model_entries(providers: &[Provider]) -> Vec<ModelEntry> {
+    let mut entries = Vec::new();
+    for provider in providers.iter().filter(|provider| {
+        !provider.hidden
+            && (!provider.key.is_empty() || provider.is_local())
+            && (!provider.chat.is_empty()
+                || !provider.responses.is_empty()
+                || !provider.anthropic.is_empty())
+    }) {
+        for model in crate::catalog::exposed_models(
+            &provider.id,
+            provider.catalog_id(),
+            &provider.models,
+        ) {
+            entries.push(ModelEntry {
+                id: format!("{}/{}", provider.id, model.id),
+                model,
+                provider_id: provider.id.clone(),
+                provider_name: provider.name.clone(),
+                icon: provider.icon.clone(),
+            });
+        }
+    }
+    entries
+}
+
+fn has_ready_member(member: &str, providers: &[Provider]) -> bool {
+    let Some((provider_ref, model)) = member.split_once('/') else {
+        return false;
+    };
+    !model.is_empty()
+        && providers.iter().any(|provider| {
+            !provider.hidden
+                && (provider.id == provider_ref
+                    || provider.name.eq_ignore_ascii_case(provider_ref))
+                && (!provider.key.is_empty() || provider.is_local())
+                && (!provider.chat.is_empty()
+                    || !provider.responses.is_empty()
+                    || !provider.anthropic.is_empty())
+        })
+}
+
+fn groups_in(saved: &[Group], entries: &[ModelEntry]) -> Vec<Group> {
+    let mut groups = Vec::new();
+    let mut visible_ids = HashSet::new();
+    let mut hidden_ids = HashSet::new();
+    for group in saved {
+        if group.hidden {
+            hidden_ids.insert(group.id.clone());
+        } else {
+            visible_ids.insert(group.id.clone());
+            groups.push(group.clone());
+        }
+    }
+    for mut group in auto_groups(entries) {
+        if visible_ids.contains(&group.id) {
+            continue;
+        }
+        group.hidden = hidden_ids.contains(&group.id);
+        groups.push(group);
+    }
+    groups
+}
+
+fn auto_groups(entries: &[ModelEntry]) -> Vec<Group> {
+    let mut positions = HashMap::new();
+    let mut groups = Vec::<Group>::new();
+    let mut providers = Vec::<HashSet<String>>::new();
+    let mut first_model_ids = Vec::<String>::new();
+    for entry in entries {
+        let key = same_model(&entry.model.id);
+        let position = *positions.entry(key.clone()).or_insert_with(|| {
+            groups.push(Group {
+                id: format!("auto-{}", slug(&key)),
+                name: if entry.model.name.is_empty() {
+                    entry.model.id.clone()
+                } else {
+                    entry.model.name.clone()
+                },
+                auto: true,
+                ..Group::default()
+            });
+            providers.push(HashSet::new());
+            first_model_ids.push(entry.model.id.clone());
+            groups.len() - 1
+        });
+        let group = &mut groups[position];
+        if providers[position].insert(entry.provider_id.clone()) {
+            group.members.push(entry.id.clone());
+            if group.name == first_model_ids[position]
+                && !entry.model.name.is_empty()
+                && entry.model.name != entry.model.id
+            {
+                group.name.clone_from(&entry.model.name);
+            }
+        }
+    }
+    groups
+        .into_iter()
+        .filter(|group| !group.id.ends_with('-') && group.members.len() > 1)
+        .collect()
+}
+
+fn same_model(id: &str) -> String {
+    let mut bytes = id
+        .rsplit('/')
+        .next()
+        .unwrap_or(id)
+        .to_ascii_lowercase()
+        .into_bytes();
+    for index in 1..bytes.len().saturating_sub(1) {
+        if bytes[index] == b'.'
+            && bytes[index - 1].is_ascii_digit()
+            && bytes[index + 1].is_ascii_digit()
+        {
+            bytes[index] = b'-';
+        }
+    }
+    let mut key = String::from_utf8(bytes).expect("ASCII substitutions preserve UTF-8");
+    let base_len = key.rsplit_once('-').and_then(|(base, snapshot)| {
+        (snapshot.len() == 8
+            && snapshot.starts_with("20")
+            && snapshot.bytes().all(|byte| byte.is_ascii_digit()))
+        .then_some(base.len())
+    });
+    if let Some(base_len) = base_len {
+        key.truncate(base_len);
+    }
+    key
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1047,6 +1331,20 @@ mod tests {
             name: name.to_owned(),
             chat: "https://api.example/v1".to_owned(),
             ..Provider::default()
+        }
+    }
+
+    fn model_entry(provider_id: &str, model_id: &str, model_name: &str) -> ModelEntry {
+        ModelEntry {
+            id: format!("{provider_id}/{model_id}"),
+            model: crate::catalog::Model {
+                id: model_id.to_owned(),
+                name: model_name.to_owned(),
+                ..crate::catalog::Model::default()
+            },
+            provider_id: provider_id.to_owned(),
+            provider_name: provider_id.to_owned(),
+            icon: String::new(),
         }
     }
 
@@ -1103,5 +1401,86 @@ mod tests {
             normalize_fallbacks(&["none".to_owned(), "backup/model".to_owned()], &providers)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn model_names_normalize_vendor_prefixes_versions_and_snapshots() {
+        for (input, expected) in [
+            ("claude-opus-5-5", "claude-opus-5-5"),
+            ("anthropic/claude-opus-5.5", "claude-opus-5-5"),
+            ("Claude-Opus-5.5", "claude-opus-5-5"),
+            ("claude-opus-5-5-20260801", "claude-opus-5-5"),
+            ("anthropic/claude-opus-5.5:batch", "claude-opus-5-5:batch"),
+            ("gpt-5.1-codex", "gpt-5-1-codex"),
+            ("v1.beta", "v1.beta"),
+        ] {
+            assert_eq!(same_model(input), expected, "{input}");
+        }
+    }
+
+    #[test]
+    fn automatic_groups_keep_provider_order_and_prefer_catalog_names() {
+        let groups = auto_groups(&[
+            model_entry("openrouter", "anthropic/claude-opus-5.5", "anthropic/claude-opus-5.5"),
+            model_entry("copilot", "claude-opus-5.5", "claude-opus-5.5"),
+            model_entry("claude", "claude-opus-5-5", "Claude Opus 5.5"),
+        ]);
+
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].id, "auto-claude-opus-5-5");
+        assert_eq!(groups[0].name, "Claude Opus 5.5");
+        assert_eq!(
+            groups[0]
+                .members
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            vec![
+                "openrouter/anthropic/claude-opus-5.5",
+                "copilot/claude-opus-5.5",
+                "claude/claude-opus-5-5",
+            ]
+        );
+    }
+
+    #[test]
+    fn saved_groups_override_auto_groups_and_hidden_ones_stay_hidden() {
+        let entries = [
+            model_entry("first", "model-1", "Model One"),
+            model_entry("second", "model-1", "Model One"),
+        ];
+        let auto_id = "auto-model-1";
+        let mut hidden = Group::default();
+        hidden.id = auto_id.to_owned();
+        hidden.hidden = true;
+
+        let hidden_groups = groups_in(&[hidden], &entries);
+        assert_eq!(hidden_groups.len(), 1);
+        assert!(hidden_groups[0].auto);
+        assert!(hidden_groups[0].hidden);
+
+        let mut custom = Group::default();
+        custom.id = auto_id.to_owned();
+        custom.name = "My model pool".to_owned();
+        custom.members = vec!["first/model-1".to_owned()];
+        let custom_groups = groups_in(&[custom], &entries);
+        assert_eq!(custom_groups.len(), 1);
+        assert_eq!(custom_groups[0].name, "My model pool");
+        assert!(!custom_groups[0].auto);
+    }
+
+    #[test]
+    fn provider_file_keeps_unknown_group_fields_when_saved() {
+        let value = serde_json::json!({
+            "providers": [],
+            "groups": [{
+                "id": "shared-model",
+                "name": "Shared model",
+                "members": ["first/model", "second/model"],
+                "futureOption": {"enabled": true}
+            }]
+        });
+        let file: ProviderFile = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(serde_json::to_value(file).unwrap(), value);
     }
 }
