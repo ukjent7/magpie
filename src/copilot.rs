@@ -26,8 +26,13 @@ static SESSION_CACHE: LazyLock<Mutex<HashMap<(String, bool), Session>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 static PENDING_TERMS: LazyLock<Mutex<HashMap<String, HashSet<String>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
-static CLI_SECRET_CACHE: LazyLock<StdMutex<HashMap<String, (Instant, Option<String>)>>> =
+static CLI_SECRET_CACHE: LazyLock<StdMutex<HashMap<String, CachedCliSecret>>> =
     LazyLock::new(|| StdMutex::new(HashMap::new()));
+
+struct CachedCliSecret {
+    fetched_at: Instant,
+    token: Option<String>,
+}
 
 #[derive(Clone)]
 pub(crate) struct Account {
@@ -192,14 +197,14 @@ fn copilot_cli_secret(account: &str) -> Option<String> {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = Instant::now();
-    if let Some((at, token)) = cache.get(account) {
-        let ttl = if token.is_some() {
+    if let Some(secret) = cache.get(account) {
+        let ttl = if secret.token.is_some() {
             Duration::from_secs(60 * 60)
         } else {
             Duration::from_secs(10 * 60)
         };
-        if now.saturating_duration_since(*at) < ttl {
-            return token.clone();
+        if now.saturating_duration_since(secret.fetched_at) < ttl {
+            return secret.token.clone();
         }
     }
 
@@ -228,7 +233,13 @@ fn copilot_cli_secret(account: &str) -> Option<String> {
             let token = String::from_utf8_lossy(&result.stdout).trim().to_owned();
             (!token.is_empty()).then_some(token)
         });
-    cache.insert(account.to_owned(), (now, token.clone()));
+    cache.insert(
+        account.to_owned(),
+        CachedCliSecret {
+            fetched_at: now,
+            token: token.clone(),
+        },
+    );
     token
 }
 
