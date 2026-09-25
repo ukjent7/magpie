@@ -2,7 +2,7 @@
 name = "magpie"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.98"
 license = "MIT"
 description = "A model switchboard for local AI coding agents"
 
@@ -11,13 +11,13 @@ name = "magpie"
 path = "src/main.rs"
 
 [dependencies]
-anyhow = "1"
-clap = { version = "4", features = ["derive"] }
+anyhow = "1.0.104"
+clap = { version = "4.6.7", features = ["derive"] }
 jsonc-parser = { version = "0.33.2", features = ["cst", "serde_json"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-toml_edit = "0.25"
-yaml-edit = "0.2.3"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+toml_edit = "0.25.15"
+yaml-edit = "0.3.2"
 
 [lints.rust]
 unsafe_code = "forbid"

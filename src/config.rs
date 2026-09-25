@@ -203,24 +203,23 @@ fn delete_toml_many(text: &str, key_paths: &[&str]) -> Result<Option<String>> {
     let mut changed = false;
     for key_path in key_paths {
         let parts = key_parts(key_path)?;
-        let mut table = document.as_table_mut();
-        let mut found = true;
-        for key in &parts[..parts.len() - 1] {
-            let Some(item) = table.get_mut(key) else {
-                found = false;
-                break;
-            };
-            let Some(nested) = item.as_table_mut() else {
-                found = false;
-                break;
-            };
-            table = nested;
-        }
-        if found && table.remove(parts[parts.len() - 1]).is_some() {
-            changed = true;
-        }
+        changed |= remove_toml_path(document.as_table_mut(), &parts);
     }
     Ok(changed.then(|| document.to_string()))
+}
+
+fn remove_toml_path(table: &mut Table, parts: &[&str]) -> bool {
+    let Some((head, tail)) = parts.split_first() else {
+        return false;
+    };
+    if tail.is_empty() {
+        return table.remove(*head).is_some();
+    }
+
+    table
+        .get_mut(*head)
+        .and_then(Item::as_table_mut)
+        .is_some_and(|nested| remove_toml_path(nested, tail))
 }
 
 fn get_yaml(text: &str, key_path: &str) -> Result<Option<String>> {
