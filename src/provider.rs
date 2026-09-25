@@ -538,14 +538,11 @@ pub(crate) fn gateway_catalog() -> Result<GatewayCatalog> {
             .into_iter()
             .map(|model| model.id)
             .collect();
-            let model_keys = crate::catalog::available_models(
-                &provider.id,
-                provider.catalog_id(),
-            )
-            .into_iter()
-            .filter(|model| !model.keys.is_empty())
-            .map(|model| (model.id, model.keys.into_iter().collect()))
-            .collect();
+            let model_keys = crate::catalog::available_models(&provider.id, provider.catalog_id())
+                .into_iter()
+                .filter(|model| !model.keys.is_empty())
+                .map(|model| (model.id, model.keys.into_iter().collect()))
+                .collect();
             let keys = std::iter::once(GatewayKey {
                 key: provider.key.clone(),
                 protocol: provider.key_protocol.clone(),
@@ -564,8 +561,8 @@ pub(crate) fn gateway_catalog() -> Result<GatewayCatalog> {
                     }),
             )
             .collect();
-            let has_configured_keys = !provider.key.is_empty()
-                || provider.keys.iter().any(|key| !key.key.is_empty());
+            let has_configured_keys =
+                !provider.key.is_empty() || provider.keys.iter().any(|key| !key.key.is_empty());
             GatewayProvider {
                 id: provider.id,
                 name: provider.name,
@@ -870,10 +867,16 @@ async fn models_command(id: &str, selected: &[String]) -> Result<()> {
                 }
             }
             Err(error) => {
-                eprintln!("magpie: model list fetch failed for key {}: {error:#}", fingerprint.as_deref().unwrap_or("primary"));
+                eprintln!(
+                    "magpie: model list fetch failed for key {}: {error:#}",
+                    fingerprint.as_deref().unwrap_or("primary")
+                );
                 last_error = Some(error);
                 if let Some(fingerprint) = fingerprint {
-                    for model in old_models.iter().filter(|model| model.keys.contains(&fingerprint)) {
+                    for model in old_models
+                        .iter()
+                        .filter(|model| model.keys.contains(&fingerprint))
+                    {
                         merge_model(model.clone(), Some(fingerprint.clone()));
                     }
                 }
@@ -1060,7 +1063,10 @@ fn show(id: &str) -> Result<()> {
             .filter(|key| !key.key.is_empty() && !key.off)
             .count();
     if active_keys > 1 || !provider.keys.is_empty() {
-        println!("  keys: {active_keys} on · magpie provider keys {}", provider.id);
+        println!(
+            "  keys: {active_keys} on · magpie provider keys {}",
+            provider.id
+        );
     }
     if !provider.routing.is_empty() {
         println!("  key routing: {}", provider.routing);
@@ -1198,9 +1204,7 @@ fn keys_command(args: &[String]) -> Result<()> {
             update_key(id, verb, key_id)
         }
         [verb, key_id, value] if verb == "rename" => rename_key(id, key_id, value),
-        [verb, key_id, protocol] if verb == "protocol" => {
-            set_key_protocol(id, key_id, protocol)
-        }
+        [verb, key_id, protocol] if verb == "protocol" => set_key_protocol(id, key_id, protocol),
         _ => bail!("{USAGE}"),
     }
 }
@@ -1234,17 +1238,9 @@ fn list_keys(id: &str) -> Result<()> {
 
 fn print_key(key: &str, name: &str, on: bool, primary: bool, protocol: &str) {
     let label = if name.is_empty() { "unnamed" } else { name };
-    let status = if on {
-        "on"
-    } else {
-        "off"
-    };
+    let status = if on { "on" } else { "off" };
     let primary = if primary { " · primary" } else { "" };
-    let protocol = if protocol.is_empty() {
-        "any"
-    } else {
-        protocol
-    };
+    let protocol = if protocol.is_empty() { "any" } else { protocol };
     println!(
         "  {}  {label} · {status}{primary} · {protocol} · {}",
         key_id(key),
@@ -1258,9 +1254,9 @@ fn add_key(id: &str, key: &str, options: &[String]) -> Result<()> {
     let mut name = String::new();
     let mut protocol = String::new();
     for option in options {
-        let (field, value) = option
-            .split_once('=')
-            .with_context(|| format!("expected name=<name> or protocol=<protocol>, got {option:?}"))?;
+        let (field, value) = option.split_once('=').with_context(|| {
+            format!("expected name=<name> or protocol=<protocol>, got {option:?}")
+        })?;
         match field.to_ascii_lowercase().as_str() {
             "name" => name = value.trim().to_owned(),
             "protocol" => protocol = parse_key_protocol(value)?,
@@ -1333,7 +1329,11 @@ fn update_key(id: &str, action: &str, reference: &str) -> Result<()> {
         "on" => provider.keys[index - 1].off = false,
         "off" if index > 0 => provider.keys[index - 1].off = true,
         "off" => {
-            let Some(next) = provider.keys.iter().position(|key| !key.off && !key.key.is_empty()) else {
+            let Some(next) = provider
+                .keys
+                .iter()
+                .position(|key| !key.off && !key.key.is_empty())
+            else {
                 bail!("that's the only key in use; turn another on first");
             };
             let previous = KeyAccount {
@@ -1354,7 +1354,11 @@ fn update_key(id: &str, action: &str, reference: &str) -> Result<()> {
             provider.keys.remove(index - 1);
         }
         "rm" => {
-            let Some(next) = provider.keys.iter().position(|key| !key.off && !key.key.is_empty()) else {
+            let Some(next) = provider
+                .keys
+                .iter()
+                .position(|key| !key.off && !key.key.is_empty())
+            else {
                 bail!("that's the only key in use; turn another on before removing it");
             };
             let promoted = provider.keys.remove(next);
@@ -1438,7 +1442,11 @@ fn set_routing(id: &str, selected: &[String]) -> Result<()> {
         println!(
             "{} key routing: {}",
             provider.name,
-            if provider.routing.is_empty() { "smart" } else { &provider.routing }
+            if provider.routing.is_empty() {
+                "smart"
+            } else {
+                &provider.routing
+            }
         );
         return Ok(());
     }

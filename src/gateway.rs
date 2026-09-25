@@ -320,13 +320,7 @@ async fn forward(
     let mut candidates = candidates
         .into_iter()
         .flat_map(|(provider, model, upstream)| {
-            key_candidates(
-                provider,
-                model,
-                protocol,
-                upstream,
-                path_override.is_none(),
-            )
+            key_candidates(provider, model, protocol, upstream, path_override.is_none())
         })
         .collect::<Vec<_>>();
     if candidates.is_empty() {
@@ -338,9 +332,8 @@ async fn forward(
     }
     if group.is_some_and(|group| group.routing == "usage") {
         sort_by_recent_usage(&mut candidates);
-        candidates.sort_by_key(|candidate| {
-            (!candidate.model_listed, key_fit(*candidate, protocol))
-        });
+        candidates
+            .sort_by_key(|candidate| (!candidate.model_listed, key_fit(*candidate, protocol)));
     }
     move_resting_routes_last(&mut candidates);
 
@@ -707,11 +700,12 @@ fn key_candidates<'a>(
 
     let mut unlisted = Vec::new();
     if let Some(listed_keys) = provider.model_keys.get(model) {
-        let (listed, mut others): (Vec<_>, Vec<_>) = candidates.into_iter().partition(|candidate| {
-            candidate
-                .key
-                .is_some_and(|key| listed_keys.contains(&provider::key_id(key)))
-        });
+        let (listed, mut others): (Vec<_>, Vec<_>) =
+            candidates.into_iter().partition(|candidate| {
+                candidate
+                    .key
+                    .is_some_and(|key| listed_keys.contains(&provider::key_id(key)))
+            });
         if listed.is_empty() {
             candidates = others;
         } else {
@@ -746,8 +740,7 @@ fn parse_api_protocol(protocol: &str) -> Option<ApiProtocol> {
 fn translation_supported(from: ApiProtocol, to: ApiProtocol) -> bool {
     matches!(
         (from, to),
-        (ApiProtocol::Chat, ApiProtocol::Anthropic)
-            | (ApiProtocol::Anthropic, ApiProtocol::Chat)
+        (ApiProtocol::Chat, ApiProtocol::Anthropic) | (ApiProtocol::Anthropic, ApiProtocol::Chat)
     )
 }
 
@@ -1429,7 +1422,7 @@ mod tests {
             Some("stored-secret"),
             &HeaderMap::new(),
         )
-            .expect("headers should be valid");
+        .expect("headers should be valid");
         assert_eq!(headers[header::AUTHORIZATION], "Token custom-scheme");
     }
 
@@ -1439,13 +1432,9 @@ mod tests {
         let mut incoming = HeaderMap::new();
         incoming.insert("anthropic-version", HeaderValue::from_static("2024-01-01"));
 
-        let headers = upstream_headers(
-            &provider,
-            ApiProtocol::Anthropic,
-            Some("secret"),
-            &incoming,
-        )
-        .expect("headers should be valid");
+        let headers =
+            upstream_headers(&provider, ApiProtocol::Anthropic, Some("secret"), &incoming)
+                .expect("headers should be valid");
         assert_eq!(headers["x-api-key"], "secret");
         assert_eq!(headers["anthropic-version"], "2024-01-01");
         assert!(!headers.contains_key(header::AUTHORIZATION));
@@ -1501,24 +1490,14 @@ mod tests {
             protocol: String::new(),
             active: false,
         });
-        assert!(key_candidates(
-            &relay,
-            "model",
-            ApiProtocol::Chat,
-            ApiProtocol::Chat,
-            true
-        )
-        .is_empty());
+        assert!(
+            key_candidates(&relay, "model", ApiProtocol::Chat, ApiProtocol::Chat, true).is_empty()
+        );
 
         relay.has_configured_keys = false;
         relay.keys.clear();
-        let candidates = key_candidates(
-            &relay,
-            "model",
-            ApiProtocol::Chat,
-            ApiProtocol::Chat,
-            true,
-        );
+        let candidates =
+            key_candidates(&relay, "model", ApiProtocol::Chat, ApiProtocol::Chat, true);
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].key, None);
     }
@@ -1537,15 +1516,8 @@ mod tests {
             })
             .collect();
 
-        let targets = || {
-            key_candidates(
-                &relay,
-                "model",
-                ApiProtocol::Chat,
-                ApiProtocol::Chat,
-                true,
-            )
-        };
+        let targets =
+            || key_candidates(&relay, "model", ApiProtocol::Chat, ApiProtocol::Chat, true);
         assert_eq!(targets()[0].key, Some("first"));
         assert_eq!(targets()[0].key, Some("second"));
     }
@@ -1564,23 +1536,12 @@ mod tests {
             })
             .collect();
 
-        let first_pass = key_candidates(
-            &relay,
-            "model",
-            ApiProtocol::Chat,
-            ApiProtocol::Chat,
-            true,
-        );
+        let first_pass =
+            key_candidates(&relay, "model", ApiProtocol::Chat, ApiProtocol::Chat, true);
         assert_eq!(first_pass[0].key, Some("first"));
         mark_route_used(first_pass[0]);
 
-        let next_pass = key_candidates(
-            &relay,
-            "model",
-            ApiProtocol::Chat,
-            ApiProtocol::Chat,
-            true,
-        );
+        let next_pass = key_candidates(&relay, "model", ApiProtocol::Chat, ApiProtocol::Chat, true);
         assert_eq!(next_pass[0].key, Some("second"));
     }
 
@@ -1597,13 +1558,8 @@ mod tests {
             })
             .collect();
 
-        let mut candidates = key_candidates(
-            &relay,
-            "model",
-            ApiProtocol::Chat,
-            ApiProtocol::Chat,
-            true,
-        );
+        let mut candidates =
+            key_candidates(&relay, "model", ApiProtocol::Chat, ApiProtocol::Chat, true);
         rest_route(candidates[0], ROUTE_COOLDOWN);
         move_resting_routes_last(&mut candidates);
         assert_eq!(candidates[0].key, Some("available"));
