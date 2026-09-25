@@ -343,9 +343,7 @@ impl ApiProtocol {
 }
 
 fn has_endpoint(provider: &GatewayProvider) -> bool {
-    !provider.chat.is_empty()
-        || !provider.responses.is_empty()
-        || !provider.anthropic.is_empty()
+    !provider.chat.is_empty() || !provider.responses.is_empty() || !provider.anthropic.is_empty()
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -418,10 +416,9 @@ fn upstream_headers(
     if !provider.key.is_empty() {
         let (name, raw_value) = match protocol {
             ApiProtocol::Anthropic => (HeaderName::from_static("x-api-key"), provider.key.clone()),
-            ApiProtocol::Chat | ApiProtocol::Responses => (
-                header::AUTHORIZATION,
-                format!("Bearer {}", provider.key),
-            ),
+            ApiProtocol::Chat | ApiProtocol::Responses => {
+                (header::AUTHORIZATION, format!("Bearer {}", provider.key))
+            }
         };
         let value = HeaderValue::from_str(&raw_value)
             .map_err(|_| "provider API key cannot be used as an HTTP header")?;
@@ -576,9 +573,8 @@ mod tests {
     #[test]
     fn resolves_qualified_models_without_truncating_model_id() {
         let providers = [provider("relay", "Relay", &["visible-model"])];
-        let (provider, model) =
-            resolve_model("relay/vendor/model", &providers, ApiProtocol::Chat)
-                .expect("qualified provider/model should resolve");
+        let (provider, model) = resolve_model("relay/vendor/model", &providers, ApiProtocol::Chat)
+            .expect("qualified provider/model should resolve");
         assert_eq!(provider.id, "relay");
         assert_eq!(model, "vendor/model");
     }
@@ -627,10 +623,7 @@ mod tests {
         let mut provider = provider("relay", "Relay", &[]);
         provider.key = "secret".to_owned();
         let mut incoming = HeaderMap::new();
-        incoming.insert(
-            "anthropic-version",
-            HeaderValue::from_static("2024-01-01"),
-        );
+        incoming.insert("anthropic-version", HeaderValue::from_static("2024-01-01"));
 
         let headers = upstream_headers(&provider, ApiProtocol::Anthropic, &incoming)
             .expect("headers should be valid");
