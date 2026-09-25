@@ -259,7 +259,6 @@ const PRESETS: &[Preset] = &[
         catalog: "opencode-go",
         website: "https://opencode.ai/docs/go",
         keys_url: "https://opencode.ai/auth",
-        ..Preset::EMPTY
     },
     Preset {
         id: "opencode-zen",
@@ -272,7 +271,6 @@ const PRESETS: &[Preset] = &[
         catalog: "opencode",
         website: "https://opencode.ai/docs/zen",
         keys_url: "https://opencode.ai/auth",
-        ..Preset::EMPTY
     },
     Preset {
         id: "together",
@@ -519,13 +517,12 @@ fn add(args: &[String]) -> Result<()> {
         Preset::provider,
     );
     let mut assignments = assignments;
-    if preset.is_some() {
-        if let [key] = assignments {
-            if !is_provider_assignment(key) {
-                provider.key = key.trim().to_owned();
-                assignments = &[];
-            }
-        }
+    if preset.is_some()
+        && let [key] = assignments
+        && !is_provider_assignment(key)
+    {
+        provider.key = key.trim().to_owned();
+        assignments = &[];
     }
 
     for assignment in assignments {
@@ -825,6 +822,29 @@ fn is_false(value: &bool) -> bool {
     !value
 }
 
+impl Provider {
+    fn host(&self) -> String {
+        [&self.chat, &self.responses, &self.anthropic]
+            .into_iter()
+            .find_map(|url| Url::parse(url).ok()?.host_str().map(str::to_owned))
+            .unwrap_or_default()
+    }
+
+    fn is_local(&self) -> bool {
+        [&self.chat, &self.responses, &self.anthropic]
+            .into_iter()
+            .filter_map(|url| Url::parse(url).ok())
+            .any(|url| {
+                url.host_str().is_some_and(|host| {
+                    matches!(
+                        host,
+                        "localhost" | "127.0.0.1" | "0.0.0.0" | "::1" | "[::1]"
+                    )
+                })
+            })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -854,28 +874,5 @@ mod tests {
         assert!(!is_provider_assignment("sk-example=="));
         assert!(is_provider_assignment("key=sk-example"));
         assert!(is_provider_assignment("header.Authorization=Token"));
-    }
-}
-
-impl Provider {
-    fn host(&self) -> String {
-        [&self.chat, &self.responses, &self.anthropic]
-            .into_iter()
-            .find_map(|url| Url::parse(url).ok()?.host_str().map(str::to_owned))
-            .unwrap_or_default()
-    }
-
-    fn is_local(&self) -> bool {
-        [&self.chat, &self.responses, &self.anthropic]
-            .into_iter()
-            .filter_map(|url| Url::parse(url).ok())
-            .any(|url| {
-                url.host_str().is_some_and(|host| {
-                    matches!(
-                        host,
-                        "localhost" | "127.0.0.1" | "0.0.0.0" | "::1" | "[::1]"
-                    )
-                })
-            })
     }
 }
