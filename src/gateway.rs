@@ -1,0 +1,440 @@
+use std::{collections::HashSet, env, time::Duration};
+
+use anyhow::{Context, Result, bail};
+use axum::{
+    Router,
+    body::{Body, to_bytes},
+    extract::{Request, State},
+    http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header},
+    response::{IntoResponse, Response},
+    routing::{get, post},
+    Json,
+};
+use reqwest::Client;
+use serde_json::{Value, json};
+use url::Url;
+
+use crate::provider::{self, GatewayProvider};
+
+const DEFAULT_ADDR: &str = "127.0.0.1:3425";
+const MAX_REQUEST_BYTES: usize = 64 * 1024 * 1024;
+const UPSTREAM_TIMEOUT: Duration = Duration::from_secs(600);
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+
+#[derive(Clone)]
+struct GatewayState {
+    client: Client,
+}
+
+pub fn command(args: &[String]) -> Result<()> {
+    let mut addr = env::var("MAGPIE_ADDR").unwrap_or_else(|_| DEFAULT_ADDR.to_owned());
+    let mut args = args.iter();
+
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--help" | "-h" => {
+                println!("usage: magpie serve [--addr <host:port>]");
+                return Ok(());
+            }
+            "--addr" | "-a" => {
+                addr = args
+                    .next()
+                    .context("--addr requires a host and port")?
+                    .clone();
+            }
+            _ if arg.starts_with("--addr=") => {
+                addr = arg["--addr=".len()..].to_owned();
+            }
+            _ => bail!("unknown serve option {arg:?}; usage: magpie serve [--addr <host:port>]"),
+        }
+    }
+
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .context("create gateway runtime")?;
+    runtime.block_on(serve(&addr))
+}
+
+async fn serve(addr: &str) -> Result<()> {
+    let state = GatewayState {
+        client: Client::builder()
+            .user_agent(concat!("magpie/", env!("CARGO_PKG_VERSION")))
+            .connect_timeout(CONNECT_TIMEOUT)
+            .read_timeout(UPSTREAM_TIMEOUT)
+            .pool_max_idle_per_host(8)
+            .build()
+            .context("create gateway HTTP client")?,
+    };
+    let app = Router::new()
+        .route("/", get(info))
+        .route("/v1/models", get(models))
+        .route("/models", get(models))
+        .route("/v1/chat/completions", post(chat_completions))
+        .route("/chat/completions", post(chat_completions))
+        .fallback(not_found)
+        .with_state(state);
+
+    let listener = tokio::net::TcpListener::bind(addr)
+        .await
+        .with_context(|| format!("bind gateway to {addr}"))?;
+    let address = listener.local_addr().context("read gateway address")?;
+    println!("magpie gateway listening on http://{address}");
+
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await
+        .context("serve gateway")
+}
+
+async fn shutdown_signal() {
+    let _ = tokio::signal::ctrl_c().await;
+}
+
+async fn configured_providers() -> std::result::Result<Vec<GatewayProvider>, Response> {
+    tokio::task::spawn_blocking(provider::gateway_providers)
+        .await
+        .map_err(|_| api_error(StatusCode::INTERNAL_SERVER_ERROR, "provider worker stopped"))?
+        .map_err(|error| {
+            eprintln!("magpie: load provider configuration: {error:#}");
+            api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "could not read provider configuration",
+            )
+        })
+}
+
+async fn info() -> std::result::Result<Json<Value>, Response> {
+    let providers = configured_providers().await?;
+    let count = exposed_models(&providers).count();
+    Ok(Json(json!({
+        "name": "magpie",
+        "version": env!("CARGO_PKG_VERSION"),
+        "models": count,
+        "apis": ["/v1/chat/completions", "/v1/models"]
+    })))
+}
+
+async fn models() -> std::result::Result<Json<Value>, Response> {
+    let providers = configured_providers().await?;
+    let data = exposed_models(&providers)
+        .map(|(provider, model)| {
+            json!({
+                "id": format!("{}/{}", provider.id, model),
+                "object": "model",
+                "type": "model",
+                "created": 0,
+                "created_at": "2025-01-01T00:00:00Z",
+                "owned_by": provider.id,
+                "display_name": model
+            })
+        })
+        .collect::<Vec<_>>();
+    let first_id = data
+        .first()
+        .and_then(|model| model["id"].as_str())
+        .map(str::to_owned);
+    let last_id = data
+        .last()
+        .and_then(|model| model["id"].as_str())
+        .map(str::to_owned);
+    let mut result = json!({"object": "list", "data": data, "has_more": false});
+    if let Some(id) = first_id {
+        result["first_id"] = json!(id);
+    }
+    if let Some(id) = last_id {
+        result["last_id"] = json!(id);
+    }
+    Ok(Json(result))
+}
+
+fn exposed_models(
+    providers: &[GatewayProvider],
+) -> impl Iterator<Item = (&GatewayProvider, &str)> {
+    providers
+        .iter()
+        .filter(|provider| !provider.hidden && !provider.chat.is_empty())
+        .flat_map(|provider| {
+            provider
+                .models
+                .iter()
+                .map(move |model| (provider, model.as_str()))
+        })
+}
+
+async fn chat_completions(
+    State(state): State<GatewayState>,
+    request: Request<Body>,
+) -> Response {
+    let (parts, body) = request.into_parts();
+    let bytes = match to_bytes(body, MAX_REQUEST_BYTES).await {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            return api_error(
+                if error.to_string().contains("length limit") {
+                    StatusCode::PAYLOAD_TOO_LARGE
+                } else {
+                    StatusCode::BAD_REQUEST
+                },
+                "could not read request body",
+            );
+        }
+    };
+    let mut body: Value = match serde_json::from_slice(&bytes) {
+        Ok(body) => body,
+        Err(_) => return api_error(StatusCode::BAD_REQUEST, "request body must be valid JSON"),
+    };
+    let Some(model) = body.get("model").and_then(Value::as_str).map(str::to_owned) else {
+        return api_error(StatusCode::BAD_REQUEST, "request must include a model");
+    };
+    let providers = match configured_providers().await {
+        Ok(providers) => providers,
+        Err(response) => return response,
+    };
+    let (provider, upstream_model) = match resolve_model(&model, &providers) {
+        Ok(result) => result,
+        Err(ResolveError::Unknown) => {
+            return api_error(
+                StatusCode::NOT_FOUND,
+                &format!("unknown model {model:?}; use provider/model or list available models"),
+            );
+        }
+        Err(ResolveError::Ambiguous) => {
+            return api_error(
+                StatusCode::BAD_REQUEST,
+                &format!("model {model:?} belongs to more than one provider; use provider/model"),
+            );
+        }
+    };
+    let Some(object) = body.as_object_mut() else {
+        return api_error(StatusCode::BAD_REQUEST, "request body must be a JSON object");
+    };
+    object.insert("model".to_owned(), json!(upstream_model));
+    let body = match serde_json::to_vec(&body) {
+        Ok(body) => body,
+        Err(error) => {
+            eprintln!("magpie: serialize upstream request: {error}");
+            return api_error(StatusCode::INTERNAL_SERVER_ERROR, "could not prepare request");
+        }
+    };
+
+    let upstream_url = match upstream_url(&provider.chat, parts.uri.query()) {
+        Ok(url) => url,
+        Err(error) => {
+            eprintln!("magpie: invalid URL for provider {}: {error:#}", provider.id);
+            return api_error(
+                StatusCode::BAD_GATEWAY,
+                "provider has an invalid chat completion URL",
+            );
+        }
+    };
+    let headers = match upstream_headers(provider) {
+        Ok(headers) => headers,
+        Err(message) => return api_error(StatusCode::BAD_GATEWAY, message),
+    };
+    let response = match state
+        .client
+        .post(upstream_url)
+        .headers(headers)
+        .header(header::ACCEPT, "application/json, text/event-stream")
+        .body(body)
+        .send()
+        .await
+    {
+        Ok(response) => response,
+        Err(error) => {
+            eprintln!("magpie: upstream request to {} failed: {error}", provider.id);
+            return api_error(StatusCode::BAD_GATEWAY, "provider request failed");
+        }
+    };
+    relay(response)
+}
+
+#[derive(Clone, Copy)]
+enum ResolveError {
+    Unknown,
+    Ambiguous,
+}
+
+fn resolve_model<'a>(
+    requested: &'a str,
+    providers: &'a [GatewayProvider],
+) -> std::result::Result<(&'a GatewayProvider, &'a str), ResolveError> {
+    if let Some((provider_id, model)) = requested.split_once('/') {
+        if model.is_empty() {
+            return Err(ResolveError::Unknown);
+        }
+        return providers
+            .iter()
+            .find(|provider| {
+                !provider.hidden
+                    && !provider.chat.is_empty()
+                    && (provider.id == provider_id
+                        || provider.name.eq_ignore_ascii_case(provider_id))
+            })
+            .map(|provider| (provider, model))
+            .ok_or(ResolveError::Unknown);
+    }
+
+    let mut matches = providers.iter().filter(|provider| {
+        !provider.hidden
+            && !provider.chat.is_empty()
+            && provider.models.iter().any(|model| model == requested)
+    });
+    let provider = matches.next().ok_or(ResolveError::Unknown)?;
+    if matches.next().is_some() {
+        return Err(ResolveError::Ambiguous);
+    }
+    Ok((provider, requested))
+}
+
+fn upstream_url(base: &str, query: Option<&str>) -> Result<Url> {
+    let mut url = Url::parse(base).context("parse provider URL")?;
+    if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
+        bail!("provider URL must use http:// or https://");
+    }
+    let path = format!("{}/chat/completions", url.path().trim_end_matches('/'));
+    url.set_path(&path);
+    if let Some(query) = query.filter(|query| !query.is_empty()) {
+        let combined = match url.query() {
+            Some(existing) => format!("{existing}&{query}"),
+            None => query.to_owned(),
+        };
+        url.set_query(Some(&combined));
+    }
+    url.set_fragment(None);
+    Ok(url)
+}
+
+fn upstream_headers(provider: &GatewayProvider) -> std::result::Result<HeaderMap, &'static str> {
+    let mut headers = HeaderMap::new();
+    headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    if !provider.key.is_empty() {
+        let value = HeaderValue::from_str(&format!("Bearer {}", provider.key))
+            .map_err(|_| "provider API key cannot be used as an HTTP header")?;
+        headers.insert(header::AUTHORIZATION, value);
+    }
+    for (name, value) in &provider.headers {
+        let name = HeaderName::from_bytes(name.as_bytes())
+            .map_err(|_| "provider contains an invalid custom header name")?;
+        let value = HeaderValue::from_str(value)
+            .map_err(|_| "provider contains an invalid custom header value")?;
+        headers.insert(name, value);
+    }
+    Ok(headers)
+}
+
+fn relay(upstream: reqwest::Response) -> Response {
+    let status = upstream.status();
+    let headers = upstream.headers().clone();
+    let mut response = Response::new(Body::from_stream(upstream.bytes_stream()));
+    *response.status_mut() = status;
+
+    let connection_tokens = headers
+        .get_all(header::CONNECTION)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|value| value.split(','))
+        .map(str::trim)
+        .collect::<HashSet<_>>();
+    for (name, value) in &headers {
+        let name_text = name.as_str();
+        if matches!(
+            name_text,
+            "connection"
+                | "content-length"
+                | "keep-alive"
+                | "proxy-authenticate"
+                | "proxy-authorization"
+                | "te"
+                | "trailer"
+                | "transfer-encoding"
+                | "upgrade"
+        ) || connection_tokens.contains(name_text)
+        {
+            continue;
+        }
+        response.headers_mut().append(name.clone(), value.clone());
+    }
+    response
+}
+
+async fn not_found() -> Response {
+    api_error(StatusCode::NOT_FOUND, "unknown gateway endpoint")
+}
+
+fn api_error(status: StatusCode, message: &str) -> Response {
+    (
+        status,
+        Json(json!({
+            "error": {
+                "message": message,
+                "type": "invalid_request_error",
+                "code": null
+            }
+        })),
+    )
+        .into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use super::*;
+
+    fn provider(id: &str, name: &str, models: &[&str]) -> GatewayProvider {
+        GatewayProvider {
+            id: id.to_owned(),
+            name: name.to_owned(),
+            key: String::new(),
+            chat: "https://api.example/v1".to_owned(),
+            headers: BTreeMap::new(),
+            models: models.iter().map(|model| (*model).to_owned()).collect(),
+            hidden: false,
+        }
+    }
+
+    #[test]
+    fn appends_chat_path_and_preserves_query() {
+        let url = upstream_url("https://api.example/v1/", Some("stream=true&n=2"))
+            .expect("provider URL should be valid");
+        assert_eq!(
+            url.as_str(),
+            "https://api.example/v1/chat/completions?stream=true&n=2"
+        );
+    }
+
+    #[test]
+    fn resolves_qualified_models_without_truncating_model_id() {
+        let providers = [provider("relay", "Relay", &["visible-model"])];
+        let (provider, model) = resolve_model("relay/vendor/model", &providers)
+            .expect("qualified provider/model should resolve");
+        assert_eq!(provider.id, "relay");
+        assert_eq!(model, "vendor/model");
+    }
+
+    #[test]
+    fn rejects_ambiguous_bare_model_ids() {
+        let providers = [
+            provider("first", "First", &["shared-model"]),
+            provider("second", "Second", &["shared-model"]),
+        ];
+        assert!(matches!(
+            resolve_model("shared-model", &providers),
+            Err(ResolveError::Ambiguous)
+        ));
+    }
+
+    #[test]
+    fn custom_auth_header_overrides_the_default_bearer_key() {
+        let mut provider = provider("relay", "Relay", &[]);
+        provider.key = "stored-secret".to_owned();
+        provider
+            .headers
+            .insert("authorization".to_owned(), "Token custom-scheme".to_owned());
+
+        let headers = upstream_headers(&provider).expect("headers should be valid");
+        assert_eq!(headers[header::AUTHORIZATION], "Token custom-scheme");
+    }
+}

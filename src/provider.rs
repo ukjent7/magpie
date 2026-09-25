@@ -67,6 +67,32 @@ struct Provider {
     extra: BTreeMap<String, Value>,
 }
 
+pub(crate) struct GatewayProvider {
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) key: String,
+    pub(crate) chat: String,
+    pub(crate) headers: BTreeMap<String, String>,
+    pub(crate) models: Vec<String>,
+    pub(crate) hidden: bool,
+}
+
+pub(crate) fn gateway_providers() -> Result<Vec<GatewayProvider>> {
+    Ok(load()?
+        .providers
+        .into_iter()
+        .map(|provider| GatewayProvider {
+            id: provider.id,
+            name: provider.name,
+            key: provider.key,
+            chat: provider.chat,
+            headers: provider.headers,
+            models: provider.models,
+            hidden: provider.hidden,
+        })
+        .collect())
+}
+
 pub fn list() -> Result<()> {
     let providers = load()?.providers;
     if providers.is_empty() {

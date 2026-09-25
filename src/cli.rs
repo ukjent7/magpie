@@ -75,6 +75,7 @@ fn run(cli: Cli) -> Result<()> {
             bail!("the Rust migration does not include the desktop or terminal interface yet")
         }
         [command] if command == "agents" => list_agents(false),
+        [command, rest @ ..] if command == "serve" => crate::gateway::command(rest),
         [command] if command == "ls" || command == "list" => list_agents(true),
         [command] if command == "providers" => crate::provider::list(),
         [command, rest @ ..] if command == "provider" => crate::provider::command(rest),
@@ -227,6 +228,7 @@ fn usage() -> String {
         "  magpie rm <name>                delete a profile",
         "",
         "  magpie providers                list API providers",
+        "  magpie serve                    run the local API gateway",
         "  magpie provider <id>            show a provider",
         "  magpie provider add <name> url=<url> key=<key>",
         "  magpie provider key <id> <key>  change its API key",
