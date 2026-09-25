@@ -254,6 +254,10 @@ fn delete_yaml_many(text: &str, key_paths: &[&str]) -> Result<Option<String>> {
 }
 
 fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
+    write_atomic_inner(path, bytes, false)
+}
+
+fn write_atomic_inner(path: &Path, bytes: &[u8], private: bool) -> Result<()> {
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
     use std::{
@@ -271,9 +275,15 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
 
     #[cfg(unix)]
-    let mode = fs::metadata(path)
-        .ok()
-        .map(|metadata| metadata.permissions().mode() & 0o777);
+    let mode = if private {
+        Some(0o600)
+    } else {
+        fs::metadata(path)
+            .ok()
+            .map(|metadata| metadata.permissions().mode() & 0o777)
+    };
+    #[cfg(not(unix))]
+    let _ = private;
 
     let file_name = path
         .file_name()
@@ -293,14 +303,15 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
             .open(&candidate)
         {
             Ok(mut file) => {
-                let mut result = file.write_all(bytes).map_err(anyhow::Error::from);
+                let mut result = Ok(());
                 #[cfg(unix)]
-                if result.is_ok()
-                    && let Some(mode) = mode
-                {
+                if let Some(mode) = mode {
                     result = file
                         .set_permissions(fs::Permissions::from_mode(mode))
                         .with_context(|| format!("preserve permissions on {}", path.display()));
+                }
+                if result.is_ok() {
+                    result = file.write_all(bytes).map_err(anyhow::Error::from);
                 }
                 if result.is_ok() {
                     result = file.sync_all().map_err(anyhow::Error::from);
@@ -329,6 +340,10 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
 
 pub(crate) fn atomic_write_for_settings(path: &Path, bytes: &[u8]) -> Result<()> {
     write_atomic(path, bytes)
+}
+
+pub(crate) fn atomic_write_secret_for_settings(path: &Path, bytes: &[u8]) -> Result<()> {
+    write_atomic_inner(path, bytes, true)
 }
 
 #[cfg(test)]

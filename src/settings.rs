@@ -41,6 +41,10 @@ pub fn profiles_path() -> PathBuf {
     config_dir().join("magpie/profiles.json")
 }
 
+pub fn providers_path() -> PathBuf {
+    config_dir().join("magpie/providers.json")
+}
+
 pub fn migrate() {
     let config = config_dir();
     copy_tree(&config.join("dial"), &config.join("magpie"));
