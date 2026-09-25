@@ -1,7 +1,8 @@
 use std::{
-    collections::HashSet,
+    collections::{BTreeMap, HashMap, HashSet},
     fs,
     path::PathBuf,
+    sync::OnceLock,
     time::{Duration, Instant},
 };
 
@@ -12,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use crate::{config, settings};
 
 const MAX_MODEL_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
+const MAX_CATALOG_BYTES: usize = 64 * 1024 * 1024;
 const MAX_EXPOSED_MODELS: usize = 24;
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -73,6 +75,41 @@ struct Modalities {
     output: Vec<String>,
 }
 
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct CatalogProvider {
+    models: BTreeMap<String, CatalogModel>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct CatalogModel {
+    id: String,
+    name: String,
+    release_date: String,
+    temperature: Option<bool>,
+    reasoning_options: Vec<ReasoningOption>,
+    modalities: Modalities,
+    limit: ModelLimit,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct ReasoningOption {
+    #[serde(rename = "type")]
+    kind: String,
+    values: Vec<String>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct ModelLimit {
+    context: usize,
+    input: usize,
+}
+
+static CATALOG: OnceLock<HashMap<String, CatalogProvider>> = OnceLock::new();
+
 pub fn live_models(provider_id: &str) -> Vec<Model> {
     let Some(path) = live_path(provider_id) else {
         return Vec::new();
@@ -85,8 +122,53 @@ pub fn live_models(provider_id: &str) -> Vec<Model> {
         .unwrap_or_default()
 }
 
-pub fn exposed_models(provider_id: &str, selected: &[String]) -> Vec<Model> {
-    let available = live_models(provider_id);
+pub fn available_models(provider_id: &str, catalog_id: &str) -> Vec<Model> {
+    let known = catalog_models(catalog_id);
+    let live = live_models(provider_id);
+    if live.is_empty() {
+        return known
+            .into_iter()
+            .filter(|model| !model.id.contains("-exp") && !model.id.contains("preview"))
+            .collect();
+    }
+
+    let known_by_id = known
+        .iter()
+        .map(|model| (model.id.as_str(), model))
+        .collect::<HashMap<_, _>>();
+    live.into_iter()
+        .map(|mut model| {
+            let known = known_by_id.get(model.id.as_str()).or_else(|| {
+                model
+                    .id
+                    .rsplit_once('/')
+                    .and_then(|(_, bare)| known_by_id.get(bare))
+            });
+            if let Some(known) = known {
+                if model.name.is_empty() || model.name == model.id {
+                    model.name.clone_from(&known.name);
+                }
+                model.provider.clone_from(&known.provider);
+                model.released.clone_from(&known.released);
+                model.efforts.clone_from(&known.efforts);
+                if model.image_input.is_none() {
+                    model.image_input = known.image_input;
+                    model.images |= known.images;
+                }
+                if model.context == 0 {
+                    model.context = known.context;
+                }
+                if known.temperature.is_some() {
+                    model.temperature = known.temperature;
+                }
+            }
+            model
+        })
+        .collect()
+}
+
+pub fn exposed_models(provider_id: &str, catalog_id: &str, selected: &[String]) -> Vec<Model> {
+    let available = available_models(provider_id, catalog_id);
     if !selected.is_empty() {
         let by_id = available
             .iter()
@@ -197,6 +279,120 @@ pub async fn fetch_models(
         Some(error) => Err(error),
         None => bail!("provider has no endpoint to ask for models"),
     }
+}
+
+pub async fn sync_models_dev() -> Result<usize> {
+    let client = Client::builder()
+        .user_agent(concat!("magpie/", env!("CARGO_PKG_VERSION")))
+        .timeout(Duration::from_secs(30))
+        .build()
+        .context("create models.dev HTTP client")?;
+    let mut response = client
+        .get("https://models.dev/api.json")
+        .header(header::ACCEPT, "application/json")
+        .send()
+        .await
+        .context("fetch models.dev catalog")?;
+    ensure!(
+        response.status() == StatusCode::OK,
+        "models.dev returned {}",
+        response.status()
+    );
+    let mut bytes = Vec::with_capacity(
+        response
+            .content_length()
+            .unwrap_or_default()
+            .min(MAX_CATALOG_BYTES as u64) as usize,
+    );
+    while let Some(chunk) = response.chunk().await.context("read models.dev catalog")? {
+        ensure!(
+            bytes.len().saturating_add(chunk.len()) <= MAX_CATALOG_BYTES,
+            "models.dev catalog exceeded 64 MiB"
+        );
+        bytes.extend_from_slice(&chunk);
+    }
+    let catalog = parse_catalog(&bytes)?;
+    let path = catalog_path();
+    let parent = path.parent().context("catalog path has no parent")?;
+    fs::create_dir_all(parent).with_context(|| format!("create catalog directory {}", parent.display()))?;
+    config::atomic_write_for_settings(&path, &bytes)
+        .with_context(|| format!("write models.dev catalog {}", path.display()))?;
+    Ok(catalog.len())
+}
+
+fn catalog_models(provider_id: &str) -> Vec<Model> {
+    let providers = CATALOG.get_or_init(|| {
+        fs::read(catalog_path())
+            .ok()
+            .and_then(|bytes| parse_catalog(&bytes).ok())
+            .unwrap_or_default()
+    });
+    let Some(provider) = providers.get(provider_id) else {
+        return Vec::new();
+    };
+
+    let mut models = provider
+        .models
+        .iter()
+        .filter_map(|(key, raw)| {
+            let id = if raw.id.is_empty() {
+                key.clone()
+            } else {
+                raw.id.clone()
+            };
+            is_text_model(&id, &raw.modalities.output).then(|| {
+                let name = if raw.name.is_empty() {
+                    id.clone()
+                } else {
+                    raw.name.clone()
+                };
+                let efforts = raw
+                    .reasoning_options
+                    .iter()
+                    .filter(|option| option.kind == "effort")
+                    .flat_map(|option| option.values.iter().cloned())
+                    .collect();
+                let images = raw
+                    .modalities
+                    .input
+                    .iter()
+                    .any(|modality| modality == "image");
+                Model {
+                    id,
+                    name,
+                    provider: provider_id.to_owned(),
+                    released: raw.release_date.clone(),
+                    efforts,
+                    temperature: raw.temperature,
+                    images,
+                    image_input: (!raw.modalities.input.is_empty()).then_some(images),
+                    context: if raw.limit.input > 0 {
+                        raw.limit.input
+                    } else {
+                        raw.limit.context
+                    },
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+    models.sort_by(|left, right| {
+        right
+            .released
+            .cmp(&left.released)
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    models
+}
+
+fn parse_catalog(bytes: &[u8]) -> Result<HashMap<String, CatalogProvider>> {
+    let catalog: HashMap<String, CatalogProvider> =
+        serde_json::from_slice(bytes).context("models.dev returned an invalid catalog")?;
+    ensure!(!catalog.is_empty(), "models.dev returned an empty catalog");
+    Ok(catalog)
+}
+
+fn catalog_path() -> PathBuf {
+    settings::cache_dir().join("magpie/models.json")
 }
 
 pub fn save_live(provider_id: &str, base: &str, models: Vec<Model>) -> Result<()> {
@@ -358,5 +554,25 @@ mod tests {
     fn provider_cache_paths_reject_traversal() {
         assert!(live_path("../other").is_none());
         assert!(live_path("provider-2").is_some());
+    }
+
+    #[test]
+    fn models_dev_catalog_keeps_names_capabilities_and_context() {
+        let catalog = parse_catalog(
+            br#"{"openai":{"models":{"gpt-next":{"id":"gpt-next","name":"GPT Next","release_date":"2026-09-01","temperature":false,"reasoning_options":[{"type":"effort","values":["low","high"]}],"modalities":{"input":["text","image"],"output":["text"]},"limit":{"context":400000,"input":272000}}}}}"#,
+        )
+        .expect("valid models.dev catalog");
+        let model = &catalog["openai"].models["gpt-next"];
+        assert_eq!(model.name, "GPT Next");
+        assert_eq!(model.temperature, Some(false));
+        assert_eq!(
+            model.reasoning_options[0].values,
+            vec!["low".to_owned(), "high".to_owned()]
+        );
+        assert_eq!(model.limit.input, 272000);
+        assert_eq!(
+            model.modalities.input,
+            vec!["text".to_owned(), "image".to_owned()]
+        );
     }
 }

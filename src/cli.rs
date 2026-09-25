@@ -76,6 +76,11 @@ async fn run(cli: Cli) -> Result<()> {
         }
         [command] if command == "agents" => list_agents(false),
         [command] if command == "presets" => crate::provider::presets(),
+        [command] if command == "sync" => {
+            let providers = crate::catalog::sync_models_dev().await?;
+            println!("✓ refreshed models.dev for {providers} providers");
+            Ok(())
+        }
         [command, rest @ ..] if command == "serve" => crate::gateway::command(rest).await,
         [command] if command == "ls" || command == "list" => list_agents(true),
         [command] if command == "providers" => crate::provider::list(),
@@ -232,6 +237,7 @@ fn usage() -> String {
         "  magpie providers                list API providers",
         "  magpie models                   list exposed provider models",
         "  magpie presets                  list provider presets",
+        "  magpie sync                     refresh the model catalog",
         "  magpie serve                    run the local API gateway",
         "  magpie provider <id>            show a provider",
         "  magpie provider add <preset> [key]",

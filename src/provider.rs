@@ -434,7 +434,11 @@ pub(crate) fn gateway_providers() -> Result<Vec<GatewayProvider>> {
         .providers
         .into_iter()
         .map(|provider| {
-            let models = crate::catalog::exposed_models(&provider.id, &provider.models)
+            let models = crate::catalog::exposed_models(
+                &provider.id,
+                provider.catalog_id(),
+                &provider.models,
+            )
                 .into_iter()
                 .map(|model| model.id)
                 .collect();
@@ -473,7 +477,12 @@ pub fn list() -> Result<()> {
             provider.id,
             host,
             key,
-            crate::catalog::exposed_models(&provider.id, &provider.models).len(),
+            crate::catalog::exposed_models(
+                &provider.id,
+                provider.catalog_id(),
+                &provider.models,
+            )
+            .len(),
             if provider.hidden { "  [hidden]" } else { "" }
         );
     }
@@ -505,7 +514,11 @@ pub fn models() -> Result<()> {
         .iter()
         .filter(|provider| !provider.hidden && (!provider.key.is_empty() || provider.is_local()))
     {
-        let models = crate::catalog::exposed_models(&provider.id, &provider.models);
+        let models = crate::catalog::exposed_models(
+            &provider.id,
+            provider.catalog_id(),
+            &provider.models,
+        );
         if models.is_empty() {
             continue;
         }
@@ -517,13 +530,20 @@ pub fn models() -> Result<()> {
             } else {
                 format!("  {}", model.name)
             };
-            println!("  {}{name}", model.id);
+            let efforts = if model.efforts.is_empty() {
+                String::new()
+            } else {
+                format!("  ({})", model.efforts.join("/"))
+            };
+            println!("  {}{name}{efforts}", model.id);
         }
     }
     if !found {
-        println!(
-            "no models discovered yet · magpie provider models <id> fetches a provider's list"
-        );
+        if providers.is_empty() {
+            println!("no providers yet · magpie provider add <preset> starts with a vendor");
+        } else {
+            println!("no models available yet · run magpie sync or magpie provider models <id>");
+        }
     }
     Ok(())
 }
@@ -727,16 +747,20 @@ fn show(id: &str) -> Result<()> {
     if !provider.models.is_empty() {
         println!("  models: {}", provider.models.join(", "));
     } else {
-        let available = crate::catalog::live_models(&provider.id);
+        let available = crate::catalog::available_models(&provider.id, provider.catalog_id());
         if available.is_empty() {
             println!(
                 "  models: not fetched · magpie provider models {}",
                 provider.id
             );
         } else {
-            let exposed = crate::catalog::exposed_models(&provider.id, &provider.models);
+            let exposed = crate::catalog::exposed_models(
+                &provider.id,
+                provider.catalog_id(),
+                &provider.models,
+            );
             println!(
-                "  models: {} exposed of {} fetched",
+                "  models: {} exposed of {} available",
                 exposed.len(),
                 available.len()
             );
@@ -909,6 +933,14 @@ fn is_false(value: &bool) -> bool {
 }
 
 impl Provider {
+    fn catalog_id(&self) -> &str {
+        if self.catalog.is_empty() {
+            &self.id
+        } else {
+            &self.catalog
+        }
+    }
+
     fn host(&self) -> String {
         [&self.chat, &self.responses, &self.anthropic]
             .into_iter()
