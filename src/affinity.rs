@@ -175,14 +175,14 @@ fn chat_turns(body: &Value) -> (usize, bool) {
             }
         }
     }
-    let within = messages.last().is_some_and(|message| match message
-        .get("role")
-        .and_then(Value::as_str)
-    {
-        Some("tool") => true,
-        Some("user") => chat_content(message.get("content")).1,
-        _ => false,
-    });
+    let within =
+        messages.last().is_some_and(
+            |message| match message.get("role").and_then(Value::as_str) {
+                Some("tool") => true,
+                Some("user") => chat_content(message.get("content")).1,
+                _ => false,
+            },
+        );
     (turn, within)
 }
 
@@ -267,17 +267,17 @@ fn anthropic_content(content: Option<&Value>) -> (bool, bool) {
         return (!text.is_empty(), false);
     }
     content.as_array().map_or((false, false), |blocks| {
-        let text_or_image = blocks.iter().any(|block| match block
-            .get("type")
-            .and_then(Value::as_str)
-        {
-            Some("image") => true,
-            Some("text") => block
-                .get("text")
-                .and_then(Value::as_str)
-                .is_some_and(|text| !text.is_empty()),
-            _ => false,
-        });
+        let text_or_image =
+            blocks
+                .iter()
+                .any(|block| match block.get("type").and_then(Value::as_str) {
+                    Some("image") => true,
+                    Some("text") => block
+                        .get("text")
+                        .and_then(Value::as_str)
+                        .is_some_and(|text| !text.is_empty()),
+                    _ => false,
+                });
         let result = blocks
             .iter()
             .any(|block| block.get("type").and_then(Value::as_str) == Some("tool_result"));
@@ -293,17 +293,17 @@ fn responses_content(content: Option<&Value>) -> (bool, bool) {
         return (!text.is_empty(), false);
     }
     content.as_array().map_or((false, false), |blocks| {
-        let text_or_image = blocks.iter().any(|block| match block
-            .get("type")
-            .and_then(Value::as_str)
-        {
-            Some("input_image" | "image") => true,
-            Some("input_text" | "text") => block
-                .get("text")
-                .and_then(Value::as_str)
-                .is_some_and(|text| !text.is_empty()),
-            _ => false,
-        });
+        let text_or_image =
+            blocks
+                .iter()
+                .any(|block| match block.get("type").and_then(Value::as_str) {
+                    Some("input_image" | "image") => true,
+                    Some("input_text" | "text") => block
+                        .get("text")
+                        .and_then(Value::as_str)
+                        .is_some_and(|text| !text.is_empty()),
+                    _ => false,
+                });
         let result = blocks.iter().any(|block| {
             matches!(
                 block.get("type").and_then(Value::as_str),
@@ -418,7 +418,9 @@ impl UsageScanner {
                 .into_iter()
                 .collect(),
             ApiProtocol::Anthropic => [
-                value.get("message").and_then(|message| message.get("usage")),
+                value
+                    .get("message")
+                    .and_then(|message| message.get("usage")),
                 value.get("usage"),
             ]
             .into_iter()
@@ -489,8 +491,20 @@ mod tests {
         let user_turn = body(
             r#"{"messages":[{"role":"user","content":"question"},{"role":"assistant","content":"answer"},{"role":"user","content":"next"}]}"#,
         );
-        let tool_context = context("test-turn", "turn", &HeaderMap::new(), ApiProtocol::Chat, &tool_round);
-        let user_context = context("test-turn-user", "turn", &HeaderMap::new(), ApiProtocol::Chat, &user_turn);
+        let tool_context = context(
+            "test-turn",
+            "turn",
+            &HeaderMap::new(),
+            ApiProtocol::Chat,
+            &tool_round,
+        );
+        let user_context = context(
+            "test-turn-user",
+            "turn",
+            &HeaderMap::new(),
+            ApiProtocol::Chat,
+            &user_turn,
+        );
         assert!(tool_context.within);
         assert_eq!(turn_of(ApiProtocol::Chat, &tool_round).0, 1);
         assert!(should_keep(
@@ -519,14 +533,27 @@ mod tests {
     #[test]
     fn default_affinity_requires_a_warm_cache_across_turns() {
         let request = body(r#"{"messages":[{"role":"user","content":"next"}]}"#);
-        let context = context("test-auto", "", &HeaderMap::new(), ApiProtocol::Chat, &request);
+        let context = context(
+            "test-auto",
+            "",
+            &HeaderMap::new(),
+            ApiProtocol::Chat,
+            &request,
+        );
         let previous = Previous {
             route: "route".to_owned(),
             at: Instant::now(),
             cache_read: 2048,
         };
         assert!(should_keep(&context, &previous, false));
-        assert!(!should_keep(&context, &Previous { cache_read: 1023, ..previous.clone() }, false));
+        assert!(!should_keep(
+            &context,
+            &Previous {
+                cache_read: 1023,
+                ..previous.clone()
+            },
+            false
+        ));
         assert!(!should_keep(&context, &previous, true));
     }
 
@@ -546,7 +573,9 @@ mod tests {
     fn responses_usage_can_be_nested_in_completed_event() {
         let usage = cache_read_from_value(
             ApiProtocol::Responses,
-            &body(r#"{"type":"response.completed","response":{"usage":{"input_tokens_details":{"cached_tokens":1536}}}}"#),
+            &body(
+                r#"{"type":"response.completed","response":{"usage":{"input_tokens_details":{"cached_tokens":1536}}}}"#,
+            ),
         );
         assert_eq!(usage, 1536);
     }

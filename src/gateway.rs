@@ -872,11 +872,7 @@ fn move_resting_routes_last(candidates: &mut [RouteCandidate<'_>]) {
     }
 }
 
-fn apply_affinity(
-    candidates: &mut [RouteCandidate<'_>],
-    context: &AffinityContext,
-    rotate: bool,
-) {
+fn apply_affinity(candidates: &mut [RouteCandidate<'_>], context: &AffinityContext, rotate: bool) {
     let Some(previous) = affinity::previous(context) else {
         return;
     };
@@ -1147,7 +1143,10 @@ fn relay(
                     if let Some(scanner) = scanner.as_mut() {
                         scanner.push(&chunk);
                     }
-                    Some((Ok::<_, reqwest::Error>(chunk), (input, scanner, affinity_record)))
+                    Some((
+                        Ok::<_, reqwest::Error>(chunk),
+                        (input, scanner, affinity_record),
+                    ))
                 }
                 Some(Err(error)) => Some((Err(error), (input, None, None))),
                 None => {
@@ -1250,7 +1249,10 @@ fn translated_stream_response(
                     }
                     Some(Err(error)) => {
                         ended = true;
-                        return Some((Err(error), (input, translator, pending, ended, scanner, None)));
+                        return Some((
+                            Err(error),
+                            (input, translator, pending, ended, scanner, None),
+                        ));
                     }
                     None => {
                         pending.extend(translator.finish());
@@ -1720,7 +1722,13 @@ mod tests {
         let mut candidates = providers
             .iter()
             .flat_map(|provider| {
-                key_candidates(provider, "model", ApiProtocol::Chat, ApiProtocol::Chat, true)
+                key_candidates(
+                    provider,
+                    "model",
+                    ApiProtocol::Chat,
+                    ApiProtocol::Chat,
+                    true,
+                )
             })
             .collect::<Vec<_>>();
         let mut headers = HeaderMap::new();
@@ -1757,7 +1765,13 @@ mod tests {
         let mut candidates = providers
             .iter()
             .flat_map(|provider| {
-                key_candidates(provider, "model", ApiProtocol::Chat, ApiProtocol::Chat, true)
+                key_candidates(
+                    provider,
+                    "model",
+                    ApiProtocol::Chat,
+                    ApiProtocol::Chat,
+                    true,
+                )
             })
             .collect::<Vec<_>>();
         let mut headers = HeaderMap::new();

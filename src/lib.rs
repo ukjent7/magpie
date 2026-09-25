@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 
-pub mod agent;
 mod affinity;
+pub mod agent;
 pub mod catalog;
 pub mod cli;
 pub mod config;
