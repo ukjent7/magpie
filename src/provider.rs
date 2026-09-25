@@ -587,10 +587,11 @@ pub fn delete_group(id: &str) -> Result<()> {
         "no group {id:?}"
     );
     if auto_exists {
-        let mut hidden = Group::default();
-        hidden.id = id.to_owned();
-        hidden.hidden = true;
-        file.groups.push(hidden);
+        file.groups.push(Group {
+            id: id.to_owned(),
+            hidden: true,
+            ..Group::default()
+        });
     }
     store(file)
 }
@@ -1455,19 +1456,23 @@ mod tests {
             model_entry("second", "model-1", "Model One"),
         ];
         let auto_id = "auto-model-1";
-        let mut hidden = Group::default();
-        hidden.id = auto_id.to_owned();
-        hidden.hidden = true;
+        let hidden = Group {
+            id: auto_id.to_owned(),
+            hidden: true,
+            ..Group::default()
+        };
 
         let hidden_groups = groups_in(&[hidden], &entries);
         assert_eq!(hidden_groups.len(), 1);
         assert!(hidden_groups[0].auto);
         assert!(hidden_groups[0].hidden);
 
-        let mut custom = Group::default();
-        custom.id = auto_id.to_owned();
-        custom.name = "My model pool".to_owned();
-        custom.members = vec!["first/model-1".to_owned()];
+        let custom = Group {
+            id: auto_id.to_owned(),
+            name: "My model pool".to_owned(),
+            members: vec!["first/model-1".to_owned()],
+            ..Group::default()
+        };
         let custom_groups = groups_in(&[custom], &entries);
         assert_eq!(custom_groups.len(), 1);
         assert_eq!(custom_groups[0].name, "My model pool");
