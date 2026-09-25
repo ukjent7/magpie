@@ -1086,9 +1086,11 @@ mod tests {
             normalize_fallbacks(&selected, &providers).expect("valid fallback models"),
             vec!["backup/model-v2".to_owned()]
         );
-        assert!(normalize_fallbacks(&["none".to_owned()], &providers)
-            .expect("none clears fallbacks")
-            .is_empty());
+        assert!(
+            normalize_fallbacks(&["none".to_owned()], &providers)
+                .expect("none clears fallbacks")
+                .is_empty()
+        );
     }
 
     #[test]
@@ -1097,10 +1099,9 @@ mod tests {
 
         assert!(normalize_fallbacks(&["missing/model".to_owned()], &providers).is_err());
         assert!(normalize_fallbacks(&["backup/".to_owned()], &providers).is_err());
-        assert!(normalize_fallbacks(
-            &["none".to_owned(), "backup/model".to_owned()],
-            &providers
-        )
-        .is_err());
+        assert!(
+            normalize_fallbacks(&["none".to_owned(), "backup/model".to_owned()], &providers)
+                .is_err()
+        );
     }
 }

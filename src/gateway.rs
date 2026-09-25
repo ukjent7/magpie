@@ -305,7 +305,10 @@ async fn forward(
                 continue;
             }
             Err(error) => {
-                eprintln!("magpie: upstream request to {} failed: {error:#}", provider.id);
+                eprintln!(
+                    "magpie: upstream request to {} failed: {error:#}",
+                    provider.id
+                );
                 if error
                     .chain()
                     .any(|cause| cause.to_string() == "translate request for provider API")
@@ -489,8 +492,7 @@ async fn send_upstream(
 }
 
 fn retryable_status(status: StatusCode) -> bool {
-    status.is_server_error()
-        || matches!(status.as_u16(), 401 | 402 | 403 | 404 | 408 | 429)
+    status.is_server_error() || matches!(status.as_u16(), 401 | 402 | 403 | 404 | 408 | 429)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
