@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
@@ -14,6 +14,8 @@ pub(crate) fn request(
     match (from, to) {
         (ApiProtocol::Chat, ApiProtocol::Anthropic) => chat_to_anthropic(body, model),
         (ApiProtocol::Anthropic, ApiProtocol::Chat) => anthropic_to_chat(body, model),
+        (ApiProtocol::Chat, ApiProtocol::Responses) => chat_to_responses(body, model),
+        (ApiProtocol::Responses, ApiProtocol::Chat) => responses_to_chat(body, model),
         _ => bail!("translation between these API protocols is not supported yet"),
     }
 }
@@ -27,6 +29,8 @@ pub(crate) fn response(
     match (from, to) {
         (ApiProtocol::Anthropic, ApiProtocol::Chat) => anthropic_response_to_chat(body, model),
         (ApiProtocol::Chat, ApiProtocol::Anthropic) => chat_response_to_anthropic(body, model),
+        (ApiProtocol::Responses, ApiProtocol::Chat) => responses_response_to_chat(body, model),
+        (ApiProtocol::Chat, ApiProtocol::Responses) => chat_response_to_responses(body, model),
         _ => bail!("translation between these API protocols is not supported yet"),
     }
 }
@@ -42,6 +46,8 @@ pub(crate) struct SseTranslator {
 enum StreamDirection {
     AnthropicToChat(ChatStream),
     ChatToAnthropic(AnthropicStream),
+    ResponsesToChat(ChatStream),
+    ChatToResponses(ResponsesStream),
 }
 
 #[derive(Default)]
@@ -53,6 +59,7 @@ struct ChatStream {
     usage: Option<Value>,
     next_tool_index: usize,
     tool_indices: HashMap<usize, usize>,
+    tool_args_seen: HashSet<usize>,
 }
 
 #[derive(Default)]
@@ -74,6 +81,43 @@ struct ToolStream {
     block_index: Option<usize>,
 }
 
+#[derive(Default)]
+struct ResponsesStream {
+    id: String,
+    model: String,
+    created: u64,
+    sequence: u64,
+    started: bool,
+    ended: bool,
+    next_output_index: usize,
+    open: Option<OpenResponseItem>,
+    tools: BTreeMap<usize, ResponsesTool>,
+    output: Vec<Value>,
+    usage: Option<Value>,
+    finish_reason: Option<String>,
+}
+
+struct OpenResponseItem {
+    id: String,
+    output_index: usize,
+    text: String,
+    kind: OpenResponseKind,
+}
+
+enum OpenResponseKind {
+    Text,
+    Reasoning,
+}
+
+#[derive(Clone, Default)]
+struct ResponsesTool {
+    item_id: String,
+    call_id: String,
+    name: String,
+    arguments: String,
+    output_index: usize,
+}
+
 impl SseTranslator {
     pub(crate) fn new(from: ApiProtocol, to: ApiProtocol, model: &str) -> Option<Self> {
         let direction = match (from, to) {
@@ -82,6 +126,12 @@ impl SseTranslator {
             }
             (ApiProtocol::Chat, ApiProtocol::Anthropic) => {
                 StreamDirection::ChatToAnthropic(AnthropicStream::default())
+            }
+            (ApiProtocol::Responses, ApiProtocol::Chat) => {
+                StreamDirection::ResponsesToChat(ChatStream::default())
+            }
+            (ApiProtocol::Chat, ApiProtocol::Responses) => {
+                StreamDirection::ChatToResponses(ResponsesStream::default())
             }
             _ => return None,
         };
@@ -116,6 +166,8 @@ impl SseTranslator {
         output.extend(match &mut self.direction {
             StreamDirection::AnthropicToChat(state) => finish_chat_stream(state, &self.model),
             StreamDirection::ChatToAnthropic(state) => finish_anthropic_stream(state, &self.model),
+            StreamDirection::ResponsesToChat(state) => finish_chat_stream(state, &self.model),
+            StreamDirection::ChatToResponses(state) => finish_responses_stream(state, &self.model),
         });
         output
     }
@@ -124,6 +176,8 @@ impl SseTranslator {
         match &self.direction {
             StreamDirection::AnthropicToChat(state) => state.ended,
             StreamDirection::ChatToAnthropic(state) => state.ended,
+            StreamDirection::ResponsesToChat(state) => state.ended,
+            StreamDirection::ChatToResponses(state) => state.ended,
         }
     }
 
@@ -131,6 +185,8 @@ impl SseTranslator {
         if match &self.direction {
             StreamDirection::AnthropicToChat(state) => state.ended,
             StreamDirection::ChatToAnthropic(state) => state.ended,
+            StreamDirection::ResponsesToChat(state) => state.ended,
+            StreamDirection::ChatToResponses(state) => state.ended,
         } {
             return Vec::new();
         }
@@ -163,6 +219,12 @@ impl SseTranslator {
             StreamDirection::ChatToAnthropic(state) => {
                 chat_event_to_anthropic(state, &self.model, &value)
             }
+            StreamDirection::ResponsesToChat(state) => {
+                responses_event_to_chat(state, &self.model, &value)
+            }
+            StreamDirection::ChatToResponses(state) => {
+                chat_event_to_responses(state, &self.model, &value)
+            }
         }
     }
 
@@ -183,6 +245,20 @@ impl SseTranslator {
                     &json!({"type":"error","error":{"type":"api_error","message":message}}),
                 ));
                 output.push(event_frame("message_stop", &json!({"type":"message_stop"})));
+            }
+            StreamDirection::ResponsesToChat(state) => {
+                state.ended = true;
+                output.push(data_frame(&json!({
+                    "error": {"message":message,"type":"api_error","code":null}
+                })));
+                output.push(b"data: [DONE]\n\n".to_vec());
+            }
+            StreamDirection::ChatToResponses(state) => {
+                state.ended = true;
+                output.push(event_frame(
+                    "error",
+                    &json!({"type":"error","error":{"type":"api_error","message":message}}),
+                ));
             }
         }
         output
@@ -310,6 +386,593 @@ fn anthropic_event_to_chat(
     output
 }
 
+fn responses_event_to_chat(
+    state: &mut ChatStream,
+    model: &str,
+    kind: &str,
+    value: &Value,
+) -> Vec<Vec<u8>> {
+    let mut output = Vec::new();
+    let response = value.get("response").unwrap_or(&Value::Null);
+    match kind {
+        "response.created" | "response.in_progress" => {
+            if let Some(id) = response.get("id").and_then(Value::as_str) {
+                state.id = id.to_owned();
+            }
+            emit_chat_role(state, model, &mut output);
+        }
+        "response.output_item.added" => {
+            let item = value.get("item").unwrap_or(&Value::Null);
+            if item.get("type").and_then(Value::as_str) == Some("function_call") {
+                let output_index = value
+                    .get("output_index")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0) as usize;
+                let tool_index = chat_tool_index(state, output_index);
+                emit_chat_role(state, model, &mut output);
+                output.push(chat_delta_frame(
+                    state,
+                    model,
+                    json!({"tool_calls":[{
+                        "index":tool_index,
+                        "id":item.get("call_id").cloned().unwrap_or_else(|| item.get("id").cloned().unwrap_or(Value::Null)),
+                        "type":"function",
+                        "function":{"name":item.get("name").cloned().unwrap_or(Value::Null),"arguments":""}
+                    }]}),
+                ));
+            }
+        }
+        "response.output_text.delta" => {
+            if let Some(text) = value
+                .get("delta")
+                .and_then(Value::as_str)
+                .filter(|text| !text.is_empty())
+            {
+                emit_chat_role(state, model, &mut output);
+                output.push(chat_delta_frame(state, model, json!({"content":text})));
+            }
+        }
+        "response.reasoning_summary_text.delta" | "response.reasoning_text.delta" => {
+            if let Some(text) = value
+                .get("delta")
+                .and_then(Value::as_str)
+                .filter(|text| !text.is_empty())
+            {
+                emit_chat_role(state, model, &mut output);
+                output.push(chat_delta_frame(
+                    state,
+                    model,
+                    json!({"reasoning_content":text}),
+                ));
+            }
+        }
+        "response.function_call_arguments.delta" => {
+            let output_index = value
+                .get("output_index")
+                .and_then(Value::as_u64)
+                .unwrap_or(0) as usize;
+            let tool_index = chat_tool_index(state, output_index);
+            if let Some(arguments) = value
+                .get("delta")
+                .and_then(Value::as_str)
+                .filter(|text| !text.is_empty())
+            {
+                state.tool_args_seen.insert(tool_index);
+                emit_chat_role(state, model, &mut output);
+                output.push(chat_delta_frame(
+                    state,
+                    model,
+                    json!({"tool_calls":[{"index":tool_index,"function":{"arguments":arguments}}]}),
+                ));
+            }
+        }
+        "response.output_item.done" => {
+            let item = value.get("item").unwrap_or(&Value::Null);
+            if item.get("type").and_then(Value::as_str) == Some("function_call") {
+                let output_index = value
+                    .get("output_index")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0) as usize;
+                let tool_index = chat_tool_index(state, output_index);
+                if !state.tool_args_seen.contains(&tool_index)
+                    && let Some(arguments) = item
+                        .get("arguments")
+                        .and_then(Value::as_str)
+                        .filter(|text| !text.is_empty())
+                {
+                    emit_chat_role(state, model, &mut output);
+                    output.push(chat_delta_frame(
+                        state,
+                        model,
+                        json!({"tool_calls":[{"index":tool_index,"function":{"arguments":arguments}}]}),
+                    ));
+                    state.tool_args_seen.insert(tool_index);
+                }
+            }
+        }
+        "response.completed" | "response.incomplete" => {
+            let status = response
+                .get("status")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let reason = response
+                .pointer("/incomplete_details/reason")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            state.stop_reason = Some(if status == "incomplete" || kind == "response.incomplete" {
+                if reason == "content_filter" {
+                    "content_filter".to_owned()
+                } else {
+                    "length".to_owned()
+                }
+            } else if response
+                .get("output")
+                .and_then(Value::as_array)
+                .is_some_and(|items| {
+                    items.iter().any(|item| {
+                        item.get("type").and_then(Value::as_str) == Some("function_call")
+                    })
+                })
+                || !state.tool_indices.is_empty()
+            {
+                "tool_calls".to_owned()
+            } else {
+                "stop".to_owned()
+            });
+            if let Some(usage) = response.get("usage") {
+                state.usage = Some(responses_usage_for_chat(usage));
+            }
+            output.extend(finish_chat_stream(state, model));
+        }
+        "response.failed" => {
+            state.ended = true;
+            let message = response
+                .pointer("/error/message")
+                .and_then(Value::as_str)
+                .unwrap_or("provider response failed");
+            output.push(data_frame(&json!({
+                "error":{"message":message,"type":"api_error","code":null}
+            })));
+            output.push(b"data: [DONE]\n\n".to_vec());
+        }
+        "error" => {
+            state.ended = true;
+            let message = value
+                .pointer("/error/message")
+                .or_else(|| value.get("message"))
+                .and_then(Value::as_str)
+                .unwrap_or("provider returned an error");
+            output.push(data_frame(&json!({
+                "error":{"message":message,"type":"api_error","code":null}
+            })));
+            output.push(b"data: [DONE]\n\n".to_vec());
+        }
+        _ => {}
+    }
+    output
+}
+
+fn chat_tool_index(state: &mut ChatStream, output_index: usize) -> usize {
+    if let Some(index) = state.tool_indices.get(&output_index) {
+        *index
+    } else {
+        let index = state.next_tool_index;
+        state.next_tool_index += 1;
+        state.tool_indices.insert(output_index, index);
+        index
+    }
+}
+
+fn responses_usage_for_chat(usage: &Value) -> Value {
+    let input_tokens = usage
+        .get("input_tokens")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let cached_tokens = usage
+        .pointer("/input_tokens_details/cached_tokens")
+        .and_then(Value::as_u64)
+        .unwrap_or(0)
+        .min(input_tokens);
+    let output_tokens = usage
+        .get("output_tokens")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    json!({
+        "input_tokens":input_tokens - cached_tokens,
+        "cache_read_input_tokens":cached_tokens,
+        "output_tokens":output_tokens
+    })
+}
+
+fn chat_event_to_responses(
+    state: &mut ResponsesStream,
+    model: &str,
+    value: &Value,
+) -> Vec<Vec<u8>> {
+    let mut output = Vec::new();
+    if let Some(id) = value.get("id").and_then(Value::as_str) {
+        state.id = id.to_owned();
+    }
+    if let Some(created) = value.get("created").and_then(Value::as_u64) {
+        state.created = created;
+    }
+    if let Some(usage) = value.get("usage") {
+        state.usage = Some(responses_usage_from_chat(usage));
+    }
+    if let Some(choice) = value
+        .get("choices")
+        .and_then(Value::as_array)
+        .and_then(|choices| choices.first())
+    {
+        start_responses_stream(state, model, &mut output);
+        let delta = choice.get("delta").unwrap_or(&Value::Null);
+        if let Some(text) = delta
+            .get("content")
+            .and_then(Value::as_str)
+            .filter(|text| !text.is_empty())
+        {
+            let output_index = ensure_responses_text(state, model, false, &mut output);
+            let item_id = if let Some(open) = state.open.as_mut() {
+                open.text.push_str(text);
+                Some(open.id.clone())
+            } else {
+                None
+            };
+            if let Some(item_id) = item_id {
+                output.push(responses_stream_frame(
+                    state,
+                    "response.output_text.delta",
+                    json!({"item_id":item_id,"output_index":output_index,"content_index":0,"delta":text,"logprobs":[]}),
+                ));
+            }
+        }
+        let reasoning = delta
+            .get("reasoning_content")
+            .or_else(|| delta.get("reasoning"))
+            .and_then(Value::as_str);
+        if let Some(text) = reasoning.filter(|text| !text.is_empty()) {
+            let output_index = ensure_responses_text(state, model, true, &mut output);
+            let item_id = if let Some(open) = state.open.as_mut() {
+                open.text.push_str(text);
+                Some(open.id.clone())
+            } else {
+                None
+            };
+            if let Some(item_id) = item_id {
+                output.push(responses_stream_frame(
+                    state,
+                    "response.reasoning_summary_text.delta",
+                    json!({"item_id":item_id,"output_index":output_index,"summary_index":0,"delta":text}),
+                ));
+            }
+        }
+        if let Some(calls) = delta.get("tool_calls").and_then(Value::as_array) {
+            for (ordinal, call) in calls.iter().enumerate() {
+                let tool_index = call
+                    .get("index")
+                    .and_then(Value::as_u64)
+                    .map(|index| index as usize)
+                    .unwrap_or(ordinal);
+                let id = call.get("id").and_then(Value::as_str);
+                let name = call.pointer("/function/name").and_then(Value::as_str);
+                let is_new_tool = !state.tools.contains_key(&tool_index);
+                let output_index =
+                    ensure_responses_tool(state, model, tool_index, id, name, &mut output);
+                let tool = state.tools.entry(tool_index).or_default();
+                if !is_new_tool && let Some(id) = id {
+                    if tool.call_id.starts_with("call_magpie_") {
+                        tool.call_id = id.to_owned();
+                    } else {
+                        tool.call_id.push_str(id);
+                    }
+                }
+                if !is_new_tool && let Some(name) = name {
+                    tool.name.push_str(name);
+                }
+                if let Some(arguments) = call
+                    .pointer("/function/arguments")
+                    .and_then(Value::as_str)
+                    .filter(|arguments| !arguments.is_empty())
+                {
+                    tool.arguments.push_str(arguments);
+                    let item_id = tool.item_id.clone();
+                    output.push(responses_stream_frame(
+                        state,
+                        "response.function_call_arguments.delta",
+                        json!({"item_id":item_id,"output_index":output_index,"delta":arguments}),
+                    ));
+                }
+            }
+        }
+        if let Some(reason) = choice.get("finish_reason").and_then(Value::as_str) {
+            state.finish_reason = Some(reason.to_owned());
+        }
+    } else if value.get("usage").is_some() {
+        start_responses_stream(state, model, &mut output);
+    }
+    output
+}
+
+fn start_responses_stream(state: &mut ResponsesStream, model: &str, output: &mut Vec<Vec<u8>>) {
+    if state.started {
+        return;
+    }
+    if state.id.is_empty() {
+        state.id = "resp_magpie".to_owned();
+    } else if !state.id.starts_with("resp_") {
+        let id = state
+            .id
+            .strip_prefix("chatcmpl-")
+            .or_else(|| state.id.strip_prefix("chatcmpl_"))
+            .unwrap_or(&state.id);
+        state.id = format!("resp_{id}");
+    }
+    state.model = model.to_owned();
+    state.started = true;
+    let response = responses_stream_response(state, "in_progress", Value::Null);
+    output.push(responses_stream_frame(
+        state,
+        "response.created",
+        json!({"response":response}),
+    ));
+    let response = responses_stream_response(state, "in_progress", Value::Null);
+    output.push(responses_stream_frame(
+        state,
+        "response.in_progress",
+        json!({"response":response}),
+    ));
+}
+
+fn ensure_responses_text(
+    state: &mut ResponsesStream,
+    model: &str,
+    reasoning: bool,
+    output: &mut Vec<Vec<u8>>,
+) -> usize {
+    let same_kind = state.open.as_ref().is_some_and(|open| {
+        matches!(
+            (&open.kind, reasoning),
+            (OpenResponseKind::Text, false) | (OpenResponseKind::Reasoning, true)
+        )
+    });
+    if same_kind {
+        return state.open.as_ref().map_or(0, |open| open.output_index);
+    }
+    close_responses_item(state, model, output);
+    let output_index = state.next_output_index;
+    state.next_output_index += 1;
+    let item_id = if reasoning {
+        format!("rs_magpie_{output_index}")
+    } else {
+        format!("msg_magpie_{output_index}")
+    };
+    state.output.push(Value::Null);
+    if reasoning {
+        output.push(responses_stream_frame(
+            state,
+            "response.output_item.added",
+            json!({"output_index":output_index,"item":{"id":item_id,"type":"reasoning","status":"in_progress","summary":[]}}),
+        ));
+        output.push(responses_stream_frame(
+            state,
+            "response.reasoning_summary_part.added",
+            json!({"item_id":item_id,"output_index":output_index,"summary_index":0,"part":{"type":"summary_text","text":""}}),
+        ));
+    } else {
+        output.push(responses_stream_frame(
+            state,
+            "response.output_item.added",
+            json!({"output_index":output_index,"item":{"id":item_id,"type":"message","role":"assistant","status":"in_progress","content":[]}}),
+        ));
+        output.push(responses_stream_frame(
+            state,
+            "response.content_part.added",
+            json!({"item_id":item_id,"output_index":output_index,"content_index":0,"part":{"type":"output_text","text":"","annotations":[],"logprobs":[]}}),
+        ));
+    }
+    state.open = Some(OpenResponseItem {
+        id: item_id,
+        output_index,
+        text: String::new(),
+        kind: if reasoning {
+            OpenResponseKind::Reasoning
+        } else {
+            OpenResponseKind::Text
+        },
+    });
+    output_index
+}
+
+fn close_responses_item(state: &mut ResponsesStream, _model: &str, output: &mut Vec<Vec<u8>>) {
+    let Some(open) = state.open.take() else {
+        return;
+    };
+    let item = match open.kind {
+        OpenResponseKind::Text => {
+            let part =
+                json!({"type":"output_text","text":open.text,"annotations":[],"logprobs":[]});
+            output.push(responses_stream_frame(
+                state,
+                "response.output_text.done",
+                json!({"item_id":open.id,"output_index":open.output_index,"content_index":0,"text":open.text,"logprobs":[]}),
+            ));
+            output.push(responses_stream_frame(
+                state,
+                "response.content_part.done",
+                json!({"item_id":open.id,"output_index":open.output_index,"content_index":0,"part":part}),
+            ));
+            json!({"id":open.id,"type":"message","role":"assistant","status":"completed","content":[part]})
+        }
+        OpenResponseKind::Reasoning => {
+            let part = json!({"type":"summary_text","text":open.text});
+            output.push(responses_stream_frame(
+                state,
+                "response.reasoning_summary_text.done",
+                json!({"item_id":open.id,"output_index":open.output_index,"summary_index":0,"text":open.text}),
+            ));
+            output.push(responses_stream_frame(
+                state,
+                "response.reasoning_summary_part.done",
+                json!({"item_id":open.id,"output_index":open.output_index,"summary_index":0,"part":part}),
+            ));
+            json!({"id":open.id,"type":"reasoning","status":"completed","summary":[part]})
+        }
+    };
+    output.push(responses_stream_frame(
+        state,
+        "response.output_item.done",
+        json!({"output_index":open.output_index,"item":item}),
+    ));
+    if let Some(slot) = state.output.get_mut(open.output_index) {
+        *slot = item;
+    }
+}
+
+fn ensure_responses_tool(
+    state: &mut ResponsesStream,
+    model: &str,
+    tool_index: usize,
+    id: Option<&str>,
+    name: Option<&str>,
+    output: &mut Vec<Vec<u8>>,
+) -> usize {
+    if let Some(tool) = state.tools.get(&tool_index) {
+        return tool.output_index;
+    }
+    close_responses_item(state, model, output);
+    let output_index = state.next_output_index;
+    state.next_output_index += 1;
+    let call_id = id
+        .filter(|id| !id.is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| format!("call_magpie_{tool_index}"));
+    let item_id = format!("fc_magpie_{output_index}");
+    let name = name.unwrap_or_default().to_owned();
+    state.output.push(Value::Null);
+    state.tools.insert(
+        tool_index,
+        ResponsesTool {
+            item_id: item_id.clone(),
+            call_id: call_id.clone(),
+            name: name.clone(),
+            arguments: String::new(),
+            output_index,
+        },
+    );
+    output.push(responses_stream_frame(
+        state,
+        "response.output_item.added",
+        json!({"output_index":output_index,"item":{"id":item_id,"type":"function_call","status":"in_progress","call_id":call_id,"name":name,"arguments":""}}),
+    ));
+    output_index
+}
+
+fn finish_responses_stream(state: &mut ResponsesStream, model: &str) -> Vec<Vec<u8>> {
+    if state.ended {
+        return Vec::new();
+    }
+    let mut output = Vec::new();
+    start_responses_stream(state, model, &mut output);
+    close_responses_item(state, model, &mut output);
+    let mut tools = state.tools.values().cloned().collect::<Vec<_>>();
+    tools.sort_by_key(|tool| tool.output_index);
+    for tool in tools {
+        let arguments = if tool.arguments.is_empty() {
+            "{}"
+        } else {
+            tool.arguments.as_str()
+        };
+        output.push(responses_stream_frame(
+            state,
+            "response.function_call_arguments.done",
+            json!({"item_id":tool.item_id,"output_index":tool.output_index,"call_id":tool.call_id,"name":tool.name,"arguments":arguments}),
+        ));
+        let item = json!({"id":tool.item_id,"type":"function_call","status":"completed","call_id":tool.call_id,"name":tool.name,"arguments":arguments});
+        output.push(responses_stream_frame(
+            state,
+            "response.output_item.done",
+            json!({"output_index":tool.output_index,"item":item}),
+        ));
+        if let Some(slot) = state.output.get_mut(tool.output_index) {
+            *slot = item;
+        }
+    }
+    let incomplete_reason = match state.finish_reason.as_deref().unwrap_or("stop") {
+        "length" => Some("max_output_tokens"),
+        "content_filter" => Some("content_filter"),
+        _ => None,
+    };
+    let status = if incomplete_reason.is_some() {
+        "incomplete"
+    } else {
+        "completed"
+    };
+    let incomplete = incomplete_reason
+        .map(|reason| json!({"reason":reason}))
+        .unwrap_or(Value::Null);
+    let response = responses_stream_response(state, status, incomplete);
+    let event = if status == "incomplete" {
+        "response.incomplete"
+    } else {
+        "response.completed"
+    };
+    output.push(responses_stream_frame(
+        state,
+        event,
+        json!({"response":response}),
+    ));
+    state.ended = true;
+    output
+}
+
+fn responses_stream_response(state: &ResponsesStream, status: &str, incomplete: Value) -> Value {
+    json!({
+        "id":state.id,
+        "object":"response",
+        "created_at":state.created,
+        "status":status,
+        "model":state.model,
+        "output":state.output,
+        "usage":state.usage,
+        "incomplete_details":incomplete,
+        "parallel_tool_calls":true,
+        "tool_choice":"auto",
+        "tools":[],
+        "error":null
+    })
+}
+
+fn responses_stream_frame(state: &mut ResponsesStream, event: &str, value: Value) -> Vec<u8> {
+    responses_event_frame(&mut state.sequence, event, value)
+}
+
+fn responses_usage_from_chat(usage: &Value) -> Value {
+    let input_tokens = usage
+        .get("prompt_tokens")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let output_tokens = usage
+        .get("completion_tokens")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let cached_tokens = usage
+        .pointer("/prompt_tokens_details/cached_tokens")
+        .and_then(Value::as_u64)
+        .unwrap_or(0)
+        .min(input_tokens);
+    let reasoning_tokens = usage
+        .pointer("/completion_tokens_details/reasoning_tokens")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    json!({
+        "input_tokens":input_tokens,
+        "output_tokens":output_tokens,
+        "total_tokens":usage.get("total_tokens").and_then(Value::as_u64).unwrap_or_else(|| input_tokens.saturating_add(output_tokens)),
+        "input_tokens_details":{"cached_tokens":cached_tokens},
+        "output_tokens_details":{"reasoning_tokens":reasoning_tokens}
+    })
+}
+
 fn emit_chat_role(state: &mut ChatStream, model: &str, output: &mut Vec<Vec<u8>>) {
     if state.started {
         return;
@@ -338,8 +1001,9 @@ fn finish_chat_stream(state: &mut ChatStream, model: &str) -> Vec<Vec<u8>> {
     let mut output = Vec::new();
     emit_chat_role(state, model, &mut output);
     let stop = match state.stop_reason.as_deref().unwrap_or("end_turn") {
-        "max_tokens" => "length",
-        "tool_use" => "tool_calls",
+        "max_tokens" | "length" => "length",
+        "tool_use" | "tool_calls" => "tool_calls",
+        "content_filter" | "filter" => "content_filter",
         _ => "stop",
     };
     output.push(data_frame(&json!({
@@ -690,9 +1354,169 @@ pub(crate) fn completed_stream(
             ));
             output.push(event_frame("message_stop", &json!({"type":"message_stop"})));
         }
-        ApiProtocol::Responses => bail!("Responses streaming is not supported by this translation"),
+        ApiProtocol::Responses => {
+            return responses_completed_stream(body, model);
+        }
     }
     Ok(output.into_iter().flatten().collect())
+}
+
+fn responses_completed_stream(body: &Value, model: &str) -> Result<Vec<u8>> {
+    let mut output = Vec::new();
+    let mut sequence = 0_u64;
+    let mut in_progress = body.clone();
+    in_progress["object"] = json!("response");
+    in_progress["status"] = json!("in_progress");
+    in_progress["model"] = json!(body.get("model").and_then(Value::as_str).unwrap_or(model));
+    in_progress["output"] = json!([]);
+    output.push(responses_event_frame(
+        &mut sequence,
+        "response.created",
+        json!({"response":in_progress}),
+    ));
+    output.push(responses_event_frame(
+        &mut sequence,
+        "response.in_progress",
+        json!({"response":in_progress}),
+    ));
+
+    for (output_index, item) in body
+        .get("output")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .enumerate()
+    {
+        let item_id = item.get("id").cloned().unwrap_or(Value::Null);
+        let mut added = item.clone();
+        added["status"] = json!("in_progress");
+        output.push(responses_event_frame(
+            &mut sequence,
+            "response.output_item.added",
+            json!({"output_index":output_index,"item":added}),
+        ));
+        match item.get("type").and_then(Value::as_str).unwrap_or_default() {
+            "message" => {
+                for (content_index, part) in item
+                    .get("content")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .enumerate()
+                {
+                    if part.get("type").and_then(Value::as_str) != Some("output_text") {
+                        continue;
+                    }
+                    let text = part.get("text").cloned().unwrap_or_else(|| json!(""));
+                    let mut streaming_part = part.clone();
+                    streaming_part["text"] = json!("");
+                    output.push(responses_event_frame(
+                        &mut sequence,
+                        "response.content_part.added",
+                        json!({"item_id":item_id,"output_index":output_index,"content_index":content_index,"part":streaming_part}),
+                    ));
+                    if text.as_str().is_some_and(|text| !text.is_empty()) {
+                        output.push(responses_event_frame(
+                            &mut sequence,
+                            "response.output_text.delta",
+                            json!({"item_id":item_id,"output_index":output_index,"content_index":content_index,"delta":text,"logprobs":[]}),
+                        ));
+                    }
+                    output.push(responses_event_frame(
+                        &mut sequence,
+                        "response.output_text.done",
+                        json!({"item_id":item_id,"output_index":output_index,"content_index":content_index,"text":text,"logprobs":[]}),
+                    ));
+                    output.push(responses_event_frame(
+                        &mut sequence,
+                        "response.content_part.done",
+                        json!({"item_id":item_id,"output_index":output_index,"content_index":content_index,"part":part}),
+                    ));
+                }
+            }
+            "reasoning" => {
+                for (summary_index, part) in item
+                    .get("summary")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .enumerate()
+                {
+                    let text = part.get("text").cloned().unwrap_or_else(|| json!(""));
+                    let mut streaming_part = part.clone();
+                    streaming_part["text"] = json!("");
+                    output.push(responses_event_frame(
+                        &mut sequence,
+                        "response.reasoning_summary_part.added",
+                        json!({"item_id":item_id,"output_index":output_index,"summary_index":summary_index,"part":streaming_part}),
+                    ));
+                    if text.as_str().is_some_and(|text| !text.is_empty()) {
+                        output.push(responses_event_frame(
+                            &mut sequence,
+                            "response.reasoning_summary_text.delta",
+                            json!({"item_id":item_id,"output_index":output_index,"summary_index":summary_index,"delta":text}),
+                        ));
+                    }
+                    output.push(responses_event_frame(
+                        &mut sequence,
+                        "response.reasoning_summary_text.done",
+                        json!({"item_id":item_id,"output_index":output_index,"summary_index":summary_index,"text":text}),
+                    ));
+                    output.push(responses_event_frame(
+                        &mut sequence,
+                        "response.reasoning_summary_part.done",
+                        json!({"item_id":item_id,"output_index":output_index,"summary_index":summary_index,"part":part}),
+                    ));
+                }
+            }
+            "function_call" => {
+                let arguments = item
+                    .get("arguments")
+                    .and_then(Value::as_str)
+                    .unwrap_or("{}");
+                if !arguments.is_empty() {
+                    output.push(responses_event_frame(
+                        &mut sequence,
+                        "response.function_call_arguments.delta",
+                        json!({"item_id":item_id,"output_index":output_index,"delta":arguments}),
+                    ));
+                }
+                output.push(responses_event_frame(
+                    &mut sequence,
+                    "response.function_call_arguments.done",
+                    json!({"item_id":item_id,"output_index":output_index,"call_id":item.get("call_id").cloned().unwrap_or(Value::Null),"name":item.get("name").cloned().unwrap_or(Value::Null),"arguments":arguments}),
+                ));
+            }
+            _ => {}
+        }
+        output.push(responses_event_frame(
+            &mut sequence,
+            "response.output_item.done",
+            json!({"output_index":output_index,"item":item}),
+        ));
+    }
+
+    let incomplete = body.get("status").and_then(Value::as_str) == Some("incomplete");
+    let terminal_event = if incomplete {
+        "response.incomplete"
+    } else {
+        "response.completed"
+    };
+    output.push(responses_event_frame(
+        &mut sequence,
+        terminal_event,
+        json!({"response":body}),
+    ));
+    Ok(output.into_iter().flatten().collect())
+}
+
+fn responses_event_frame(sequence: &mut u64, event: &str, mut value: Value) -> Vec<u8> {
+    if let Some(object) = value.as_object_mut() {
+        object.insert("type".to_owned(), json!(event));
+        object.insert("sequence_number".to_owned(), json!(*sequence));
+    }
+    *sequence = (*sequence).saturating_add(1);
+    event_frame(event, &value)
 }
 
 fn data_frame(value: &Value) -> Vec<u8> {
@@ -701,6 +1525,340 @@ fn data_frame(value: &Value) -> Vec<u8> {
 
 fn event_frame(event: &str, value: &Value) -> Vec<u8> {
     format!("event: {event}\ndata: {value}\n\n").into_bytes()
+}
+
+fn chat_to_responses(body: &Value, model: &str) -> Result<Value> {
+    let messages = body
+        .get("messages")
+        .and_then(Value::as_array)
+        .context("chat request must include a messages array")?;
+    let mut instructions = Vec::new();
+    let mut input = Vec::new();
+
+    for message in messages {
+        let role = message
+            .get("role")
+            .and_then(Value::as_str)
+            .unwrap_or("user");
+        match role {
+            "system" | "developer" => {
+                let text = content_text(message.get("content"));
+                if !text.is_empty() {
+                    instructions.push(text);
+                }
+            }
+            "tool" => input.push(json!({
+                "type":"function_call_output",
+                "call_id":message.get("tool_call_id").cloned().unwrap_or_else(|| json!("")),
+                "output":responses_output(message.get("content"))?
+            })),
+            "user" | "assistant" => {
+                let content = chat_content_for_responses(message.get("content"), role);
+                if !content.is_empty() {
+                    input.push(json!({"type":"message","role":role,"content":content}));
+                }
+                if role == "assistant"
+                    && let Some(calls) = message.get("tool_calls").and_then(Value::as_array)
+                {
+                    for call in calls {
+                        let function = call.get("function").unwrap_or(&Value::Null);
+                        let arguments = function.get("arguments").unwrap_or(&Value::Null);
+                        input.push(json!({
+                            "type":"function_call",
+                            "call_id":call.get("id").and_then(Value::as_str).filter(|id| !id.is_empty()).unwrap_or("call_magpie"),
+                            "name":function.get("name").cloned().unwrap_or_else(|| json!("")),
+                            "arguments":string_or_json(arguments)?
+                        }));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut result = json!({
+        "model":model,
+        "input":input,
+        "stream":body.get("stream").and_then(Value::as_bool).unwrap_or(false),
+        "store":false
+    });
+    if !instructions.is_empty() {
+        result["instructions"] = json!(instructions.join("\n\n"));
+    }
+    if let Some(max_tokens) = body
+        .get("max_completion_tokens")
+        .or_else(|| body.get("max_tokens"))
+        .filter(|value| value.is_number())
+    {
+        result["max_output_tokens"] = max_tokens.clone();
+    }
+    for field in ["temperature", "top_p"] {
+        if let Some(value) = body.get(field).filter(|value| value.is_number()) {
+            result[field] = value.clone();
+        }
+    }
+    if let Some(value) = body
+        .get("parallel_tool_calls")
+        .filter(|value| value.is_boolean())
+    {
+        result["parallel_tool_calls"] = value.clone();
+    }
+    if let Some(effort) = body.get("reasoning_effort").and_then(Value::as_str) {
+        result["reasoning"] = json!({"effort":effort,"summary":"auto"});
+    }
+    if let Some(tools) = body.get("tools").and_then(Value::as_array) {
+        let translated = tools
+            .iter()
+            .filter_map(|tool| {
+                let function = tool.get("function")?;
+                let mut translated = json!({
+                    "type":"function",
+                    "name":function.get("name")?,
+                    "parameters":function.get("parameters").cloned().unwrap_or_else(|| json!({"type":"object"}))
+                });
+                if let Some(description) = function.get("description").filter(|value| !value.is_null()) {
+                    translated["description"] = description.clone();
+                }
+                if let Some(strict) = function.get("strict").filter(|value| value.is_boolean()) {
+                    translated["strict"] = strict.clone();
+                }
+                Some(translated)
+            })
+            .collect::<Vec<_>>();
+        if !translated.is_empty() {
+            result["tools"] = json!(translated);
+        }
+    }
+    if let Some(choice) = body.get("tool_choice") {
+        let translated = match choice.as_str() {
+            Some("none") => Some(json!("none")),
+            Some("auto") => Some(json!("auto")),
+            Some("required") => Some(json!("required")),
+            _ => choice
+                .pointer("/function/name")
+                .cloned()
+                .map(|name| json!({"type":"function","name":name})),
+        };
+        if let Some(translated) = translated {
+            result["tool_choice"] = translated;
+        }
+    }
+    Ok(result)
+}
+
+fn responses_to_chat(body: &Value, model: &str) -> Result<Value> {
+    let mut messages = Vec::new();
+    let mut instructions = body
+        .get("instructions")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    let input = body
+        .get("input")
+        .context("Responses request must include input")?;
+    if let Some(text) = input.as_str() {
+        messages.push(json!({"role":"user","content":text}));
+    } else {
+        let items = input
+            .as_array()
+            .context("Responses input must be a string or an array")?;
+        for item in items {
+            match item.get("type").and_then(Value::as_str).unwrap_or_default() {
+                "message" | "" if item.get("role").is_some() => {
+                    let role = item.get("role").and_then(Value::as_str).unwrap_or("user");
+                    let content = responses_content_for_chat(item.get("content"));
+                    if matches!(role, "system" | "developer") {
+                        let text = content_text(Some(&content));
+                        if !text.is_empty() {
+                            if !instructions.is_empty() {
+                                instructions.push_str("\n\n");
+                            }
+                            instructions.push_str(&text);
+                        }
+                    } else {
+                        messages.push(json!({
+                            "role":if role == "assistant" {"assistant"} else {"user"},
+                            "content":content
+                        }));
+                    }
+                }
+                "function_call" => {
+                    let arguments = item.get("arguments").unwrap_or(&Value::Null);
+                    messages.push(json!({
+                        "role":"assistant",
+                        "content":Value::Null,
+                        "tool_calls":[{
+                            "id":item.get("call_id").cloned().unwrap_or_else(|| json!("")),
+                            "type":"function",
+                            "function":{
+                                "name":item.get("name").cloned().unwrap_or(Value::Null),
+                                "arguments":string_or_json(arguments)?
+                            }
+                        }]
+                    }));
+                }
+                "function_call_output" => messages.push(json!({
+                    "role":"tool",
+                    "tool_call_id":item.get("call_id").cloned().unwrap_or_else(|| json!("")),
+                    "content":responses_output(item.get("output"))?
+                })),
+                "reasoning" => {
+                    let summary = item
+                        .get("summary")
+                        .and_then(Value::as_array)
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|part| part.get("text").and_then(Value::as_str))
+                        .collect::<String>();
+                    if !summary.is_empty() {
+                        messages.push(json!({"role":"assistant","content":Value::Null,"reasoning_content":summary}));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    if !instructions.is_empty() {
+        messages.insert(0, json!({"role":"system","content":instructions}));
+    }
+
+    let mut result = json!({
+        "model":model,
+        "messages":messages,
+        "stream":body.get("stream").and_then(Value::as_bool).unwrap_or(false)
+    });
+    if let Some(max_tokens) = body
+        .get("max_output_tokens")
+        .filter(|value| value.is_number())
+    {
+        result["max_completion_tokens"] = max_tokens.clone();
+    }
+    for field in ["temperature", "top_p", "parallel_tool_calls"] {
+        if let Some(value) = body.get(field) {
+            result[field] = value.clone();
+        }
+    }
+    if let Some(effort) = body.pointer("/reasoning/effort").and_then(Value::as_str) {
+        result["reasoning_effort"] = json!(effort);
+    }
+    if let Some(tools) = body.get("tools").and_then(Value::as_array) {
+        let translated = tools
+            .iter()
+            .filter(|tool| tool.get("type").and_then(Value::as_str) == Some("function"))
+            .map(|tool| {
+                let mut function = json!({
+                    "name":tool.get("name").cloned().unwrap_or(Value::Null),
+                    "parameters":tool.get("parameters").cloned().unwrap_or_else(|| json!({"type":"object"}))
+                });
+                if let Some(description) = tool.get("description").filter(|value| !value.is_null()) {
+                    function["description"] = description.clone();
+                }
+                if let Some(strict) = tool.get("strict").filter(|value| value.is_boolean()) {
+                    function["strict"] = strict.clone();
+                }
+                json!({"type":"function","function":function})
+            })
+            .collect::<Vec<_>>();
+        if !translated.is_empty() {
+            result["tools"] = json!(translated);
+        }
+    }
+    if let Some(choice) = body.get("tool_choice") {
+        result["tool_choice"] = match choice.as_str() {
+            Some("none") => json!("none"),
+            Some("auto") => json!("auto"),
+            Some("required") => json!("required"),
+            _ if choice.get("name").is_some() => json!({
+                "type":"function",
+                "function":{"name":choice.get("name").cloned().unwrap_or(Value::Null)}
+            }),
+            _ => Value::Null,
+        };
+    }
+    Ok(result)
+}
+
+fn chat_content_for_responses(content: Option<&Value>, role: &str) -> Vec<Value> {
+    let text_type = if role == "assistant" {
+        "output_text"
+    } else {
+        "input_text"
+    };
+    match content {
+        Some(Value::String(text)) if !text.is_empty() => {
+            vec![json!({"type":text_type,"text":text})]
+        }
+        Some(Value::Array(parts)) => parts
+            .iter()
+            .filter_map(|part| match part.get("type").and_then(Value::as_str).unwrap_or_default() {
+                "text" => Some(json!({"type":text_type,"text":part.get("text").cloned().unwrap_or(Value::Null)})),
+                "image_url" if role != "assistant" => part
+                    .pointer("/image_url/url")
+                    .or_else(|| part.pointer("/image_url"))
+                    .filter(|url| url.is_string())
+                    .map(|url| json!({"type":"input_image","image_url":url})),
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn responses_content_for_chat(content: Option<&Value>) -> Value {
+    if let Some(text) = content.and_then(Value::as_str) {
+        return json!(text);
+    }
+    let parts = content
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(
+            |part| match part.get("type").and_then(Value::as_str).unwrap_or_default() {
+                "input_text" | "output_text" | "text" => Some(json!({
+                    "type":"text",
+                    "text":part.get("text").cloned().unwrap_or(Value::Null)
+                })),
+                "input_image" => part
+                    .get("image_url")
+                    .and_then(|url| {
+                        url.as_str()
+                            .or_else(|| url.get("url").and_then(Value::as_str))
+                    })
+                    .map(|url| json!({"type":"image_url","image_url":{"url":url}})),
+                _ => None,
+            },
+        )
+        .collect::<Vec<_>>();
+    if parts
+        .iter()
+        .all(|part| part.get("type").and_then(Value::as_str) == Some("text"))
+    {
+        json!(
+            parts
+                .iter()
+                .filter_map(|part| part.get("text").and_then(Value::as_str))
+                .collect::<String>()
+        )
+    } else {
+        json!(parts)
+    }
+}
+
+fn responses_output(value: Option<&Value>) -> Result<Value> {
+    let Some(value) = value else {
+        return Ok(json!(""));
+    };
+    match value {
+        Value::String(_) => Ok(value.clone()),
+        _ => Ok(json!(string_or_json(value)?)),
+    }
+}
+
+fn string_or_json(value: &Value) -> Result<String> {
+    match value {
+        Value::String(value) => Ok(value.clone()),
+        _ => serde_json::to_string(value).context("serialize tool arguments"),
+    }
 }
 
 fn chat_to_anthropic(body: &Value, model: &str) -> Result<Value> {
@@ -1040,6 +2198,224 @@ fn anthropic_response_to_chat(body: &Value, model: &str) -> Result<Value> {
         "model":model,
         "choices":[{"index":0,"message":message,"finish_reason":match stop { "max_tokens" => "length", "tool_use" => "tool_calls", _ => "stop" }}],
         "usage":{"prompt_tokens":prompt,"completion_tokens":output,"total_tokens":prompt.saturating_add(output)}
+    }))
+}
+
+fn responses_response_to_chat(body: &Value, model: &str) -> Result<Value> {
+    let mut text = String::new();
+    let mut reasoning = String::new();
+    let mut calls = Vec::new();
+    for item in body
+        .get("output")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        match item.get("type").and_then(Value::as_str).unwrap_or_default() {
+            "message" => {
+                for part in item
+                    .get("content")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                {
+                    match part.get("type").and_then(Value::as_str).unwrap_or_default() {
+                        "output_text" | "text" => {
+                            text.push_str(part.get("text").and_then(Value::as_str).unwrap_or(""));
+                        }
+                        "refusal" => {
+                            text.push_str(part.get("refusal").and_then(Value::as_str).unwrap_or(""));
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            "reasoning" => {
+                reasoning.push_str(
+                    &item
+                        .get("summary")
+                        .and_then(Value::as_array)
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|part| part.get("text").and_then(Value::as_str))
+                        .collect::<String>(),
+                );
+            }
+            "function_call" => calls.push(json!({
+                "id":item.get("call_id").cloned().unwrap_or_else(|| item.get("id").cloned().unwrap_or(Value::Null)),
+                "type":"function",
+                "function":{
+                    "name":item.get("name").cloned().unwrap_or(Value::Null),
+                    "arguments":string_or_json(item.get("arguments").unwrap_or(&Value::Null))?
+                }
+            })),
+            _ => {}
+        }
+    }
+    let mut message = json!({
+        "role":"assistant",
+        "content":if text.is_empty() { Value::Null } else { json!(text) }
+    });
+    if !reasoning.is_empty() {
+        message["reasoning_content"] = json!(reasoning);
+    }
+    let has_calls = !calls.is_empty();
+    if has_calls {
+        message["tool_calls"] = json!(calls);
+    }
+
+    let usage = body.get("usage").unwrap_or(&Value::Null);
+    let prompt_tokens = usage
+        .get("input_tokens")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let completion_tokens = usage
+        .get("output_tokens")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let mut chat_usage = json!({
+        "prompt_tokens":prompt_tokens,
+        "completion_tokens":completion_tokens,
+        "total_tokens":usage.get("total_tokens").and_then(Value::as_u64).unwrap_or_else(|| prompt_tokens.saturating_add(completion_tokens))
+    });
+    if let Some(cached) = usage.pointer("/input_tokens_details/cached_tokens") {
+        chat_usage["prompt_tokens_details"] = json!({"cached_tokens":cached});
+    }
+    if let Some(reasoning) = usage.pointer("/output_tokens_details/reasoning_tokens") {
+        chat_usage["completion_tokens_details"] = json!({"reasoning_tokens":reasoning});
+    }
+
+    let status = body
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("completed");
+    let incomplete_reason = body
+        .pointer("/incomplete_details/reason")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let finish = match (status, incomplete_reason, has_calls) {
+        ("incomplete", "content_filter", _) => "content_filter",
+        ("incomplete", _, _) => "length",
+        (_, _, true) => "tool_calls",
+        _ => "stop",
+    };
+    Ok(json!({
+        "id":body.get("id").cloned().unwrap_or_else(|| json!("chatcmpl_magpie")),
+        "object":"chat.completion",
+        "created":0,
+        "model":model,
+        "choices":[{"index":0,"message":message,"finish_reason":finish}],
+        "usage":chat_usage
+    }))
+}
+
+fn chat_response_to_responses(body: &Value, model: &str) -> Result<Value> {
+    let choice = body
+        .get("choices")
+        .and_then(Value::as_array)
+        .and_then(|choices| choices.first())
+        .context("chat response has no choices")?;
+    let message = choice
+        .get("message")
+        .context("chat response has no message")?;
+    let mut output = Vec::new();
+    if let Some(reasoning) = message
+        .get("reasoning_content")
+        .or_else(|| message.get("reasoning"))
+        .and_then(Value::as_str)
+        .filter(|text| !text.is_empty())
+    {
+        output.push(json!({
+            "id":"rs_magpie",
+            "type":"reasoning",
+            "status":"completed",
+            "summary":[{"type":"summary_text","text":reasoning}]
+        }));
+    }
+    if let Some(text) = message
+        .get("content")
+        .and_then(Value::as_str)
+        .filter(|text| !text.is_empty())
+    {
+        output.push(json!({
+            "id":"msg_magpie",
+            "type":"message",
+            "role":"assistant",
+            "status":"completed",
+            "content":[{"type":"output_text","text":text,"annotations":[]}]
+        }));
+    }
+    if let Some(calls) = message.get("tool_calls").and_then(Value::as_array) {
+        for (index, call) in calls.iter().enumerate() {
+            let call_id = call
+                .get("id")
+                .and_then(Value::as_str)
+                .filter(|id| !id.is_empty())
+                .map(str::to_owned)
+                .unwrap_or_else(|| format!("call_magpie_{index}"));
+            let function = call.get("function").unwrap_or(&Value::Null);
+            output.push(json!({
+                "id":format!("fc_{call_id}"),
+                "type":"function_call",
+                "status":"completed",
+                "call_id":call_id,
+                "name":function.get("name").cloned().unwrap_or(Value::Null),
+                "arguments":string_or_json(function.get("arguments").unwrap_or(&Value::Null))?
+            }));
+        }
+    }
+
+    let usage = body.get("usage").unwrap_or(&Value::Null);
+    let input_tokens = usage
+        .get("prompt_tokens")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let output_tokens = usage
+        .get("completion_tokens")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let cached_tokens = usage
+        .pointer("/prompt_tokens_details/cached_tokens")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let reasoning_tokens = usage
+        .pointer("/completion_tokens_details/reasoning_tokens")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let finish = choice
+        .get("finish_reason")
+        .and_then(Value::as_str)
+        .unwrap_or("stop");
+    let (status, incomplete_details) = match finish {
+        "length" => ("incomplete", json!({"reason":"max_output_tokens"})),
+        "content_filter" => ("incomplete", json!({"reason":"content_filter"})),
+        _ => ("completed", Value::Null),
+    };
+    let id = body.get("id").and_then(Value::as_str).unwrap_or("magpie");
+    let id = if id.starts_with("resp_") {
+        id.to_owned()
+    } else {
+        format!("resp_{id}")
+    };
+    Ok(json!({
+        "id":id,
+        "object":"response",
+        "created_at":body.get("created").and_then(Value::as_u64).unwrap_or(0),
+        "status":status,
+        "model":model,
+        "output":output,
+        "usage":{
+            "input_tokens":input_tokens,
+            "output_tokens":output_tokens,
+            "total_tokens":usage.get("total_tokens").and_then(Value::as_u64).unwrap_or_else(|| input_tokens.saturating_add(output_tokens)),
+            "input_tokens_details":{"cached_tokens":cached_tokens},
+            "output_tokens_details":{"reasoning_tokens":reasoning_tokens}
+        },
+        "incomplete_details":incomplete_details,
+        "parallel_tool_calls":true,
+        "tool_choice":"auto",
+        "tools":[],
+        "error":null
     }))
 }
 

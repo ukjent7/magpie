@@ -987,7 +987,10 @@ fn parse_api_protocol(protocol: &str) -> Option<ApiProtocol> {
 fn translation_supported(from: ApiProtocol, to: ApiProtocol) -> bool {
     matches!(
         (from, to),
-        (ApiProtocol::Chat, ApiProtocol::Anthropic) | (ApiProtocol::Anthropic, ApiProtocol::Chat)
+        (ApiProtocol::Chat, ApiProtocol::Anthropic)
+            | (ApiProtocol::Anthropic, ApiProtocol::Chat)
+            | (ApiProtocol::Chat, ApiProtocol::Responses)
+            | (ApiProtocol::Responses, ApiProtocol::Chat)
     )
 }
 
@@ -1280,12 +1283,15 @@ fn endpoint_for(
     if !allow_translation {
         return None;
     }
-    let alternative = match protocol {
-        ApiProtocol::Chat => ApiProtocol::Anthropic,
-        ApiProtocol::Anthropic => ApiProtocol::Chat,
-        ApiProtocol::Responses => return None,
+    let alternatives: &[ApiProtocol] = match protocol {
+        ApiProtocol::Chat => &[ApiProtocol::Anthropic, ApiProtocol::Responses],
+        ApiProtocol::Anthropic | ApiProtocol::Responses => &[ApiProtocol::Chat],
     };
-    (supports(alternative) && !alternative.base(provider).is_empty()).then_some(alternative)
+    alternatives.iter().copied().find(|alternative| {
+        translation_supported(protocol, *alternative)
+            && supports(*alternative)
+            && !alternative.base(provider).is_empty()
+    })
 }
 
 fn upstream_url(base: &str, path_suffix: &str, query: Option<&str>) -> Result<Url> {
