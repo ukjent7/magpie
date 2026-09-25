@@ -398,7 +398,7 @@ fn make_candidate(
     } else if [&endpoints.chat, &endpoints.responses, &endpoints.anthropic]
         .into_iter()
         .filter(|endpoint| !endpoint.is_empty())
-        .any(contains_url_credentials)
+        .any(|endpoint| contains_url_credentials(endpoint))
     {
         Some("its base URL embeds credentials; use an explicit API key instead".to_owned())
     } else {
