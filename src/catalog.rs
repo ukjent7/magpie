@@ -443,6 +443,7 @@ fn catalog_models(provider_id: &str) -> Vec<Model> {
                     provider: provider_id.to_owned(),
                     released: raw.release_date.clone(),
                     efforts,
+                    apis: Vec::new(),
                     temperature: raw.temperature,
                     price: raw.cost,
                     images,

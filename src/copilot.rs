@@ -6,7 +6,7 @@ use std::{
     time::Duration,
 };
 
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, ensure};
 use reqwest::{Client, header};
 use serde::Deserialize;
 use serde_json::Value;
