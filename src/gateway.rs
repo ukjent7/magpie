@@ -218,7 +218,7 @@ async fn forward(
             );
         }
     };
-    let mut body: Value = match serde_json::from_slice(&bytes) {
+    let body: Value = match serde_json::from_slice(&bytes) {
         Ok(body) => body,
         Err(_) => {
             return api_error_for(
@@ -239,7 +239,7 @@ async fn forward(
         Ok(providers) => providers,
         Err(error) => return api_error_for(protocol, error.status, error.message),
     };
-    let (provider, upstream_model, upstream_protocol) =
+    let (primary, primary_model, primary_protocol) =
         match resolve_model(&model, &providers, protocol, path_override.is_none()) {
             Ok(result) => result,
             Err(ResolveError::Unknown) => {
@@ -262,86 +262,78 @@ async fn forward(
             }
         };
     let streaming = body.get("stream").and_then(Value::as_bool).unwrap_or(false);
-    let translated = upstream_protocol != protocol;
-    if translated {
-        body = match crate::translation::request(&body, protocol, upstream_protocol, upstream_model)
-        {
-            Ok(body) => body,
-            Err(error) => {
+    let mut candidates = vec![(primary, primary_model, primary_protocol)];
+    if path_override.is_none() {
+        let mut seen = HashSet::from([(primary.id.clone(), primary_model.to_owned())]);
+        for fallback in &primary.fallback {
+            let Ok(target) = resolve_model(fallback, &providers, protocol, true) else {
                 eprintln!(
-                    "magpie: translate request from {protocol:?} to {upstream_protocol:?}: {error:#}"
+                    "magpie: skip unavailable fallback {fallback:?} configured for {}",
+                    primary.id
                 );
-                return api_error_for(
-                    protocol,
-                    StatusCode::BAD_REQUEST,
-                    "request cannot be represented by the selected provider API",
+                continue;
+            };
+            if seen.insert((target.0.id.clone(), target.1.to_owned())) {
+                candidates.push(target);
+            }
+        }
+    }
+
+    let mut selected = None;
+    for (index, (provider, upstream_model, upstream_protocol)) in candidates.iter().enumerate() {
+        let is_last = index + 1 == candidates.len();
+        let response = match send_upstream(
+            state,
+            provider,
+            upstream_model,
+            *upstream_protocol,
+            protocol,
+            &body,
+            streaming,
+            path_override,
+            parts.uri.query(),
+            &parts.headers,
+        )
+        .await
+        {
+            Ok(response) => response,
+            Err(error) if !is_last => {
+                eprintln!(
+                    "magpie: provider {} failed before responding; trying its fallback: {error:#}",
+                    provider.id
                 );
+                continue;
+            }
+            Err(error) => {
+                eprintln!("magpie: upstream request to {} failed: {error:#}", provider.id);
+                if error
+                    .chain()
+                    .any(|cause| cause.to_string() == "translate request for provider API")
+                {
+                    return api_error_for(
+                        protocol,
+                        StatusCode::BAD_REQUEST,
+                        "request cannot be represented by the selected provider API",
+                    );
+                }
+                return api_error_for(protocol, StatusCode::BAD_GATEWAY, "provider request failed");
             }
         };
-        if streaming {
-            body["stream"] = json!(true);
+        if !is_last && retryable_status(response.status()) {
+            eprintln!(
+                "magpie: provider {} returned {}; trying its fallback",
+                provider.id,
+                response.status()
+            );
+            continue;
         }
-    } else if let Some(object) = body.as_object_mut() {
-        object.insert("model".to_owned(), json!(upstream_model));
-    } else {
-        return api_error_for(
-            protocol,
-            StatusCode::BAD_REQUEST,
-            "request body must be a JSON object",
-        );
+        selected = Some((response, *provider, *upstream_model, *upstream_protocol));
+        break;
     }
-    let body = match serde_json::to_vec(&body) {
-        Ok(body) => body,
-        Err(error) => {
-            eprintln!("magpie: serialize upstream request: {error}");
-            return api_error_for(
-                protocol,
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "could not prepare request",
-            );
-        }
+    let Some((response, provider, upstream_model, upstream_protocol)) = selected else {
+        return api_error_for(protocol, StatusCode::BAD_GATEWAY, "provider request failed");
     };
-
-    let upstream_url = match upstream_url(
-        upstream_protocol.base(provider),
-        path_override.unwrap_or_else(|| upstream_protocol.path()),
-        parts.uri.query(),
-    ) {
-        Ok(url) => url,
-        Err(error) => {
-            eprintln!(
-                "magpie: invalid URL for provider {}: {error:#}",
-                provider.id
-            );
-            return api_error_for(
-                protocol,
-                StatusCode::BAD_GATEWAY,
-                "provider has an invalid API URL",
-            );
-        }
-    };
-    let headers = match upstream_headers(provider, upstream_protocol, &parts.headers) {
-        Ok(headers) => headers,
-        Err(message) => return api_error_for(protocol, StatusCode::BAD_GATEWAY, message),
-    };
-    let response = match state
-        .client
-        .post(upstream_url)
-        .headers(headers)
-        .header(header::ACCEPT, "application/json, text/event-stream")
-        .body(body)
-        .send()
-        .await
-    {
-        Ok(response) => response,
-        Err(error) => {
-            eprintln!(
-                "magpie: upstream request to {} failed: {error}",
-                provider.id
-            );
-            return api_error_for(protocol, StatusCode::BAD_GATEWAY, "provider request failed");
-        }
-    };
+    let translated = upstream_protocol != protocol;
     if !translated || !response.status().is_success() {
         return relay(response);
     }
@@ -446,6 +438,59 @@ async fn forward(
         }
     };
     translated_response(status, &upstream_headers, bytes, streaming)
+}
+
+async fn send_upstream(
+    state: &GatewayState,
+    provider: &GatewayProvider,
+    model: &str,
+    upstream_protocol: ApiProtocol,
+    client_protocol: ApiProtocol,
+    request: &Value,
+    streaming: bool,
+    path_override: Option<&str>,
+    query: Option<&str>,
+    incoming_headers: &HeaderMap,
+) -> Result<reqwest::Response> {
+    let translated = upstream_protocol != client_protocol;
+    let mut body = if translated {
+        crate::translation::request(request, client_protocol, upstream_protocol, model)
+            .context("translate request for provider API")?
+    } else {
+        let mut body = request.clone();
+        let object = body
+            .as_object_mut()
+            .context("request body must be a JSON object")?;
+        object.insert("model".to_owned(), json!(model));
+        body
+    };
+    if translated && streaming {
+        body["stream"] = json!(true);
+    }
+    let body = serde_json::to_vec(&body).context("serialize upstream request")?;
+    let url = upstream_url(
+        upstream_protocol.base(provider),
+        path_override.unwrap_or_else(|| upstream_protocol.path()),
+        query,
+    )
+    .with_context(|| format!("build URL for provider {}", provider.id))?;
+    let headers = upstream_headers(provider, upstream_protocol, incoming_headers)
+        .map_err(anyhow::Error::msg)
+        .with_context(|| format!("build headers for provider {}", provider.id))?;
+    state
+        .client
+        .post(url)
+        .headers(headers)
+        .header(header::ACCEPT, "application/json, text/event-stream")
+        .body(body)
+        .send()
+        .await
+        .with_context(|| format!("send request to provider {}", provider.id))
+}
+
+fn retryable_status(status: StatusCode) -> bool {
+    status.is_server_error()
+        || matches!(status.as_u16(), 401 | 402 | 403 | 404 | 408 | 429)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -821,6 +866,7 @@ mod tests {
             chat: "https://api.example/v1".to_owned(),
             responses: String::new(),
             anthropic: String::new(),
+            fallback: Vec::new(),
             headers: BTreeMap::new(),
             models: models.iter().map(|model| (*model).to_owned()).collect(),
             hidden: false,
@@ -899,6 +945,23 @@ mod tests {
             resolve_model("relay/model", &providers, ApiProtocol::Chat, false),
             Err(ResolveError::Unknown)
         ));
+    }
+
+    #[test]
+    fn retries_provider_failures_that_can_recover_elsewhere() {
+        for status in [
+            StatusCode::UNAUTHORIZED,
+            StatusCode::PAYMENT_REQUIRED,
+            StatusCode::FORBIDDEN,
+            StatusCode::NOT_FOUND,
+            StatusCode::REQUEST_TIMEOUT,
+            StatusCode::TOO_MANY_REQUESTS,
+            StatusCode::BAD_GATEWAY,
+            StatusCode::SERVICE_UNAVAILABLE,
+        ] {
+            assert!(retryable_status(status), "{status} should allow fallback");
+        }
+        assert!(!retryable_status(StatusCode::BAD_REQUEST));
     }
 
     #[test]

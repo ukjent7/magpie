@@ -244,6 +244,7 @@ fn usage() -> String {
         "  magpie provider add <name> url=<url> key=<key>",
         "  magpie provider models <id> [model ids…]",
         "  magpie provider key <id> <key>  change its API key",
+        "  magpie provider fallback <id> [provider/model… | none]",
         "  magpie provider rm <id>         remove a provider",
         "",
         "  magpie --help                   show this help",

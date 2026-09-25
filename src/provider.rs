@@ -7,7 +7,7 @@ use url::Url;
 
 use crate::settings;
 
-const USAGE: &str = "usage: magpie presets | magpie providers | magpie models | magpie provider <id> | magpie provider add <preset> [key] | magpie provider add <name> id=<id> url=<url> key=<key> | magpie provider models <id> [ids…] | magpie provider key <id> <key> | magpie provider rm <id>";
+const USAGE: &str = "usage: magpie presets | magpie providers | magpie models | magpie provider <id> | magpie provider add <preset> [key] | magpie provider add <name> id=<id> url=<url> key=<key> | magpie provider models <id> [ids…] | magpie provider key <id> <key> | magpie provider fallback <id> [provider/model… | none] | magpie provider rm <id>";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum PresetKind {
@@ -424,6 +424,7 @@ pub(crate) struct GatewayProvider {
     pub(crate) chat: String,
     pub(crate) responses: String,
     pub(crate) anthropic: String,
+    pub(crate) fallback: Vec<String>,
     pub(crate) headers: BTreeMap<String, String>,
     pub(crate) models: Vec<String>,
     pub(crate) hidden: bool,
@@ -449,6 +450,7 @@ pub(crate) fn gateway_providers() -> Result<Vec<GatewayProvider>> {
                 chat: provider.chat,
                 responses: provider.responses,
                 anthropic: provider.anthropic,
+                fallback: provider.fallback,
                 headers: provider.headers,
                 models,
                 hidden: provider.hidden,
@@ -550,6 +552,7 @@ pub async fn command(args: &[String]) -> Result<()> {
         [verb] if verb == "presets" => presets(),
         [verb, rest @ ..] if verb == "add" => add(rest),
         [verb, id, key] if verb == "key" => change_key(id, key),
+        [verb, id, fallback @ ..] if verb == "fallback" => set_fallback(id, fallback),
         [verb, id, rest @ ..] if verb == "models" => models_command(id, rest).await,
         [verb, id] if verb == "rm" => remove(id),
         [id] => show(id),
@@ -768,6 +771,81 @@ fn show(id: &str) -> Result<()> {
     Ok(())
 }
 
+fn set_fallback(id: &str, selected: &[String]) -> Result<()> {
+    let mut file = load()?;
+    let index = file
+        .providers
+        .iter()
+        .position(|provider| provider.id == id || provider.name.eq_ignore_ascii_case(id))
+        .with_context(|| format!("no provider {id:?}"))?;
+    if selected.is_empty() {
+        let provider = &file.providers[index];
+        if provider.fallback.is_empty() {
+            println!(
+                "{} has no fallback · magpie provider fallback {} <provider/model>…",
+                provider.name, provider.id
+            );
+        } else {
+            println!(
+                "{} falls back to {} when its API is unavailable",
+                provider.name,
+                provider.fallback.join(" → ")
+            );
+        }
+        return Ok(());
+    }
+
+    let fallbacks = normalize_fallbacks(selected, &file.providers)?;
+
+    let provider = &mut file.providers[index];
+    provider.fallback = fallbacks;
+    let name = provider.name.clone();
+    let summary = if provider.fallback.is_empty() {
+        "cleared fallbacks".to_owned()
+    } else {
+        format!("falls back to {}", provider.fallback.join(" → "))
+    };
+    store(file)?;
+    println!("✓ {name} {summary}");
+    Ok(())
+}
+
+fn normalize_fallbacks(selected: &[String], providers: &[Provider]) -> Result<Vec<String>> {
+    if selected.len() == 1 && selected[0] == "none" {
+        return Ok(Vec::new());
+    }
+    ensure!(
+        selected.iter().all(|target| target != "none"),
+        "use `none` by itself to clear fallbacks"
+    );
+    let mut fallbacks = Vec::new();
+    for target in selected {
+        let (provider_id, model) = target
+            .split_once('/')
+            .with_context(|| format!("fallback {target:?} must be provider/model"))?;
+        ensure!(!model.is_empty(), "fallback model is empty in {target:?}");
+        let provider = providers
+            .iter()
+            .find(|provider| {
+                !provider.hidden
+                    && (provider.id == provider_id
+                        || provider.name.eq_ignore_ascii_case(provider_id))
+            })
+            .with_context(|| format!("fallback provider {provider_id:?} was not found"))?;
+        ensure!(
+            !provider.chat.is_empty()
+                || !provider.responses.is_empty()
+                || !provider.anthropic.is_empty(),
+            "fallback provider {provider_id:?} has no API endpoint"
+        );
+        let canonical = format!("{}/{model}", provider.id);
+        if !fallbacks.contains(&canonical) {
+            fallbacks.push(canonical);
+        }
+    }
+    Ok(fallbacks)
+}
+
 fn change_key(id: &str, key: &str) -> Result<()> {
     ensure!(!key.trim().is_empty(), "provider key is empty");
     let mut file = load()?;
@@ -963,6 +1041,15 @@ impl Provider {
 mod tests {
     use super::*;
 
+    fn provider(id: &str, name: &str) -> Provider {
+        Provider {
+            id: id.to_owned(),
+            name: name.to_owned(),
+            chat: "https://api.example/v1".to_owned(),
+            ..Provider::default()
+        }
+    }
+
     #[test]
     fn presets_build_providers_with_protocol_specific_endpoints() {
         let provider = find_preset("OpenAI")
@@ -988,5 +1075,32 @@ mod tests {
         assert!(!is_provider_assignment("sk-example=="));
         assert!(is_provider_assignment("key=sk-example"));
         assert!(is_provider_assignment("header.Authorization=Token"));
+    }
+
+    #[test]
+    fn fallback_models_are_canonicalized_and_deduplicated() {
+        let providers = [provider("backup", "Backup")];
+        let selected = vec!["Backup/model-v2".to_owned(), "backup/model-v2".to_owned()];
+
+        assert_eq!(
+            normalize_fallbacks(&selected, &providers).expect("valid fallback models"),
+            vec!["backup/model-v2".to_owned()]
+        );
+        assert!(normalize_fallbacks(&["none".to_owned()], &providers)
+            .expect("none clears fallbacks")
+            .is_empty());
+    }
+
+    #[test]
+    fn fallback_models_require_a_known_provider_and_nonempty_model() {
+        let providers = [provider("backup", "Backup")];
+
+        assert!(normalize_fallbacks(&["missing/model".to_owned()], &providers).is_err());
+        assert!(normalize_fallbacks(&["backup/".to_owned()], &providers).is_err());
+        assert!(normalize_fallbacks(
+            &["none".to_owned(), "backup/model".to_owned()],
+            &providers
+        )
+        .is_err());
     }
 }
