@@ -38,9 +38,7 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: formatted-rust-sources
-          path: |
-            src/cli.rs
-            src/provider.rs
+          path: src/
           if-no-files-found: error
           retention-days: 1
 

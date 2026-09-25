@@ -7,7 +7,7 @@ use url::Url;
 
 use crate::settings;
 
-const USAGE: &str = "usage: magpie presets | magpie providers | magpie provider <id> | magpie provider add <preset> [key] | magpie provider add <name> id=<id> url=<url> key=<key> | magpie provider key <id> <key> | magpie provider rm <id>";
+const USAGE: &str = "usage: magpie presets | magpie providers | magpie models | magpie provider <id> | magpie provider add <preset> [key] | magpie provider add <name> id=<id> url=<url> key=<key> | magpie provider models <id> [ids…] | magpie provider key <id> <key> | magpie provider rm <id>";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum PresetKind {
@@ -433,16 +433,22 @@ pub(crate) fn gateway_providers() -> Result<Vec<GatewayProvider>> {
     Ok(load()?
         .providers
         .into_iter()
-        .map(|provider| GatewayProvider {
-            id: provider.id,
-            name: provider.name,
-            key: provider.key,
-            chat: provider.chat,
-            responses: provider.responses,
-            anthropic: provider.anthropic,
-            headers: provider.headers,
-            models: provider.models,
-            hidden: provider.hidden,
+        .map(|provider| {
+            let models = crate::catalog::exposed_models(&provider.id, &provider.models)
+                .into_iter()
+                .map(|model| model.id)
+                .collect();
+            GatewayProvider {
+                id: provider.id,
+                name: provider.name,
+                key: provider.key,
+                chat: provider.chat,
+                responses: provider.responses,
+                anthropic: provider.anthropic,
+                headers: provider.headers,
+                models,
+                hidden: provider.hidden,
+            }
         })
         .collect())
 }
@@ -467,7 +473,7 @@ pub fn list() -> Result<()> {
             provider.id,
             host,
             key,
-            provider.models.len(),
+            crate::catalog::exposed_models(&provider.id, &provider.models).len(),
             if provider.hidden { "  [hidden]" } else { "" }
         );
     }
@@ -492,16 +498,79 @@ pub fn presets() -> Result<()> {
     Ok(())
 }
 
-pub fn command(args: &[String]) -> Result<()> {
+pub fn models() -> Result<()> {
+    let providers = load()?.providers;
+    let mut found = false;
+    for provider in providers
+        .iter()
+        .filter(|provider| !provider.hidden && (!provider.key.is_empty() || provider.is_local()))
+    {
+        let models = crate::catalog::exposed_models(&provider.id, &provider.models);
+        if models.is_empty() {
+            continue;
+        }
+        found = true;
+        println!("{} ({})", provider.name, provider.id);
+        for model in models {
+            let name = if model.name == model.id {
+                String::new()
+            } else {
+                format!("  {}", model.name)
+            };
+            println!("  {}{name}", model.id);
+        }
+    }
+    if !found {
+        println!("no models discovered yet · magpie provider models <id> fetches a provider's list");
+    }
+    Ok(())
+}
+
+pub async fn command(args: &[String]) -> Result<()> {
     match args {
         [] => bail!("{USAGE}"),
         [verb] if verb == "presets" => presets(),
         [verb, rest @ ..] if verb == "add" => add(rest),
         [verb, id, key] if verb == "key" => change_key(id, key),
+        [verb, id, rest @ ..] if verb == "models" => models_command(id, rest).await,
         [verb, id] if verb == "rm" => remove(id),
         [id] => show(id),
         _ => bail!("{USAGE}"),
     }
+}
+
+async fn models_command(id: &str, selected: &[String]) -> Result<()> {
+    if !selected.is_empty() {
+        let mut file = load()?;
+        let provider = file
+            .providers
+            .iter_mut()
+            .find(|provider| provider.id == id || provider.name.eq_ignore_ascii_case(id))
+            .with_context(|| format!("no provider {id:?}"))?;
+        provider.models = if selected.len() == 1 && matches!(selected[0].as_str(), "-" | "all") {
+            Vec::new()
+        } else {
+            clean_list(&selected.join(","))
+        };
+        let name = provider.name.clone();
+        let provider_id = provider.id.clone();
+        store(file)?;
+        println!("✓ updated {name} ({provider_id}) model selection");
+        return show(&provider_id);
+    }
+
+    let provider = find(id)?;
+    let endpoints = [
+        (provider.chat.as_str(), false),
+        (provider.responses.as_str(), false),
+        (provider.anthropic.as_str(), true),
+    ];
+    let (base, models) =
+        crate::catalog::fetch_models(&endpoints, &provider.key, &provider.headers).await?;
+    let count = models.len();
+    crate::catalog::save_live(&provider.id, &base, models)?;
+    println!("✓ fetched {count} models from {}", provider.host());
+    show(&provider.id)
 }
 
 fn add(args: &[String]) -> Result<()> {
@@ -655,6 +724,18 @@ fn show(id: &str) -> Result<()> {
     );
     if !provider.models.is_empty() {
         println!("  models: {}", provider.models.join(", "));
+    } else {
+        let available = crate::catalog::live_models(&provider.id);
+        if available.is_empty() {
+            println!("  models: not fetched · magpie provider models {}", provider.id);
+        } else {
+            let exposed = crate::catalog::exposed_models(&provider.id, &provider.models);
+            println!(
+                "  models: {} exposed of {} fetched",
+                exposed.len(),
+                available.len()
+            );
+        }
     }
     if !provider.fallback.is_empty() {
         println!("  fallback: {}", provider.fallback.join(" → "));

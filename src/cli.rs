@@ -23,9 +23,9 @@ struct Cli {
     args: Vec<OsString>,
 }
 
-pub fn entry() -> ExitCode {
+pub async fn entry() -> ExitCode {
     match Cli::try_parse() {
-        Ok(cli) => match run(cli) {
+        Ok(cli) => match run(cli).await {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => {
                 eprintln!("magpie: {error:#}");
@@ -40,7 +40,7 @@ pub fn entry() -> ExitCode {
     }
 }
 
-fn run(cli: Cli) -> Result<()> {
+async fn run(cli: Cli) -> Result<()> {
     settings::migrate();
 
     if cli.help {
@@ -76,10 +76,13 @@ fn run(cli: Cli) -> Result<()> {
         }
         [command] if command == "agents" => list_agents(false),
         [command] if command == "presets" => crate::provider::presets(),
-        [command, rest @ ..] if command == "serve" => crate::gateway::command(rest),
+        [command, rest @ ..] if command == "serve" => crate::gateway::command(rest).await,
         [command] if command == "ls" || command == "list" => list_agents(true),
         [command] if command == "providers" => crate::provider::list(),
-        [command, rest @ ..] if command == "provider" => crate::provider::command(rest),
+        [command] if command == "models" => crate::provider::models(),
+        [command, rest @ ..] if command == "provider" => {
+            crate::provider::command(rest).await
+        }
         [command, rest @ ..] if command == "profiles" => profile::list(rest),
         [command, rest @ ..] if command == "save" => profile::save(rest),
         [command, rest @ ..] if command == "use" => profile::apply(rest),
@@ -229,11 +232,13 @@ fn usage() -> String {
         "  magpie rm <name>                delete a profile",
         "",
         "  magpie providers                list API providers",
+        "  magpie models                   list exposed provider models",
         "  magpie presets                  list provider presets",
         "  magpie serve                    run the local API gateway",
         "  magpie provider <id>            show a provider",
         "  magpie provider add <preset> [key]",
         "  magpie provider add <name> url=<url> key=<key>",
+        "  magpie provider models <id> [model ids…]",
         "  magpie provider key <id> <key>  change its API key",
         "  magpie provider rm <id>         remove a provider",
         "",

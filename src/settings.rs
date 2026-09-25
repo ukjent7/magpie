@@ -45,11 +45,8 @@ pub fn providers_path() -> PathBuf {
     config_dir().join("magpie/providers.json")
 }
 
-pub fn migrate() {
-    let config = config_dir();
-    copy_tree(&config.join("dial"), &config.join("magpie"));
-
-    let cache = env::var_os("XDG_CACHE_HOME")
+pub fn cache_dir() -> PathBuf {
+    env::var_os("XDG_CACHE_HOME")
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
         .or_else(|| {
@@ -59,7 +56,14 @@ pub fn migrate() {
                 .map(PathBuf::from)
                 .map(|home| home.join(".cache"))
         })
-        .unwrap_or_else(|| PathBuf::from(".cache"));
+        .unwrap_or_else(|| PathBuf::from(".cache"))
+}
+
+pub fn migrate() {
+    let config = config_dir();
+    copy_tree(&config.join("dial"), &config.join("magpie"));
+
+    let cache = cache_dir();
     copy_tree(&cache.join("dial"), &cache.join("magpie"));
 }
 

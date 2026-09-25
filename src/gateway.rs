@@ -25,7 +25,7 @@ struct GatewayState {
     client: Client,
 }
 
-pub fn command(args: &[String]) -> Result<()> {
+pub async fn command(args: &[String]) -> Result<()> {
     let mut addr = env::var("MAGPIE_ADDR").unwrap_or_else(|_| DEFAULT_ADDR.to_owned());
     let mut args = args.iter();
 
@@ -48,11 +48,7 @@ pub fn command(args: &[String]) -> Result<()> {
         }
     }
 
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .context("create gateway runtime")?;
-    runtime.block_on(serve(&addr))
+    serve(&addr).await
 }
 
 async fn serve(addr: &str) -> Result<()> {
