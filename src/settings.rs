@@ -117,7 +117,8 @@ fn copy_contents(source: &std::path::Path, destination: &std::path::Path) {
                     let _ = fs::set_permissions(destination_path, metadata.permissions());
                 }
             }
-        } else if kind.is_file() && fs::copy(&source_path, &destination_path).is_ok()
+        } else if kind.is_file()
+            && fs::copy(&source_path, &destination_path).is_ok()
             && let Ok(metadata) = fs::metadata(source_path)
         {
             let _ = fs::set_permissions(destination_path, metadata.permissions());
