@@ -312,7 +312,7 @@ pub(crate) async fn refresh_models(auth_file: &Path) -> Result<usize> {
         )
         .header("OpenAI-Beta", "responses=experimental")
         .header("originator", "codex_cli_rs")
-        .header("User-Agent", codex_user_agent())
+        .header("User-Agent", user_agent())
         .header(header::ACCEPT, "application/json");
     if !credentials.account_id.is_empty() {
         request = request.header("chatgpt-account-id", credentials.account_id);

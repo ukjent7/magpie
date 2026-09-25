@@ -644,7 +644,8 @@ async fn send_upstream(
     if translated && streaming {
         body["stream"] = json!(true);
     }
-    let body = serde_json::to_vec(&body).context("serialize upstream request")?;
+    let body_value = body;
+    let body = serde_json::to_vec(&body_value).context("serialize upstream request")?;
     let url = upstream_url(
         upstream_protocol.base(provider),
         path_override.unwrap_or_else(|| upstream_protocol.path()),
@@ -653,7 +654,7 @@ async fn send_upstream(
     .with_context(|| format!("build URL for provider {}", provider.id))?;
     let headers = if let Some(auth_file) = provider.codex_auth_file.as_deref() {
         let credentials = crate::codex::credentials(&state.client, auth_file).await?;
-        codex_upstream_headers(&credentials, &body)?
+        codex_upstream_headers(&credentials, &body_value)?
     } else {
         upstream_headers(provider, upstream_protocol, key, incoming_headers)
             .map_err(anyhow::Error::msg)
