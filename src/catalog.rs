@@ -7,7 +7,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail, ensure};
-use reqwest::{Client, StatusCode, header};
+use reqwest::{StatusCode, header};
 use serde::{Deserialize, Serialize};
 
 use crate::{config, settings};
@@ -247,7 +247,7 @@ pub async fn fetch_models(
     key: &str,
     headers: &std::collections::BTreeMap<String, String>,
 ) -> Result<(String, Vec<Model>)> {
-    let client = Client::builder()
+    let client = crate::netproxy::builder()
         .user_agent(concat!("magpie/", env!("CARGO_PKG_VERSION")))
         .timeout(Duration::from_secs(8))
         .build()
@@ -332,7 +332,7 @@ pub async fn fetch_models(
 }
 
 pub async fn sync_models_dev() -> Result<usize> {
-    let client = Client::builder()
+    let client = crate::netproxy::builder()
         .user_agent(concat!("magpie/", env!("CARGO_PKG_VERSION")))
         .timeout(Duration::from_secs(30))
         .build()

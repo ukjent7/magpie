@@ -53,7 +53,7 @@ pub(super) async fn test_provider(id: &str) -> Result<()> {
         provider.name
     );
 
-    let client = Client::builder()
+    let client = crate::netproxy::builder()
         .user_agent(concat!("magpie/", env!("CARGO_PKG_VERSION")))
         .timeout(Duration::from_secs(20))
         .build()

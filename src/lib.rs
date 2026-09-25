@@ -15,6 +15,7 @@ pub mod config;
 mod copilot;
 pub mod gateway;
 pub mod groups;
+mod netproxy;
 pub mod profile;
 pub mod provider;
 pub mod settings;

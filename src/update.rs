@@ -147,7 +147,7 @@ async fn latest() -> Result<Release> {
 }
 
 fn client() -> Result<Client> {
-    Client::builder()
+    crate::netproxy::builder()
         .user_agent(concat!("magpie/", env!("CARGO_PKG_VERSION")))
         .timeout(Duration::from_secs(10 * 60))
         .build()

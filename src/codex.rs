@@ -296,7 +296,7 @@ fn account_id_from_id_token(token: &str) -> Option<String> {
 }
 
 pub(crate) async fn refresh_models(auth_file: &Path) -> Result<usize> {
-    let client = Client::builder()
+    let client = crate::netproxy::builder()
         .user_agent(concat!("magpie/", env!("CARGO_PKG_VERSION")))
         .timeout(Duration::from_secs(8))
         .build()

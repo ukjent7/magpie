@@ -318,7 +318,10 @@ async fn fetch_icon(raw_url: &str) -> Result<String> {
             (None, vec![SocketAddr::new(IpAddr::V6(ip), port)])
         }
     };
+    // Keep the icon request direct: proxying would resolve the destination
+    // outside the public-IP-pinned connection below.
     let mut builder = reqwest::Client::builder()
+        .no_proxy()
         .redirect(Policy::none())
         .timeout(Duration::from_secs(15));
     if let Some(domain) = domain {

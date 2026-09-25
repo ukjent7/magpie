@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
-use reqwest::{Client, StatusCode};
+use reqwest::StatusCode;
 use serde_json::Value;
 use url::Url;
 
@@ -38,7 +38,7 @@ pub(super) async fn fetch(provider: &Provider) -> Option<Result<String>> {
 }
 
 async fn fetch_from(provider: &Provider, key: &str, source: Source) -> Result<String> {
-    let client = Client::builder()
+    let client = crate::netproxy::builder()
         .timeout(Duration::from_secs(8))
         .build()
         .context("create provider balance HTTP client")?;

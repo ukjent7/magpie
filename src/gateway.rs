@@ -63,7 +63,7 @@ pub async fn command(args: &[String]) -> Result<()> {
 
 async fn serve(addr: &str) -> Result<()> {
     let state = GatewayState {
-        client: Client::builder()
+        client: crate::netproxy::builder()
             .user_agent(concat!("magpie/", env!("CARGO_PKG_VERSION")))
             .connect_timeout(CONNECT_TIMEOUT)
             .read_timeout(UPSTREAM_TIMEOUT)

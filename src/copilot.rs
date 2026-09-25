@@ -433,7 +433,7 @@ fn initiator(body: &Value) -> &'static str {
 }
 
 pub(crate) async fn refresh_models(account: &Account) -> Result<usize> {
-    let client = Client::builder()
+    let client = crate::netproxy::builder()
         .user_agent(concat!("magpie/", env!("CARGO_PKG_VERSION")))
         .timeout(Duration::from_secs(8))
         .build()
