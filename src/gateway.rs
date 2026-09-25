@@ -1792,14 +1792,17 @@ mod tests {
     }
 
     #[test]
-    fn resolves_only_providers_that_speak_the_requested_protocol() {
+    fn resolves_a_responses_endpoint_for_chat_when_translation_is_enabled() {
         let mut provider = provider("relay", "Relay", &["model"]);
         provider.chat.clear();
         provider.responses = "https://api.example/v1".to_owned();
         let providers = [provider];
 
+        let (_, _, upstream) = resolve_model("relay/model", &providers, ApiProtocol::Chat, true)
+            .expect("Chat requests can be translated to Responses");
+        assert_eq!(upstream, ApiProtocol::Responses);
         assert!(matches!(
-            resolve_model("relay/model", &providers, ApiProtocol::Chat, true),
+            resolve_model("relay/model", &providers, ApiProtocol::Chat, false),
             Err(ResolveError::Unknown)
         ));
         assert!(resolve_model("relay/model", &providers, ApiProtocol::Responses, true).is_ok());
