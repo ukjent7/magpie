@@ -14,6 +14,7 @@ use url::Url;
 
 use crate::settings;
 
+mod balance;
 mod icon;
 mod import;
 mod test;
@@ -849,7 +850,7 @@ pub async fn command(args: &[String]) -> Result<()> {
         [verb, id] if verb == "test" => test::test_provider(id).await,
         [verb, id, value] if verb == "icon" => set_icon(id, value),
         [verb, id] if verb == "rm" => remove(id),
-        [id] => show(id),
+        [id] => show(id).await,
         _ => bail!("{USAGE}"),
     }
 }
@@ -900,13 +901,13 @@ async fn models_command(id: &str, selected: &[String]) -> Result<()> {
         let provider_id = provider.id.clone();
         store(file)?;
         println!("✓ updated {name} ({provider_id}) model selection");
-        return show(&provider_id);
+        return show(&provider_id).await;
     }
 
     let provider = find(id)?;
     let count = refresh_models(&provider, true).await?;
     println!("✓ fetched {count} models from {}", provider.host());
-    show(&provider.id)
+    show(&provider.id).await
 }
 
 async fn refresh_models(provider: &Provider, report_failures: bool) -> Result<usize> {
@@ -1138,7 +1139,7 @@ fn add(args: &[String]) -> Result<()> {
     Ok(())
 }
 
-fn show(id: &str) -> Result<()> {
+async fn show(id: &str) -> Result<()> {
     let provider = find(id)?;
     println!("{} ({})", provider.name, provider.id);
     println!("  host: {}", provider.host());
@@ -1173,6 +1174,21 @@ fn show(id: &str) -> Result<()> {
             "  keys: {active_keys} on · magpie provider keys {}",
             provider.id
         );
+    }
+    if let Some(balance) = balance::fetch(&provider).await {
+        let mut source = String::new();
+        if !provider.balance_url.is_empty() {
+            source.push_str(" · from ");
+            source.push_str(&provider.balance_url);
+            if !provider.balance_path.is_empty() {
+                source.push(' ');
+                source.push_str(&provider.balance_path);
+            }
+        }
+        match balance {
+            Ok(amount) => println!("  balance: {amount}{source}"),
+            Err(error) => println!("  balance: unavailable · {error:#}{source}"),
+        }
     }
     if !provider.routing.is_empty() {
         println!("  key routing: {}", provider.routing);
