@@ -1,6 +1,7 @@
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     fs,
+    path::PathBuf,
     str::FromStr,
 };
 
@@ -417,7 +418,7 @@ struct KeyAccount {
 
 #[derive(Clone, Default, Deserialize, Serialize)]
 #[serde(default, rename_all = "camelCase")]
-struct Provider {
+pub(crate) struct Provider {
     id: String,
     name: String,
     #[serde(skip_serializing_if = "String::is_empty")]
@@ -1555,6 +1556,141 @@ fn store(file: ProviderFile) -> Result<()> {
     bytes.push(b'\n');
     crate::config::atomic_write_secret_for_settings(&path, &bytes)
         .with_context(|| format!("write {}", path.display()))
+}
+
+const MAX_ICON_BYTES: usize = 1 << 20;
+
+pub(crate) fn backup_snapshot(
+    include_keys: bool,
+) -> Result<(Vec<Provider>, BTreeMap<String, Vec<u8>>)> {
+    let mut providers = Vec::new();
+    let mut icons = BTreeMap::new();
+    for mut provider in load()?.providers {
+        if let Some(name) = provider.icon.strip_prefix("file:")
+            && let Some(path) = backup_icon_path(name)
+            && let Ok(data) = fs::read(path)
+            && data.len() <= MAX_ICON_BYTES
+        {
+            icons.insert(name.to_owned(), data);
+        }
+        if !include_keys {
+            provider.key.clear();
+            provider.key_name.clear();
+            provider.keys.clear();
+            provider.key_protocol.clear();
+            provider.headers.retain(|name, _| !looks_secret(name));
+            provider.extra.retain(|name, _| !looks_secret(name));
+            for value in provider.extra.values_mut() {
+                redact_secret_properties(value);
+            }
+        }
+        providers.push(provider);
+    }
+    Ok((providers, icons))
+}
+
+pub(crate) fn restore_backup_icons(icons: &BTreeMap<String, Vec<u8>>) -> Result<()> {
+    for (name, data) in icons {
+        if data.len() > MAX_ICON_BYTES {
+            continue;
+        }
+        let Some(path) = backup_icon_path(name) else {
+            continue;
+        };
+        if path.exists() {
+            continue;
+        }
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("create provider icon directory {}", parent.display()))?;
+        }
+        crate::config::atomic_write_for_settings(&path, data)
+            .with_context(|| format!("restore provider icon {}", path.display()))?;
+    }
+    Ok(())
+}
+
+pub(crate) fn restore_backup_providers(
+    incoming: &[Provider],
+) -> Result<(usize, usize, Vec<String>)> {
+    let mut file = load()?;
+    let mut included = HashSet::new();
+    let mut added = 0;
+    let mut replaced = 0;
+    for mut provider in incoming.iter().cloned() {
+        if provider.id.is_empty() || provider.id != slug(&provider.id) || provider.id == "magpie" {
+            continue;
+        }
+        included.insert(provider.id.clone());
+        if let Some(index) = file
+            .providers
+            .iter()
+            .position(|existing| existing.id == provider.id)
+        {
+            if provider.key.is_empty() && provider.keys.is_empty() {
+                let existing = &file.providers[index];
+                provider.key.clone_from(&existing.key);
+                provider.key_name.clone_from(&existing.key_name);
+                provider.keys.clone_from(&existing.keys);
+                provider.key_protocol.clone_from(&existing.key_protocol);
+            }
+            file.providers[index] = provider;
+            replaced += 1;
+        } else {
+            file.providers.push(provider);
+            added += 1;
+        }
+    }
+    let need_key = file
+        .providers
+        .iter()
+        .filter(|provider| included.contains(&provider.id))
+        .filter(|provider| provider.key.is_empty() && !provider.is_local())
+        .map(|provider| provider.name.clone())
+        .collect();
+    if added + replaced > 0 {
+        store(file)?;
+    }
+    Ok((added, replaced, need_key))
+}
+
+fn backup_icon_path(name: &str) -> Option<PathBuf> {
+    let (digest, extension) = name.split_once('.')?;
+    let valid_digest = digest.len() == 16
+        && digest
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte));
+    if !valid_digest || !matches!(extension, "png" | "jpg" | "gif" | "webp" | "ico" | "svg") {
+        return None;
+    }
+    let directory = settings::providers_path().parent()?.to_owned();
+    Some(directory.join("icons").join(name))
+}
+
+fn looks_secret(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    [
+        "auth", "key", "token", "secret", "cookie", "session", "password",
+    ]
+    .iter()
+    .any(|part| name.contains(part))
+}
+
+fn redact_secret_properties(value: &mut Value) {
+    match value {
+        Value::Object(fields) => {
+            fields.retain(|name, _| !looks_secret(name));
+            for value in fields.values_mut() {
+                redact_secret_properties(value);
+            }
+        }
+        Value::Array(items) => {
+            for value in items {
+                redact_secret_properties(value);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn find_preset(query: &str) -> Option<&'static Preset> {

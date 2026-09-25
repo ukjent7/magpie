@@ -2,6 +2,7 @@
 
 mod affinity;
 pub mod agent;
+pub mod backup;
 pub mod catalog;
 pub mod cli;
 pub mod config;

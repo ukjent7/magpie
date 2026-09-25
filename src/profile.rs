@@ -4,8 +4,8 @@ use anyhow::{Context, Result, bail};
 
 use crate::{agent, settings};
 
-type Profile = BTreeMap<String, serde_json::Value>;
-type Profiles = BTreeMap<String, Profile>;
+pub(crate) type Profile = BTreeMap<String, serde_json::Value>;
+pub(crate) type Profiles = BTreeMap<String, Profile>;
 
 pub fn list(args: &[String]) -> Result<()> {
     if !args.is_empty() {
@@ -52,6 +52,26 @@ pub fn snapshot_entries() -> Result<Vec<(String, String)>> {
         }
     }
     Ok(snapshot)
+}
+
+pub(crate) fn backup_entries() -> Result<Profiles> {
+    load()
+}
+
+pub(crate) fn restore_entries(incoming: &Profiles) -> Result<usize> {
+    if incoming.is_empty() {
+        return Ok(0);
+    }
+    let mut profiles = load()?;
+    for (name, profile) in incoming {
+        let name = name.trim();
+        if name.is_empty() {
+            bail!("profile name is empty");
+        }
+        profiles.insert(name.to_owned(), profile.clone());
+    }
+    settings::write_json(&settings::profiles_path(), &profiles)?;
+    Ok(incoming.len())
 }
 
 pub fn save(args: &[String]) -> Result<()> {

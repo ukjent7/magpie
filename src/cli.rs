@@ -83,6 +83,8 @@ async fn run(cli: Cli) -> Result<()> {
             Ok(())
         }
         [command, rest @ ..] if command == "serve" => crate::gateway::command(rest).await,
+        [command, rest @ ..] if command == "backup" => crate::backup::backup_command(rest),
+        [command, rest @ ..] if command == "restore" => crate::backup::restore_command(rest),
         [command] if command == "ls" || command == "list" => list_agents(true),
         [command] if command == "providers" => crate::provider::list(),
         [command] if command == "models" => crate::provider::models().await,
@@ -237,6 +239,8 @@ fn usage() -> String {
         "  magpie use <name>               apply a profile",
         "  magpie profiles                 list profiles",
         "  magpie rm <name>                delete a profile",
+        "  magpie backup [--no-keys] [file] encrypt settings into a backup",
+        "  magpie restore [--no-agents] <file> restore an encrypted backup",
         "",
         "  magpie providers                list API providers",
         "  magpie models                   list exposed provider models",
