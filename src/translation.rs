@@ -48,7 +48,10 @@ fn chat_to_anthropic(body: &Value, model: &str) -> Result<Value> {
     let mut translated = Vec::new();
 
     for message in messages {
-        let role = message.get("role").and_then(Value::as_str).unwrap_or("user");
+        let role = message
+            .get("role")
+            .and_then(Value::as_str)
+            .unwrap_or("user");
         match role {
             "system" | "developer" => {
                 let text = content_text(message.get("content"));
@@ -169,7 +172,10 @@ fn anthropic_to_chat(body: &Value, model: &str) -> Result<Value> {
     }
 
     for message in source {
-        let role = message.get("role").and_then(Value::as_str).unwrap_or("user");
+        let role = message
+            .get("role")
+            .and_then(Value::as_str)
+            .unwrap_or("user");
         let blocks = anthropic_blocks(message.get("content"));
         let mut parts = Vec::new();
         let mut tool_calls = Vec::new();
@@ -201,8 +207,16 @@ fn anthropic_to_chat(body: &Value, model: &str) -> Result<Value> {
         if !parts.is_empty() || !tool_calls.is_empty() || role == "assistant" {
             let content = if parts.is_empty() {
                 Value::Null
-            } else if parts.iter().all(|part| part.get("type").and_then(Value::as_str) == Some("text")) {
-                json!(parts.iter().filter_map(|part| part.get("text").and_then(Value::as_str)).collect::<String>())
+            } else if parts
+                .iter()
+                .all(|part| part.get("type").and_then(Value::as_str) == Some("text"))
+            {
+                json!(
+                    parts
+                        .iter()
+                        .filter_map(|part| part.get("text").and_then(Value::as_str))
+                        .collect::<String>()
+                )
             } else {
                 json!(parts)
             };
@@ -246,7 +260,9 @@ fn anthropic_to_chat(body: &Value, model: &str) -> Result<Value> {
             Some("auto") => json!("auto"),
             Some("none") => json!("none"),
             Some("any") => json!("required"),
-            Some("tool") => json!({"type":"function", "function":{"name":choice.get("name").cloned().unwrap_or(Value::Null)}}),
+            Some("tool") => {
+                json!({"type":"function", "function":{"name":choice.get("name").cloned().unwrap_or(Value::Null)}})
+            }
             _ => Value::Null,
         };
     }
@@ -259,9 +275,15 @@ fn chat_response_to_anthropic(body: &Value, model: &str) -> Result<Value> {
         .and_then(Value::as_array)
         .and_then(|choices| choices.first())
         .context("chat response has no choices")?;
-    let message = choice.get("message").context("chat response has no message")?;
+    let message = choice
+        .get("message")
+        .context("chat response has no message")?;
     let mut content = Vec::new();
-    if let Some(text) = message.get("content").and_then(Value::as_str).filter(|text| !text.is_empty()) {
+    if let Some(text) = message
+        .get("content")
+        .and_then(Value::as_str)
+        .filter(|text| !text.is_empty())
+    {
         content.push(json!({"type":"text", "text":text}));
     }
     if let Some(calls) = message.get("tool_calls").and_then(Value::as_array) {
@@ -276,7 +298,10 @@ fn chat_response_to_anthropic(body: &Value, model: &str) -> Result<Value> {
         }
     }
     let usage = body.get("usage").unwrap_or(&Value::Null);
-    let finish = choice.get("finish_reason").and_then(Value::as_str).unwrap_or("stop");
+    let finish = choice
+        .get("finish_reason")
+        .and_then(Value::as_str)
+        .unwrap_or("stop");
     Ok(json!({
         "id":body.get("id").cloned().unwrap_or_else(|| json!("msg_magpie")),
         "type":"message",
@@ -295,7 +320,12 @@ fn chat_response_to_anthropic(body: &Value, model: &str) -> Result<Value> {
 fn anthropic_response_to_chat(body: &Value, model: &str) -> Result<Value> {
     let mut text = String::new();
     let mut calls = Vec::new();
-    for block in body.get("content").and_then(Value::as_array).into_iter().flatten() {
+    for block in body
+        .get("content")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
         match block.get("type").and_then(Value::as_str).unwrap_or("") {
             "text" => text.push_str(block.get("text").and_then(Value::as_str).unwrap_or("")),
             "tool_use" => calls.push(json!({
@@ -314,8 +344,14 @@ fn anthropic_response_to_chat(body: &Value, model: &str) -> Result<Value> {
         message["tool_calls"] = json!(calls);
     }
     let usage = body.get("usage").unwrap_or(&Value::Null);
-    let input = usage.get("input_tokens").and_then(Value::as_u64).unwrap_or(0);
-    let output = usage.get("output_tokens").and_then(Value::as_u64).unwrap_or(0);
+    let input = usage
+        .get("input_tokens")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let output = usage
+        .get("output_tokens")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
     let prompt = input
         .saturating_add(
             usage
@@ -329,7 +365,10 @@ fn anthropic_response_to_chat(body: &Value, model: &str) -> Result<Value> {
                 .and_then(Value::as_u64)
                 .unwrap_or(0),
         );
-    let stop = body.get("stop_reason").and_then(Value::as_str).unwrap_or("end_turn");
+    let stop = body
+        .get("stop_reason")
+        .and_then(Value::as_str)
+        .unwrap_or("end_turn");
     Ok(json!({
         "id":body.get("id").cloned().unwrap_or_else(|| json!("chatcmpl_magpie")),
         "object":"chat.completion",
@@ -341,13 +380,24 @@ fn anthropic_response_to_chat(body: &Value, model: &str) -> Result<Value> {
 }
 
 fn chat_stream(body: &Value, model: &str, output: &mut String) {
-    let id = body.get("id").and_then(Value::as_str).unwrap_or("chatcmpl_magpie");
+    let id = body
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or("chatcmpl_magpie");
     let created = body.get("created").cloned().unwrap_or_else(|| json!(0));
     let start = json!({"id":id,"object":"chat.completion.chunk","created":created,"model":model,"choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]});
     sse(output, None, &start);
-    let choice = body.get("choices").and_then(Value::as_array).and_then(|choices| choices.first()).unwrap_or(&Value::Null);
+    let choice = body
+        .get("choices")
+        .and_then(Value::as_array)
+        .and_then(|choices| choices.first())
+        .unwrap_or(&Value::Null);
     let message = choice.get("message").unwrap_or(&Value::Null);
-    if let Some(text) = message.get("content").and_then(Value::as_str).filter(|text| !text.is_empty()) {
+    if let Some(text) = message
+        .get("content")
+        .and_then(Value::as_str)
+        .filter(|text| !text.is_empty())
+    {
         let chunk = json!({"id":id,"object":"chat.completion.chunk","created":created,"model":model,"choices":[{"index":0,"delta":{"content":text},"finish_reason":null}]});
         sse(output, None, &chunk);
     }
@@ -364,7 +414,10 @@ fn chat_stream(body: &Value, model: &str, output: &mut String) {
         let chunk = json!({"id":id,"object":"chat.completion.chunk","created":created,"model":model,"choices":[{"index":0,"delta":{"tool_calls":fragments},"finish_reason":null}]});
         sse(output, None, &chunk);
     }
-    let finish = body.pointer("/choices/0/finish_reason").and_then(Value::as_str).unwrap_or("stop");
+    let finish = body
+        .pointer("/choices/0/finish_reason")
+        .and_then(Value::as_str)
+        .unwrap_or("stop");
     let final_chunk = json!({"id":id,"object":"chat.completion.chunk","created":created,"model":model,"choices":[{"index":0,"delta":{},"finish_reason":finish}]});
     sse(output, None, &final_chunk);
     if let Some(usage) = body.get("usage") {
@@ -375,11 +428,20 @@ fn chat_stream(body: &Value, model: &str, output: &mut String) {
 }
 
 fn anthropic_stream(body: &Value, model: &str, output: &mut String) {
-    let id = body.get("id").and_then(Value::as_str).unwrap_or("msg_magpie");
+    let id = body
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or("msg_magpie");
     let usage = body.get("usage").unwrap_or(&Value::Null);
     let start = json!({"type":"message_start","message":{"id":id,"type":"message","role":"assistant","model":model,"content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":usage.get("input_tokens").cloned().unwrap_or_else(|| json!(0)),"output_tokens":0}}});
     sse(output, Some("message_start"), &start);
-    for (index, block) in body.get("content").and_then(Value::as_array).into_iter().flatten().enumerate() {
+    for (index, block) in body
+        .get("content")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .enumerate()
+    {
         match block.get("type").and_then(Value::as_str).unwrap_or("") {
             "text" => {
                 let start = json!({"type":"content_block_start","index":index,"content_block":{"type":"text","text":""}});
@@ -400,7 +462,11 @@ fn anthropic_stream(body: &Value, model: &str, output: &mut String) {
     }
     let delta = json!({"type":"message_delta","delta":{"stop_reason":body.get("stop_reason").cloned().unwrap_or_else(|| json!("end_turn")),"stop_sequence":null},"usage":{"output_tokens":usage.get("output_tokens").cloned().unwrap_or_else(|| json!(0))}});
     sse(output, Some("message_delta"), &delta);
-    sse(output, Some("message_stop"), &json!({"type":"message_stop"}));
+    sse(
+        output,
+        Some("message_stop"),
+        &json!({"type":"message_stop"}),
+    );
 }
 
 fn sse(output: &mut String, event: Option<&str>, data: &Value) {
@@ -429,11 +495,18 @@ fn chat_content_blocks(content: Option<&Value>) -> Vec<Value> {
         .as_array()
         .into_iter()
         .flatten()
-        .filter_map(|part| match part.get("type").and_then(Value::as_str).unwrap_or("") {
-            "text" => Some(json!({"type":"text", "text":part.get("text").cloned().unwrap_or(Value::Null)})),
-            "image_url" => part.pointer("/image_url/url").and_then(Value::as_str).and_then(chat_image_source),
-            _ => None,
-        })
+        .filter_map(
+            |part| match part.get("type").and_then(Value::as_str).unwrap_or("") {
+                "text" => Some(
+                    json!({"type":"text", "text":part.get("text").cloned().unwrap_or(Value::Null)}),
+                ),
+                "image_url" => part
+                    .pointer("/image_url/url")
+                    .and_then(Value::as_str)
+                    .and_then(chat_image_source),
+                _ => None,
+            },
+        )
         .collect()
 }
 
@@ -441,7 +514,9 @@ fn chat_image_source(url: &str) -> Option<Value> {
     if let Some(data) = url.strip_prefix("data:") {
         let (metadata, encoded) = data.split_once(',')?;
         let media_type = metadata.strip_suffix(";base64")?;
-        Some(json!({"type":"image","source":{"type":"base64","media_type":media_type,"data":encoded}}))
+        Some(
+            json!({"type":"image","source":{"type":"base64","media_type":media_type,"data":encoded}}),
+        )
     } else {
         Some(json!({"type":"image","source":{"type":"url","url":url}}))
     }
@@ -483,7 +558,9 @@ fn content_text(content: Option<&Value>) -> String {
 
 fn parse_arguments(value: Option<&Value>) -> Value {
     match value {
-        Some(Value::Object(_)) | Some(Value::Array(_)) => value.cloned().unwrap_or_else(|| json!({})),
+        Some(Value::Object(_)) | Some(Value::Array(_)) => {
+            value.cloned().unwrap_or_else(|| json!({}))
+        }
         Some(Value::String(raw)) => serde_json::from_str(raw).unwrap_or_else(|_| json!({})),
         _ => json!({}),
     }
@@ -508,9 +585,17 @@ mod tests {
         assert_eq!(anthropic["tools"][0]["input_schema"]["type"], "object");
 
         let result = json!({"id":"msg_1","model":"model","content":[{"type":"tool_use","id":"call_1","name":"search","input":{"q":"rust"}}],"stop_reason":"tool_use","usage":{"input_tokens":7,"output_tokens":3}});
-        let chat = response(&result, ApiProtocol::Anthropic, ApiProtocol::Chat, "vendor/model")
-            .expect("convert Anthropic response");
-        assert_eq!(chat["choices"][0]["message"]["tool_calls"][0]["id"], "call_1");
+        let chat = response(
+            &result,
+            ApiProtocol::Anthropic,
+            ApiProtocol::Chat,
+            "vendor/model",
+        )
+        .expect("convert Anthropic response");
+        assert_eq!(
+            chat["choices"][0]["message"]["tool_calls"][0]["id"],
+            "call_1"
+        );
         assert_eq!(chat["choices"][0]["finish_reason"], "tool_calls");
         assert_eq!(chat["model"], "vendor/model");
     }

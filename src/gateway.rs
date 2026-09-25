@@ -234,35 +234,38 @@ async fn forward(
         Ok(providers) => providers,
         Err(error) => return api_error_for(protocol, error.status, error.message),
     };
-    let (provider, upstream_model, upstream_protocol) = match resolve_model(
-        &model,
-        &providers,
-        protocol,
-        path_override.is_none(),
-    ) {
-        Ok(result) => result,
-        Err(ResolveError::Unknown) => {
-            return api_error_for(
-                protocol,
-                StatusCode::NOT_FOUND,
-                &format!("unknown model {model:?}; use provider/model or list available models"),
-            );
-        }
-        Err(ResolveError::Ambiguous) => {
-            return api_error_for(
-                protocol,
-                StatusCode::BAD_REQUEST,
-                &format!("model {model:?} belongs to more than one provider; use provider/model"),
-            );
-        }
-    };
+    let (provider, upstream_model, upstream_protocol) =
+        match resolve_model(&model, &providers, protocol, path_override.is_none()) {
+            Ok(result) => result,
+            Err(ResolveError::Unknown) => {
+                return api_error_for(
+                    protocol,
+                    StatusCode::NOT_FOUND,
+                    &format!(
+                        "unknown model {model:?}; use provider/model or list available models"
+                    ),
+                );
+            }
+            Err(ResolveError::Ambiguous) => {
+                return api_error_for(
+                    protocol,
+                    StatusCode::BAD_REQUEST,
+                    &format!(
+                        "model {model:?} belongs to more than one provider; use provider/model"
+                    ),
+                );
+            }
+        };
     let streaming = body.get("stream").and_then(Value::as_bool).unwrap_or(false);
     let translated = upstream_protocol != protocol;
     if translated {
-        body = match crate::translation::request(&body, protocol, upstream_protocol, upstream_model) {
+        body = match crate::translation::request(&body, protocol, upstream_protocol, upstream_model)
+        {
             Ok(body) => body,
             Err(error) => {
-                eprintln!("magpie: translate request from {protocol:?} to {upstream_protocol:?}: {error:#}");
+                eprintln!(
+                    "magpie: translate request from {protocol:?} to {upstream_protocol:?}: {error:#}"
+                );
                 return api_error_for(
                     protocol,
                     StatusCode::BAD_REQUEST,
@@ -344,8 +347,15 @@ async fn forward(
             Ok(Some(chunk)) => chunk,
             Ok(None) => break,
             Err(error) => {
-                eprintln!("magpie: read translated response from {}: {error}", provider.id);
-                return api_error_for(protocol, StatusCode::BAD_GATEWAY, "provider response failed");
+                eprintln!(
+                    "magpie: read translated response from {}: {error}",
+                    provider.id
+                );
+                return api_error_for(
+                    protocol,
+                    StatusCode::BAD_GATEWAY,
+                    "provider response failed",
+                );
             }
         };
         if bytes.len().saturating_add(chunk.len()) > MAX_RESPONSE_BYTES {
@@ -360,8 +370,15 @@ async fn forward(
     let upstream_body: Value = match serde_json::from_slice(&bytes) {
         Ok(body) => body,
         Err(error) => {
-            eprintln!("magpie: parse translated response from {}: {error}", provider.id);
-            return api_error_for(protocol, StatusCode::BAD_GATEWAY, "provider returned invalid JSON");
+            eprintln!(
+                "magpie: parse translated response from {}: {error}",
+                provider.id
+            );
+            return api_error_for(
+                protocol,
+                StatusCode::BAD_GATEWAY,
+                "provider returned invalid JSON",
+            );
         }
     };
     let translated_body = match crate::translation::response(
@@ -372,8 +389,14 @@ async fn forward(
     ) {
         Ok(body) => body,
         Err(error) => {
-            eprintln!("magpie: translate response from {upstream_protocol:?} to {protocol:?}: {error:#}");
-            return api_error_for(protocol, StatusCode::BAD_GATEWAY, "provider response could not be translated");
+            eprintln!(
+                "magpie: translate response from {upstream_protocol:?} to {protocol:?}: {error:#}"
+            );
+            return api_error_for(
+                protocol,
+                StatusCode::BAD_GATEWAY,
+                "provider response could not be translated",
+            );
         }
     };
     let bytes = if streaming {
@@ -381,7 +404,11 @@ async fn forward(
             Ok(bytes) => bytes,
             Err(error) => {
                 eprintln!("magpie: encode translated stream for {protocol:?}: {error:#}");
-                return api_error_for(protocol, StatusCode::BAD_GATEWAY, "provider response could not be streamed");
+                return api_error_for(
+                    protocol,
+                    StatusCode::BAD_GATEWAY,
+                    "provider response could not be streamed",
+                );
             }
         }
     } else {
@@ -389,7 +416,11 @@ async fn forward(
             Ok(bytes) => bytes,
             Err(error) => {
                 eprintln!("magpie: serialize translated response: {error}");
-                return api_error_for(protocol, StatusCode::BAD_GATEWAY, "provider response could not be translated");
+                return api_error_for(
+                    protocol,
+                    StatusCode::BAD_GATEWAY,
+                    "provider response could not be translated",
+                );
             }
         }
     };
@@ -733,13 +764,9 @@ mod tests {
     #[test]
     fn resolves_qualified_models_without_truncating_model_id() {
         let providers = [provider("relay", "Relay", &["visible-model"])];
-        let (provider, model, upstream) = resolve_model(
-            "relay/vendor/model",
-            &providers,
-            ApiProtocol::Chat,
-            true,
-        )
-        .expect("qualified provider/model should resolve");
+        let (provider, model, upstream) =
+            resolve_model("relay/vendor/model", &providers, ApiProtocol::Chat, true)
+                .expect("qualified provider/model should resolve");
         assert_eq!(provider.id, "relay");
         assert_eq!(model, "vendor/model");
         assert_eq!(upstream, ApiProtocol::Chat);
