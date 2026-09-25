@@ -503,7 +503,10 @@ pub fn presets() -> Result<()> {
     Ok(())
 }
 
-pub fn models() -> Result<()> {
+pub async fn models() -> Result<()> {
+    if let Err(error) = crate::catalog::sync_if_stale().await {
+        eprintln!("magpie: could not refresh models.dev; using cached catalog: {error:#}");
+    }
     let providers = load()?.providers;
     let mut found = false;
     for provider in providers

@@ -30,6 +30,18 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      - name: Format sources on CI
+        run: cargo fmt --all
+
+      - name: Upload formatted Rust sources
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@v7
+        with:
+          name: formatted-rust-sources
+          path: src/
+          if-no-files-found: error
+          retention-days: 1
+
       - name: Check formatting
         run: cargo fmt --all -- --check
 

@@ -3,7 +3,7 @@ use std::{
     fs,
     path::PathBuf,
     sync::OnceLock,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime},
 };
 
 use anyhow::{Context, Result, bail, ensure};
@@ -319,6 +319,26 @@ pub async fn sync_models_dev() -> Result<usize> {
     config::atomic_write_for_settings(&path, &bytes)
         .with_context(|| format!("write models.dev catalog {}", path.display()))?;
     Ok(catalog.len())
+}
+
+pub fn is_stale() -> bool {
+    let Ok(metadata) = fs::metadata(catalog_path()) else {
+        return true;
+    };
+    let Ok(modified) = metadata.modified() else {
+        return true;
+    };
+    SystemTime::now()
+        .duration_since(modified)
+        .is_ok_and(|age| age > Duration::from_secs(7 * 24 * 60 * 60))
+}
+
+pub async fn sync_if_stale() -> Result<Option<usize>> {
+    if is_stale() {
+        sync_models_dev().await.map(Some)
+    } else {
+        Ok(None)
+    }
 }
 
 fn catalog_models(provider_id: &str) -> Vec<Model> {
