@@ -295,7 +295,8 @@ async fn download_attempt(client: &Client, url: &Url, asset: &Asset, path: &Path
         asset.size == 0 || size == asset.size,
         "update binary size differs from the release feed"
     );
-    let digest = format!("{:x}", hasher.finalize());
+    let digest = hasher.finalize();
+    let digest = encode_hex(digest.iter().copied());
     ensure!(
         digest.eq_ignore_ascii_case(&asset.sha256),
         "update binary does not match its SHA-256 checksum"
@@ -351,15 +352,30 @@ struct ParsedVersion {
 fn parse_version(value: &str) -> Option<ParsedVersion> {
     let value = value.trim().strip_prefix('v').unwrap_or(value.trim());
     let (numbers, prerelease) = value.split_once('-').unwrap_or((value, ""));
-    let numbers = numbers
-        .split('.')
-        .map(str::parse::<u64>)
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-    let numbers: [u64; 3] = numbers.try_into().ok()?;
+    let mut components = numbers.split('.');
+    let numbers: [u64; 3] = [
+        components.next()?.parse::<u64>().ok()?,
+        components.next()?.parse::<u64>().ok()?,
+        components.next()?.parse::<u64>().ok()?,
+    ];
+    if components.next().is_some() {
+        return None;
+    }
     Some(ParsedVersion {
         numbers,
         prerelease: prerelease.to_owned(),
     })
+}
+
+fn encode_hex(bytes: impl IntoIterator<Item = u8>) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+
+    let mut encoded = String::new();
+    for byte in bytes {
+        encoded.push(DIGITS[(byte >> 4) as usize] as char);
+        encoded.push(DIGITS[(byte & 0x0f) as usize] as char);
+    }
+    encoded
 }
 
 fn compare_versions(left: &ParsedVersion, right: &ParsedVersion) -> Ordering {
