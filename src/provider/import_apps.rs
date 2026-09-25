@@ -23,6 +23,13 @@ struct Candidate {
     skipped: Option<String>,
 }
 
+#[derive(Default)]
+struct Endpoints {
+    chat: String,
+    responses: String,
+    anthropic: String,
+}
+
 pub(super) fn command(args: &[String]) -> Result<()> {
     let mut automatic = false;
     let mut sources = Vec::new();
@@ -251,9 +258,10 @@ fn claude_imports(contents: &str) -> Result<Vec<Candidate>> {
         "Claude Code settings.json",
         "Claude Code",
         &key,
-        "",
-        "",
-        &name,
+        Endpoints {
+            anthropic: name,
+            ..Endpoints::default()
+        },
         models,
         BTreeMap::new(),
     )])
@@ -349,10 +357,16 @@ fn codex_imports(contents: &str, config_path: &Path) -> Result<Vec<Candidate>> {
         } else {
             base
         };
-        let (chat, responses) = if string(table, "wire_api") == Some("chat") {
-            (base, "")
+        let endpoints = if string(table, "wire_api") == Some("chat") {
+            Endpoints {
+                chat: base.to_owned(),
+                ..Endpoints::default()
+            }
         } else {
-            ("", base)
+            Endpoints {
+                responses: base.to_owned(),
+                ..Endpoints::default()
+            }
         };
         let headers = table
             .get("http_headers")
@@ -363,9 +377,7 @@ fn codex_imports(contents: &str, config_path: &Path) -> Result<Vec<Candidate>> {
             &format!("Codex config.toml · {id}"),
             name,
             token,
-            chat,
-            responses,
-            "",
+            endpoints,
             models,
             headers,
         ));
@@ -377,15 +389,13 @@ fn make_candidate(
     source: &str,
     name: &str,
     key: &str,
-    chat: &str,
-    responses: &str,
-    anthropic: &str,
+    endpoints: Endpoints,
     models: Vec<String>,
     headers: BTreeMap<String, String>,
 ) -> Candidate {
     let rejected = if key.chars().any(char::is_control) {
         Some("its API key contains control characters".to_owned())
-    } else if [chat, responses, anthropic]
+    } else if [&endpoints.chat, &endpoints.responses, &endpoints.anthropic]
         .into_iter()
         .filter(|endpoint| !endpoint.is_empty())
         .any(contains_url_credentials)
@@ -398,9 +408,9 @@ fn make_candidate(
         id: super::slug(name),
         name: name.trim().to_owned(),
         key: key.to_owned(),
-        chat: clean_base(chat),
-        responses: clean_base(responses),
-        anthropic: clean_base(anthropic),
+        chat: clean_base(&endpoints.chat),
+        responses: clean_base(&endpoints.responses),
+        anthropic: clean_base(&endpoints.anthropic),
         models,
         headers,
         ..Provider::default()
@@ -903,9 +913,10 @@ env_key = "UNREAD_SECRET"
             "Codex",
             "Relay",
             "sk-same",
-            "https://relay.example/v1",
-            "",
-            "",
+            Endpoints {
+                chat: "https://relay.example/v1".to_owned(),
+                ..Endpoints::default()
+            },
             vec!["chat-model".to_owned()],
             BTreeMap::new(),
         );
@@ -913,9 +924,10 @@ env_key = "UNREAD_SECRET"
             "Claude",
             "Relay",
             "sk-same",
-            "",
-            "",
-            "https://relay.example/anthropic",
+            Endpoints {
+                anthropic: "https://relay.example/anthropic".to_owned(),
+                ..Endpoints::default()
+            },
             vec!["sonnet".to_owned()],
             BTreeMap::new(),
         );
