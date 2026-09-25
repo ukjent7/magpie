@@ -10,6 +10,7 @@ pub mod agent;
 pub mod backup;
 pub mod catalog;
 pub mod cli;
+mod codex;
 pub mod config;
 pub mod gateway;
 pub mod groups;

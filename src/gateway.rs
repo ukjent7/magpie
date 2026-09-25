@@ -466,6 +466,9 @@ async fn forward(
     }
     let provider = candidate.provider;
     let upstream_protocol = candidate.upstream;
+    if provider.codex_auth_file.is_some() && !streaming && response.status().is_success() {
+        return codex_non_stream_response(response, affinity_record, usage_request).await;
+    }
     let translated = upstream_protocol != protocol;
     if !translated || !response.status().is_success() {
         return relay(response, upstream_protocol, affinity_record, usage_request);
@@ -635,6 +638,9 @@ async fn send_upstream(
         object.insert("model".to_owned(), json!(model));
         body
     };
+    if provider.codex_auth_file.is_some() {
+        body = crate::codex::request_body(&body).await;
+    }
     if translated && streaming {
         body["stream"] = json!(true);
     }
@@ -645,18 +651,166 @@ async fn send_upstream(
         query,
     )
     .with_context(|| format!("build URL for provider {}", provider.id))?;
-    let headers = upstream_headers(provider, upstream_protocol, key, incoming_headers)
-        .map_err(anyhow::Error::msg)
-        .with_context(|| format!("build headers for provider {}", provider.id))?;
-    state
-        .client
-        .post(url)
-        .headers(headers)
-        .header(header::ACCEPT, "application/json, text/event-stream")
+    let headers = if let Some(auth_file) = provider.codex_auth_file.as_deref() {
+        let credentials = crate::codex::credentials(&state.client, auth_file).await?;
+        codex_upstream_headers(&credentials, &body)?
+    } else {
+        upstream_headers(provider, upstream_protocol, key, incoming_headers)
+            .map_err(anyhow::Error::msg)
+            .with_context(|| format!("build headers for provider {}", provider.id))?
+    };
+    let request = state.client.post(url).headers(headers);
+    let request = if provider.codex_auth_file.is_some() {
+        request
+    } else {
+        request.header(header::ACCEPT, "application/json, text/event-stream")
+    };
+    request
         .body(body)
         .send()
         .await
         .with_context(|| format!("send request to provider {}", provider.id))
+}
+
+fn codex_upstream_headers(
+    credentials: &crate::codex::Credentials,
+    body: &Value,
+) -> Result<HeaderMap> {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
+    headers.insert(
+        header::AUTHORIZATION,
+        HeaderValue::from_str(&format!("Bearer {}", credentials.access_token))
+            .context("Codex token cannot be used as an HTTP header")?,
+    );
+    if !credentials.account_id.is_empty() {
+        headers.insert(
+            HeaderName::from_static("chatgpt-account-id"),
+            HeaderValue::from_str(&credentials.account_id)
+                .context("Codex account id cannot be used as an HTTP header")?,
+        );
+    }
+    for (name, value) in [
+        ("OpenAI-Beta", "responses=experimental".to_owned()),
+        ("originator", "codex_cli_rs".to_owned()),
+        ("User-Agent", crate::codex::user_agent()),
+    ] {
+        headers.insert(
+            HeaderName::from_bytes(name.as_bytes()).context("invalid Codex header name")?,
+            HeaderValue::from_str(&value).context("invalid Codex request header")?,
+        );
+    }
+    headers.insert(
+        header::ACCEPT,
+        HeaderValue::from_static("text/event-stream"),
+    );
+    if let Some(key) = crate::codex::cache_key(body) {
+        let key =
+            HeaderValue::from_str(key).context("Codex prompt cache key is not a valid header")?;
+        headers.insert(HeaderName::from_static("session_id"), key.clone());
+        headers.insert(HeaderName::from_static("conversation_id"), key);
+    }
+    Ok(headers)
+}
+
+async fn codex_non_stream_response(
+    mut upstream: reqwest::Response,
+    affinity_record: Option<(AffinityContext, String)>,
+    usage_request: Option<crate::usage::Request>,
+) -> Response {
+    let status = upstream.status();
+    let headers = upstream.headers().clone();
+    let mut bytes = Vec::new();
+    while let Some(chunk) = match upstream.chunk().await {
+        Ok(chunk) => chunk,
+        Err(error) => {
+            eprintln!("magpie: read Codex response: {error}");
+            return api_error_for(
+                ApiProtocol::Responses,
+                StatusCode::BAD_GATEWAY,
+                "provider response failed",
+            );
+        }
+    } {
+        if bytes.len().saturating_add(chunk.len()) > MAX_RESPONSE_BYTES {
+            return api_error_for(
+                ApiProtocol::Responses,
+                StatusCode::BAD_GATEWAY,
+                "provider response exceeds the gateway size limit",
+            );
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    let completed = match codex_completed_response(&bytes) {
+        Some(response) => response,
+        None => {
+            eprintln!("magpie: Codex returned no completed Responses event");
+            return api_error_for(
+                ApiProtocol::Responses,
+                StatusCode::BAD_GATEWAY,
+                "provider response could not be read",
+            );
+        }
+    };
+    if let Some((context, route)) = affinity_record {
+        affinity::record(
+            &context,
+            route,
+            affinity::cache_read_from_value(ApiProtocol::Responses, &completed),
+        );
+    }
+    if let Some(request) = usage_request {
+        crate::usage::record(
+            request,
+            status.as_u16(),
+            affinity::usage_from_value(ApiProtocol::Responses, &completed),
+        );
+    }
+    match serde_json::to_vec(&completed) {
+        Ok(bytes) => translated_response(status, &headers, bytes, false),
+        Err(error) => {
+            eprintln!("magpie: serialize Codex response: {error}");
+            api_error_for(
+                ApiProtocol::Responses,
+                StatusCode::BAD_GATEWAY,
+                "provider response could not be read",
+            )
+        }
+    }
+}
+
+fn codex_completed_response(bytes: &[u8]) -> Option<Value> {
+    if let Ok(value) = serde_json::from_slice::<Value>(bytes)
+        && value.get("object").and_then(Value::as_str) == Some("response")
+    {
+        return Some(value);
+    }
+    let text = std::str::from_utf8(bytes).ok()?;
+    let mut data = String::new();
+    for line in text.lines().chain(std::iter::once("")) {
+        if line.is_empty() {
+            if !data.is_empty()
+                && data != "[DONE]"
+                && let Ok(event) = serde_json::from_str::<Value>(&data)
+                && matches!(
+                    event.get("type").and_then(Value::as_str),
+                    Some("response.completed" | "response.incomplete" | "response.failed")
+                )
+            {
+                return event.get("response").cloned();
+            }
+            data.clear();
+        } else if let Some(value) = line.strip_prefix("data:") {
+            if !data.is_empty() {
+                data.push('\n');
+            }
+            data.push_str(value.trim_start());
+        }
+    }
+    None
 }
 
 fn retryable_status(status: StatusCode) -> bool {
@@ -1480,6 +1634,7 @@ mod tests {
             headers: BTreeMap::new(),
             models: models.iter().map(|model| (*model).to_owned()).collect(),
             model_keys: HashMap::new(),
+            codex_auth_file: None,
             hidden: false,
         }
     }

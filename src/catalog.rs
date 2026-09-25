@@ -150,6 +150,20 @@ pub fn available_models(provider_id: &str, catalog_id: &str) -> Vec<Model> {
     let known = catalog_models(catalog_id);
     let live = live_models(provider_id);
     if live.is_empty() {
+        if provider_id == "codex" {
+            let cached = crate::codex::cached_models();
+            if !cached.is_empty() {
+                return cached
+                    .into_iter()
+                    .map(|id| Model {
+                        name: id.clone(),
+                        id,
+                        provider: "openai".to_owned(),
+                        ..Model::default()
+                    })
+                    .collect();
+            }
+        }
         return known
             .into_iter()
             .filter(|model| !model.id.contains("-exp") && !model.id.contains("preview"))

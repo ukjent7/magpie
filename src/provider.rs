@@ -503,8 +503,15 @@ pub(crate) struct Provider {
     keys_url: String,
     #[serde(skip_serializing_if = "is_false")]
     hidden: bool,
+    #[serde(skip)]
+    account: Option<ProviderAccount>,
     #[serde(flatten)]
     extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone)]
+pub(crate) enum ProviderAccount {
+    Codex { auth_file: PathBuf },
 }
 
 pub(crate) struct GatewayProvider {
@@ -521,6 +528,7 @@ pub(crate) struct GatewayProvider {
     pub(crate) headers: BTreeMap<String, String>,
     pub(crate) models: Vec<String>,
     pub(crate) model_keys: HashMap<String, HashSet<String>>,
+    pub(crate) codex_auth_file: Option<PathBuf>,
     pub(crate) hidden: bool,
 }
 
@@ -540,6 +548,37 @@ pub(crate) fn key_id(key: &str) -> String {
     fingerprint
 }
 
+fn providers_with_local_accounts(mut providers: Vec<Provider>) -> Vec<Provider> {
+    if providers.iter().any(|provider| provider.id == "codex") {
+        return providers;
+    }
+    let Some(auth_file) = crate::codex::signed_in_auth_file() else {
+        return providers;
+    };
+    providers.push(Provider {
+        id: "codex".to_owned(),
+        name: "Codex".to_owned(),
+        icon: "codex-color".to_owned(),
+        responses: "https://chatgpt.com/backend-api/codex".to_owned(),
+        catalog: "codex".to_owned(),
+        website: "https://chatgpt.com/codex".to_owned(),
+        models: Vec::new(),
+        account: Some(ProviderAccount::Codex { auth_file }),
+        ..Provider::default()
+    });
+    providers
+}
+
+fn has_provider_credential(provider: &Provider) -> bool {
+    !provider.key.is_empty()
+        || provider
+            .keys
+            .iter()
+            .any(|key| !key.off && !key.key.is_empty())
+        || provider.is_local()
+        || provider.account.is_some()
+}
+
 pub(crate) struct GatewayGroup {
     pub(crate) id: String,
     pub(crate) name: String,
@@ -554,7 +593,8 @@ pub(crate) struct GatewayCatalog {
 }
 
 pub(crate) fn gateway_catalog() -> Result<GatewayCatalog> {
-    let file = load()?;
+    let mut file = load()?;
+    file.providers = providers_with_local_accounts(file.providers);
     let entries = model_entries(&file.providers);
     let groups = groups_in(&file.groups, &entries)
         .into_iter()
@@ -624,6 +664,9 @@ pub(crate) fn gateway_catalog() -> Result<GatewayCatalog> {
                 headers: provider.headers,
                 models,
                 model_keys,
+                codex_auth_file: provider.account.as_ref().map(|account| match account {
+                    ProviderAccount::Codex { auth_file } => auth_file.clone(),
+                }),
                 hidden: provider.hidden,
             }
         })
@@ -632,11 +675,14 @@ pub(crate) fn gateway_catalog() -> Result<GatewayCatalog> {
 }
 
 pub fn available_model_entries() -> Result<Vec<ModelEntry>> {
-    Ok(model_entries(&load()?.providers))
+    Ok(model_entries(&providers_with_local_accounts(
+        load()?.providers,
+    )))
 }
 
 pub fn groups() -> Result<Vec<Group>> {
-    let file = load()?;
+    let mut file = load()?;
+    file.providers = providers_with_local_accounts(file.providers);
     let entries = model_entries(&file.providers);
     Ok(groups_in(&file.groups, &entries))
 }
@@ -714,7 +760,7 @@ pub fn restore_group(id: &str) -> Result<()> {
 }
 
 pub fn list() -> Result<()> {
-    let providers = load()?.providers;
+    let providers = providers_with_local_accounts(load()?.providers);
     if providers.is_empty() {
         println!("no providers yet · magpie provider add <name> url=<url> key=<key>");
         return Ok(());
@@ -751,10 +797,14 @@ pub fn list() -> Result<()> {
             } else {
                 Some(provider.key.as_str())
             };
-            let key = match key {
-                Some(key) => format!("● {}", mask(key)),
-                None if provider.is_local() => "● no key needed".to_owned(),
-                None => "○ no key".to_owned(),
+            let key = if provider.account.is_some() {
+                "● signed in".to_owned()
+            } else {
+                match key {
+                    Some(key) => format!("● {}", mask(key)),
+                    None if provider.is_local() => "● no key needed".to_owned(),
+                    None => "○ no key".to_owned(),
+                }
             };
             let exposed = crate::catalog::exposed_models(
                 &provider.id,
@@ -890,11 +940,11 @@ pub async fn models() -> Result<()> {
     if let Err(error) = crate::catalog::sync_if_stale().await {
         eprintln!("magpie: could not refresh models.dev; using cached catalog: {error:#}");
     }
-    let providers = load()?.providers;
+    let providers = providers_with_local_accounts(load()?.providers);
     let mut found = false;
     for provider in providers
         .iter()
-        .filter(|provider| !provider.hidden && (!provider.key.is_empty() || provider.is_local()))
+        .filter(|provider| !provider.hidden && has_provider_credential(provider))
     {
         let models =
             crate::catalog::exposed_models(&provider.id, provider.catalog_id(), &provider.models);
@@ -942,12 +992,12 @@ pub async fn models() -> Result<()> {
 }
 
 pub(crate) async fn sync_live_models() -> Result<Vec<(String, usize)>> {
-    let providers = load()?.providers;
+    let providers = providers_with_local_accounts(load()?.providers);
     let mut refreshed = Vec::new();
 
     for provider in providers.into_iter().filter(|provider| {
         !provider.hidden
-            && (!provider.key.is_empty() || provider.is_local())
+            && has_provider_credential(provider)
             && (!provider.chat.is_empty()
                 || !provider.responses.is_empty()
                 || !provider.anthropic.is_empty())
@@ -975,7 +1025,7 @@ pub async fn command(args: &[String]) -> Result<()> {
         }
         [verb, id, fallback @ ..] if verb == "fallback" => set_fallback(id, fallback),
         [verb, id, rest @ ..] if verb == "models" => models_command(id, rest).await,
-        [verb, id] if verb == "test" => test::test_provider(id).await,
+        [verb, id] if verb == "test" => test_provider_command(id).await,
         [verb, id, value] if verb == "icon" => set_icon(id, value),
         [verb, id] if verb == "rm" => remove(id),
         [id] => show(id).await,
@@ -1014,6 +1064,11 @@ fn set_icon(id: &str, value: &str) -> Result<()> {
 
 async fn models_command(id: &str, selected: &[String]) -> Result<()> {
     if !selected.is_empty() {
+        let provider = find(id)?;
+        ensure!(
+            provider.account.is_none(),
+            "Codex account models follow the signed-in account and cannot be selected manually"
+        );
         let mut file = load()?;
         let provider = file
             .providers
@@ -1038,7 +1093,20 @@ async fn models_command(id: &str, selected: &[String]) -> Result<()> {
     show(&provider.id).await
 }
 
+async fn test_provider_command(id: &str) -> Result<()> {
+    let provider = find(id)?;
+    if provider.account.is_some() {
+        let count = refresh_models(&provider, true).await?;
+        println!("✓ connected to {} · fetched {count} models", provider.name);
+        return Ok(());
+    }
+    test::test_provider(id).await
+}
+
 async fn refresh_models(provider: &Provider, report_failures: bool) -> Result<usize> {
+    if let Some(ProviderAccount::Codex { auth_file }) = provider.account.as_ref() {
+        return crate::codex::refresh_models(auth_file).await;
+    }
     let mut keys = Vec::new();
     if !provider.key.is_empty() {
         keys.push((provider.key.clone(), provider.key_protocol.clone()));
@@ -1285,7 +1353,9 @@ async fn show(id: &str) -> Result<()> {
     );
     println!(
         "  key: {}",
-        if provider.key.is_empty() {
+        if provider.account.is_some() {
+            "signed in".to_owned()
+        } else if provider.key.is_empty() {
             "no key".to_owned()
         } else {
             mask(&provider.key)
@@ -1777,8 +1847,7 @@ fn remove(id: &str) -> Result<()> {
 }
 
 fn find(id: &str) -> Result<Provider> {
-    load()?
-        .providers
+    providers_with_local_accounts(load()?.providers)
         .into_iter()
         .find(|provider| provider.id == id || provider.name.eq_ignore_ascii_case(id))
         .with_context(|| format!("no provider {id:?}; magpie providers lists them"))
@@ -2078,7 +2147,7 @@ fn model_entries(providers: &[Provider]) -> Vec<ModelEntry> {
     let mut entries = Vec::new();
     for provider in providers.iter().filter(|provider| {
         !provider.hidden
-            && (!provider.key.is_empty() || provider.is_local())
+            && has_provider_credential(provider)
             && (!provider.chat.is_empty()
                 || !provider.responses.is_empty()
                 || !provider.anthropic.is_empty())
@@ -2099,9 +2168,7 @@ fn model_entries(providers: &[Provider]) -> Vec<ModelEntry> {
 }
 
 pub(crate) fn catalog_id_for_usage(provider_id: &str) -> Option<String> {
-    load()
-        .ok()?
-        .providers
+    providers_with_local_accounts(load().ok()?.providers)
         .into_iter()
         .find(|provider| provider.id == provider_id)
         .map(|provider| provider.catalog_id().to_owned())
@@ -2115,7 +2182,7 @@ fn has_ready_member(member: &str, providers: &[Provider]) -> bool {
         && providers.iter().any(|provider| {
             !provider.hidden
                 && (provider.id == provider_ref || provider.name.eq_ignore_ascii_case(provider_ref))
-                && (!provider.key.is_empty() || provider.is_local())
+                && has_provider_credential(provider)
                 && (!provider.chat.is_empty()
                     || !provider.responses.is_empty()
                     || !provider.anthropic.is_empty())
