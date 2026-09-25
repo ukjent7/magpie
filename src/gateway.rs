@@ -2,13 +2,12 @@ use std::{collections::HashSet, env, time::Duration};
 
 use anyhow::{Context, Result, bail};
 use axum::{
-    Router,
+    Json, Router,
     body::{Body, to_bytes},
     extract::{Request, State},
     http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
     routing::{get, post},
-    Json,
 };
 use reqwest::Client;
 use serde_json::{Value, json};
@@ -91,20 +90,24 @@ async fn shutdown_signal() {
     let _ = tokio::signal::ctrl_c().await;
 }
 
-async fn configured_providers() -> std::result::Result<Vec<GatewayProvider>, Response> {
-    tokio::task::spawn_blocking(provider::gateway_providers)
-        .await
-        .map_err(|_| api_error(StatusCode::INTERNAL_SERVER_ERROR, "provider worker stopped"))?
-        .map_err(|error| {
+async fn configured_providers() -> std::result::Result<Vec<GatewayProvider>, ApiError> {
+    match tokio::task::spawn_blocking(provider::gateway_providers).await {
+        Ok(Ok(providers)) => Ok(providers),
+        Ok(Err(error)) => {
             eprintln!("magpie: load provider configuration: {error:#}");
-            api_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "could not read provider configuration",
-            )
-        })
+            Err(ApiError {
+                status: StatusCode::INTERNAL_SERVER_ERROR,
+                message: "could not read provider configuration",
+            })
+        }
+        Err(_) => Err(ApiError {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            message: "provider worker stopped",
+        }),
+    }
 }
 
-async fn info() -> std::result::Result<Json<Value>, Response> {
+async fn info() -> std::result::Result<Json<Value>, ApiError> {
     let providers = configured_providers().await?;
     let count = exposed_models(&providers).count();
     Ok(Json(json!({
@@ -115,7 +118,7 @@ async fn info() -> std::result::Result<Json<Value>, Response> {
     })))
 }
 
-async fn models() -> std::result::Result<Json<Value>, Response> {
+async fn models() -> std::result::Result<Json<Value>, ApiError> {
     let providers = configured_providers().await?;
     let data = exposed_models(&providers)
         .map(|(provider, model)| {
@@ -148,9 +151,7 @@ async fn models() -> std::result::Result<Json<Value>, Response> {
     Ok(Json(result))
 }
 
-fn exposed_models(
-    providers: &[GatewayProvider],
-) -> impl Iterator<Item = (&GatewayProvider, &str)> {
+fn exposed_models(providers: &[GatewayProvider]) -> impl Iterator<Item = (&GatewayProvider, &str)> {
     providers
         .iter()
         .filter(|provider| !provider.hidden && !provider.chat.is_empty())
@@ -162,10 +163,7 @@ fn exposed_models(
         })
 }
 
-async fn chat_completions(
-    State(state): State<GatewayState>,
-    request: Request<Body>,
-) -> Response {
+async fn chat_completions(State(state): State<GatewayState>, request: Request<Body>) -> Response {
     let (parts, body) = request.into_parts();
     let bytes = match to_bytes(body, MAX_REQUEST_BYTES).await {
         Ok(bytes) => bytes,
@@ -189,7 +187,7 @@ async fn chat_completions(
     };
     let providers = match configured_providers().await {
         Ok(providers) => providers,
-        Err(response) => return response,
+        Err(error) => return error.into_response(),
     };
     let (provider, upstream_model) = match resolve_model(&model, &providers) {
         Ok(result) => result,
@@ -207,21 +205,30 @@ async fn chat_completions(
         }
     };
     let Some(object) = body.as_object_mut() else {
-        return api_error(StatusCode::BAD_REQUEST, "request body must be a JSON object");
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "request body must be a JSON object",
+        );
     };
     object.insert("model".to_owned(), json!(upstream_model));
     let body = match serde_json::to_vec(&body) {
         Ok(body) => body,
         Err(error) => {
             eprintln!("magpie: serialize upstream request: {error}");
-            return api_error(StatusCode::INTERNAL_SERVER_ERROR, "could not prepare request");
+            return api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "could not prepare request",
+            );
         }
     };
 
     let upstream_url = match upstream_url(&provider.chat, parts.uri.query()) {
         Ok(url) => url,
         Err(error) => {
-            eprintln!("magpie: invalid URL for provider {}: {error:#}", provider.id);
+            eprintln!(
+                "magpie: invalid URL for provider {}: {error:#}",
+                provider.id
+            );
             return api_error(
                 StatusCode::BAD_GATEWAY,
                 "provider has an invalid chat completion URL",
@@ -243,14 +250,17 @@ async fn chat_completions(
     {
         Ok(response) => response,
         Err(error) => {
-            eprintln!("magpie: upstream request to {} failed: {error}", provider.id);
+            eprintln!(
+                "magpie: upstream request to {} failed: {error}",
+                provider.id
+            );
             return api_error(StatusCode::BAD_GATEWAY, "provider request failed");
         }
     };
     relay(response)
 }
 
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 enum ResolveError {
     Unknown,
     Ambiguous,
@@ -308,7 +318,10 @@ fn upstream_url(base: &str, query: Option<&str>) -> Result<Url> {
 
 fn upstream_headers(provider: &GatewayProvider) -> std::result::Result<HeaderMap, &'static str> {
     let mut headers = HeaderMap::new();
-    headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
     if !provider.key.is_empty() {
         let value = HeaderValue::from_str(&format!("Bearer {}", provider.key))
             .map_err(|_| "provider API key cannot be used as an HTTP header")?;
@@ -375,6 +388,18 @@ fn api_error(status: StatusCode, message: &str) -> Response {
         })),
     )
         .into_response()
+}
+
+#[derive(Clone, Copy)]
+struct ApiError {
+    status: StatusCode,
+    message: &'static str,
+}
+
+impl IntoResponse for ApiError {
+    fn into_response(self) -> Response {
+        api_error(self.status, self.message)
+    }
 }
 
 #[cfg(test)]
