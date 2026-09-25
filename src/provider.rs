@@ -130,6 +130,8 @@ fn add(args: &[String]) -> Result<()> {
             "catalog" => provider.catalog = value.to_owned(),
             "website" => provider.website = value.to_owned(),
             "keysurl" => provider.keys_url = value.to_owned(),
+            "balance" => provider.balance_url = value.to_owned(),
+            "balance.path" => provider.balance_path = value.to_owned(),
             "models" => provider.models = clean_list(value),
             "fallback" => provider.fallback = clean_list(value),
             "routing" if matches!(value, "order" | "rotate" | "usage") => {
@@ -145,6 +147,8 @@ fn add(args: &[String]) -> Result<()> {
             "affinity" | "stays" => bail!("affinity must be auto, session, turn, or off"),
             header if header.starts_with("header.") && header.len() > "header.".len() => {
                 let (_, name) = key.split_once('.').context("invalid header assignment")?;
+                let name = name.trim();
+                ensure!(!name.is_empty(), "header name is empty");
                 provider.headers.insert(name.to_owned(), value.to_owned());
             }
             _ => bail!("unsupported provider field {key:?}"),
@@ -156,7 +160,10 @@ fn add(args: &[String]) -> Result<()> {
         provider.id = slug(&provider.name);
     } else {
         let id = provider.id.trim().to_ascii_lowercase();
-        ensure!(id == slug(&id), "provider id must use lowercase letters, digits, and dashes");
+        ensure!(
+            id == slug(&id),
+            "provider id must use lowercase letters, digits, and dashes"
+        );
         provider.id = id;
     }
     ensure!(!provider.id.is_empty(), "provider id is empty");
@@ -170,7 +177,9 @@ fn add(args: &[String]) -> Result<()> {
     provider.website = normalize_url(&provider.website)?;
     provider.keys_url = normalize_url(&provider.keys_url)?;
     ensure!(
-        !provider.chat.is_empty() || !provider.responses.is_empty() || !provider.anthropic.is_empty(),
+        !provider.chat.is_empty()
+            || !provider.responses.is_empty()
+            || !provider.anthropic.is_empty(),
         "provider needs a url, chat, responses, or anthropic base URL"
     );
     ensure!(
@@ -191,11 +200,9 @@ fn add(args: &[String]) -> Result<()> {
     let base_id = provider.id.clone();
     let base_name = provider.name.clone();
     let mut suffix = 2;
-    while file
-        .providers
-        .iter()
-        .any(|existing| existing.id == provider.id || existing.name.eq_ignore_ascii_case(&provider.name))
-    {
+    while file.providers.iter().any(|existing| {
+        existing.id == provider.id || existing.name.eq_ignore_ascii_case(&provider.name)
+    }) {
         provider.id = format!("{base_id}-{suffix}");
         provider.name = format!("{base_name} {suffix}");
         suffix += 1;
@@ -287,7 +294,9 @@ fn load() -> Result<ProviderFile> {
     let path = settings::providers_path();
     let bytes = match fs::read(&path) {
         Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(ProviderFile::default()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(ProviderFile::default());
+        }
         Err(error) => return Err(error).with_context(|| format!("read {}", path.display())),
     };
     serde_json::from_slice(&bytes).with_context(|| format!("parse {}", path.display()))
@@ -295,7 +304,9 @@ fn load() -> Result<ProviderFile> {
 
 fn store(file: ProviderFile) -> Result<()> {
     let path = settings::providers_path();
-    let parent = path.parent().context("provider path has no parent directory")?;
+    let parent = path
+        .parent()
+        .context("provider path has no parent directory")?;
     fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     let mut bytes = serde_json::to_vec_pretty(&file).context("serialize providers")?;
     bytes.push(b'\n');
@@ -313,7 +324,8 @@ fn normalize_url(value: &str) -> Result<String> {
     } else {
         format!("https://{value}")
     };
-    let mut url = Url::from_str(&value).with_context(|| format!("invalid provider URL {value:?}"))?;
+    let mut url =
+        Url::from_str(&value).with_context(|| format!("invalid provider URL {value:?}"))?;
     ensure!(
         matches!(url.scheme(), "http" | "https") && url.host_str().is_some(),
         "provider URLs must use http:// or https://"
@@ -324,9 +336,14 @@ fn normalize_url(value: &str) -> Result<String> {
 
 fn clean_list(value: &str) -> Vec<String> {
     let mut values = Vec::new();
-    for item in value.split(',').map(str::trim).filter(|item| !item.is_empty()) {
-        if !values.iter().any(|existing| existing == item) {
-            values.push(item.to_owned());
+    for item in value
+        .split(',')
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+    {
+        let item = item.to_owned();
+        if !values.contains(&item) {
+            values.push(item);
         }
     }
     values

@@ -30,18 +30,6 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Resolve latest compatible dependencies
-        run: cargo update
-
-      - name: Upload resolved dependency lockfile
-        if: runner.os == 'Linux'
-        uses: actions/upload-artifact@v7
-        with:
-          name: magpie-cargo-lock
-          path: Cargo.lock
-          if-no-files-found: error
-          retention-days: 1
-
       - name: Check formatting
         run: cargo fmt --all -- --check
 
