@@ -101,6 +101,7 @@ magpie provider key deepseek sk-…       # replace the key
 magpie provider keys deepseek            # list masked keys and their short IDs
 magpie provider keys deepseek add sk-… name=Team protocol=chat
 magpie provider routing deepseek rotate # spread requests over enabled keys
+magpie provider affinity deepseek session # keep each conversation on its last key
 magpie provider rm deepseek
 magpie models                           # the catalog agents see
 magpie claude deepseek/deepseek-chat    # use it
@@ -125,6 +126,13 @@ each hour). A key that fails is held back for a minute, or for its numeric
 `Retry-After` value up to an hour. Once every enabled key for a model has been
 tried, the provider's configured model fallbacks can take over.
 
+Conversation affinity applies to providers as well as groups. Set it with
+`magpie provider affinity <id> auto|session|turn|off` (or `stays=` when adding
+a provider). `auto` keeps tool calls on the same key and keeps later turns
+there when the last reply read at least 1024 cached tokens within the last
+five minutes; `session` keeps the whole conversation on that route, `turn`
+keeps only tool-result requests there, and `off` disables stickiness.
+
 ### Routing groups
 
 A routing group is several models, from one provider or many, that an agent
@@ -146,9 +154,11 @@ magpie claude group/opus-anywhere       # use it
 `routing=` is `smart` (the default: of the subscriptions with quota to
 spare, the one whose allowance renews soonest first), `order` (the first
 model until it can't answer, then the next), `rotate` (each turn to the next
-member) or `usage` (least used first). `stays=` is how long a conversation
-stays with the key or account that answered it: `auto` (the default, while
-the vendor's cache of it is worth keeping), `session`, `turn` or `off`.
+member) or `usage` (least used first). `stays=` controls how long a
+conversation stays with the key or account that answered it: `auto` (the
+default, while a warm vendor cache is worth keeping), `session`, `turn` or
+`off`. Tool-result requests stay on the same route in `auto`, `session` and
+`turn` modes.
 `models=` replaces the whole list, in order; a bare model id works when only
 one provider serves it.
 

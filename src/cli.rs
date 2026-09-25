@@ -252,6 +252,7 @@ fn usage() -> String {
         "  magpie provider key <id> <key>  change its API key",
         "  magpie provider keys <id>       manage its API keys",
         "  magpie provider routing <id> [smart|order|rotate|usage]",
+        "  magpie provider affinity <id> [auto|session|turn|off]",
         "  magpie provider fallback <id> [provider/model… | none]",
         "  magpie provider rm <id>         remove a provider",
         "",

@@ -12,7 +12,7 @@ use url::Url;
 
 use crate::settings;
 
-const USAGE: &str = "usage: magpie presets | magpie providers | magpie models | magpie provider <id> | magpie provider add <preset> [key] | magpie provider add <name> id=<id> url=<url> key=<key> | magpie provider models <id> [ids…] | magpie provider key <id> <key> | magpie provider keys <id> [add <key> [name=<name>] [protocol=<protocol>] | use|on|off|rm <key-id> | rename <key-id> <name> | protocol <key-id> <protocol|any>] | magpie provider routing <id> [smart|order|rotate|usage] | magpie provider fallback <id> [provider/model… | none] | magpie provider rm <id>";
+const USAGE: &str = "usage: magpie presets | magpie providers | magpie models | magpie provider <id> | magpie provider add <preset> [key] | magpie provider add <name> id=<id> url=<url> key=<key> | magpie provider models <id> [ids…] | magpie provider key <id> <key> | magpie provider keys <id> [add <key> [name=<name>] [protocol=<protocol>] | use|on|off|rm <key-id> | rename <key-id> <name> | protocol <key-id> <protocol|any>] | magpie provider routing <id> [smart|order|rotate|usage] | magpie provider affinity <id> [auto|session|turn|off] | magpie provider fallback <id> [provider/model… | none] | magpie provider rm <id>";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum PresetKind {
@@ -471,6 +471,7 @@ pub(crate) struct GatewayProvider {
     pub(crate) anthropic: String,
     pub(crate) fallback: Vec<String>,
     pub(crate) routing: String,
+    pub(crate) affinity: String,
     pub(crate) keys: Vec<GatewayKey>,
     pub(crate) has_configured_keys: bool,
     pub(crate) headers: BTreeMap<String, String>,
@@ -500,6 +501,7 @@ pub(crate) struct GatewayGroup {
     pub(crate) name: String,
     pub(crate) members: Vec<String>,
     pub(crate) routing: String,
+    pub(crate) affinity: String,
 }
 
 pub(crate) struct GatewayCatalog {
@@ -524,6 +526,7 @@ pub(crate) fn gateway_catalog() -> Result<GatewayCatalog> {
             name: group.name,
             members: group.members,
             routing: group.routing,
+            affinity: group.affinity,
         })
         .collect();
     let providers = file
@@ -571,6 +574,7 @@ pub(crate) fn gateway_catalog() -> Result<GatewayCatalog> {
                 anthropic: provider.anthropic,
                 fallback: provider.fallback,
                 routing: provider.routing,
+                affinity: provider.affinity,
                 keys,
                 has_configured_keys,
                 headers: provider.headers,
@@ -774,6 +778,9 @@ pub async fn command(args: &[String]) -> Result<()> {
         [verb, id, key] if verb == "key" => change_key(id, key),
         [verb, rest @ ..] if verb == "keys" => keys_command(rest),
         [verb, id, selected @ ..] if verb == "routing" => set_routing(id, selected),
+        [verb, id, selected @ ..] if verb == "affinity" || verb == "stays" => {
+            set_affinity(id, selected)
+        }
         [verb, id, fallback @ ..] if verb == "fallback" => set_fallback(id, fallback),
         [verb, id, rest @ ..] if verb == "models" => models_command(id, rest).await,
         [verb, id] if verb == "rm" => remove(id),
@@ -950,13 +957,7 @@ fn add(args: &[String]) -> Result<()> {
             "models" => provider.models = clean_list(value),
             "fallback" => provider.fallback = clean_list(value),
             "routing" => provider.routing = normalize_routing(value)?,
-            "affinity" | "stays" if matches!(value, "session" | "turn" | "off") => {
-                provider.affinity = value.to_owned();
-            }
-            "affinity" | "stays" if value.is_empty() || value == "auto" => {
-                provider.affinity.clear();
-            }
-            "affinity" | "stays" => bail!("affinity must be auto, session, turn, or off"),
+            "affinity" | "stays" => provider.affinity = normalize_affinity(value)?,
             header if header.starts_with("header.") && header.len() > "header.".len() => {
                 let (_, name) = key.split_once('.').context("invalid header assignment")?;
                 let name = name.trim();
@@ -1069,6 +1070,7 @@ fn show(id: &str) -> Result<()> {
     if !provider.routing.is_empty() {
         println!("  key routing: {}", provider.routing);
     }
+    println!("  stays: {}", affinity_name(&provider.affinity));
     if !provider.models.is_empty() {
         println!("  models: {}", provider.models.join(", "));
     } else {
@@ -1462,6 +1464,28 @@ fn set_routing(id: &str, selected: &[String]) -> Result<()> {
     Ok(())
 }
 
+fn set_affinity(id: &str, selected: &[String]) -> Result<()> {
+    let mut file = load()?;
+    let provider = find_provider_mut(&mut file, id)?;
+    if selected.is_empty() {
+        println!(
+            "{} stays {} · magpie provider affinity {} <auto|session|turn|off>",
+            provider.name,
+            affinity_name(&provider.affinity),
+            provider.id
+        );
+        return Ok(());
+    }
+    ensure!(selected.len() == 1, "choose one conversation affinity mode");
+    provider.affinity = normalize_affinity(&selected[0])?;
+    let provider_name = provider.name.clone();
+    let provider_id = provider.id.clone();
+    let mode = affinity_name(&provider.affinity).to_owned();
+    store(file)?;
+    println!("✓ {provider_name} stays {mode} · magpie provider affinity {provider_id}");
+    Ok(())
+}
+
 fn normalize_routing(value: &str) -> Result<String> {
     match value.trim().to_ascii_lowercase().as_str() {
         "" | "smart" | "default" => Ok(String::new()),
@@ -1470,6 +1494,20 @@ fn normalize_routing(value: &str) -> Result<String> {
         "usage" | "least-used" => Ok("usage".to_owned()),
         value => bail!("unknown key routing {value:?}; use smart, order, rotate or usage"),
     }
+}
+
+fn normalize_affinity(value: &str) -> Result<String> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "" | "auto" | "automatic" => Ok(String::new()),
+        "session" | "always" => Ok("session".to_owned()),
+        "turn" | "within-a-turn" => Ok("turn".to_owned()),
+        "off" | "never" => Ok("off".to_owned()),
+        value => bail!("unknown conversation affinity {value:?}; use auto, session, turn or off"),
+    }
+}
+
+fn affinity_name(value: &str) -> &str {
+    if value.is_empty() { "auto" } else { value }
 }
 
 fn remove(id: &str) -> Result<()> {
@@ -1970,5 +2008,14 @@ mod tests {
         assert_eq!(normalize_routing("round-robin").unwrap(), "rotate");
         assert_eq!(normalize_routing("least-used").unwrap(), "usage");
         assert!(normalize_routing("random").is_err());
+    }
+
+    #[test]
+    fn provider_affinity_accepts_documented_modes_and_aliases() {
+        assert_eq!(normalize_affinity("auto").unwrap(), "");
+        assert_eq!(normalize_affinity("ALWAYS").unwrap(), "session");
+        assert_eq!(normalize_affinity("within-a-turn").unwrap(), "turn");
+        assert_eq!(normalize_affinity("never").unwrap(), "off");
+        assert!(normalize_affinity("sticky").is_err());
     }
 }

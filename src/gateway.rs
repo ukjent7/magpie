@@ -19,7 +19,10 @@ use reqwest::Client;
 use serde_json::{Value, json};
 use url::Url;
 
-use crate::provider::{self, GatewayCatalog, GatewayProvider};
+use crate::{
+    affinity::{self, Context as AffinityContext, UsageScanner},
+    provider::{self, GatewayCatalog, GatewayProvider},
+};
 
 const DEFAULT_ADDR: &str = "127.0.0.1:3425";
 const MAX_REQUEST_BYTES: usize = 64 * 1024 * 1024;
@@ -290,6 +293,27 @@ async fn forward(
             &format!("unknown or unavailable model {model:?}; list available models"),
         );
     }
+    let (affinity_scope, affinity_mode, rotate_affinity) = if let Some(group) = group {
+        (
+            format!("group/{}", group.id),
+            group.affinity.clone(),
+            group.routing == "rotate",
+        )
+    } else {
+        let (provider, resolved_model, _) = candidates[0];
+        (
+            format!("{}/{}", provider.id, resolved_model),
+            provider.affinity.clone(),
+            provider.routing == "rotate",
+        )
+    };
+    let affinity_context = affinity::context(
+        &affinity_scope,
+        &affinity_mode,
+        &parts.headers,
+        protocol,
+        &body,
+    );
     let streaming = body.get("stream").and_then(Value::as_bool).unwrap_or(false);
     if path_override.is_none() {
         let mut seen = HashSet::new();
@@ -336,6 +360,7 @@ async fn forward(
             .sort_by_key(|candidate| (!candidate.model_listed, key_fit(*candidate, protocol)));
     }
     move_resting_routes_last(&mut candidates);
+    apply_affinity(&mut candidates, &affinity_context, rotate_affinity);
 
     let mut selected = None;
     for (index, candidate) in candidates.iter().enumerate() {
@@ -420,6 +445,10 @@ async fn forward(
     let Some((response, candidate)) = selected else {
         return api_error_for(protocol, StatusCode::BAD_GATEWAY, "provider request failed");
     };
+    let affinity_record = response
+        .status()
+        .is_success()
+        .then(|| (affinity_context, candidate.id()));
     if response.status().is_success() {
         mark_route_used(candidate);
     }
@@ -427,7 +456,7 @@ async fn forward(
     let upstream_protocol = candidate.upstream;
     let translated = upstream_protocol != protocol;
     if !translated || !response.status().is_success() {
-        return relay(response);
+        return relay(response, upstream_protocol, affinity_record);
     }
     let upstream_sse = response
         .headers()
@@ -440,7 +469,13 @@ async fn forward(
                 .is_some_and(|media_type| media_type.trim() == "text/event-stream")
         });
     if streaming && upstream_sse {
-        return translated_stream_response(response, upstream_protocol, protocol, &model);
+        return translated_stream_response(
+            response,
+            upstream_protocol,
+            protocol,
+            &model,
+            affinity_record,
+        );
     }
 
     let status = response.status();
@@ -486,6 +521,13 @@ async fn forward(
             );
         }
     };
+    if let Some((context, route)) = affinity_record {
+        affinity::record(
+            &context,
+            route,
+            affinity::cache_read_from_value(upstream_protocol, &upstream_body),
+        );
+    }
     let translated_body = match crate::translation::response(
         &upstream_body,
         upstream_protocol,
@@ -830,6 +872,53 @@ fn move_resting_routes_last(candidates: &mut [RouteCandidate<'_>]) {
     }
 }
 
+fn apply_affinity(
+    candidates: &mut [RouteCandidate<'_>],
+    context: &AffinityContext,
+    rotate: bool,
+) {
+    let Some(previous) = affinity::previous(context) else {
+        return;
+    };
+    let Some(last) = candidates
+        .iter()
+        .position(|candidate| candidate.id() == previous.route)
+    else {
+        return;
+    };
+    let last_is_resting = ROUTING_STATE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .resting
+        .get(&previous.route)
+        .is_some_and(|until| *until > Instant::now());
+    if last_is_resting {
+        return;
+    }
+
+    if affinity::should_keep(context, &previous, rotate) {
+        candidates.rotate_left(last);
+    } else if affinity::should_advance(context, rotate) {
+        for distance in 1..candidates.len() {
+            let next = (last + distance) % candidates.len();
+            if !candidates[next].model_listed || route_is_resting(candidates[next]) {
+                continue;
+            }
+            candidates.rotate_left(next);
+            break;
+        }
+    }
+}
+
+fn route_is_resting(candidate: RouteCandidate<'_>) -> bool {
+    ROUTING_STATE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .resting
+        .get(&candidate.id())
+        .is_some_and(|until| *until > Instant::now())
+}
+
 fn rest_route(candidate: RouteCandidate<'_>, duration: Duration) {
     let until = Instant::now() + duration.min(MAX_ROUTE_COOLDOWN);
     ROUTING_STATE
@@ -1037,10 +1126,41 @@ fn upstream_headers(
     Ok(headers)
 }
 
-fn relay(upstream: reqwest::Response) -> Response {
+fn relay(
+    upstream: reqwest::Response,
+    protocol: ApiProtocol,
+    affinity_record: Option<(AffinityContext, String)>,
+) -> Response {
     let status = upstream.status();
     let headers = upstream.headers().clone();
-    let mut response = Response::new(Body::from_stream(upstream.bytes_stream()));
+    let content_type = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok());
+    let scanner = affinity_record
+        .as_ref()
+        .map(|_| UsageScanner::new(protocol, content_type));
+    let body_stream = stream::unfold(
+        (upstream.bytes_stream(), scanner, affinity_record),
+        |(mut input, mut scanner, mut affinity_record)| async move {
+            match input.next().await {
+                Some(Ok(chunk)) => {
+                    if let Some(scanner) = scanner.as_mut() {
+                        scanner.push(&chunk);
+                    }
+                    Some((Ok::<_, reqwest::Error>(chunk), (input, scanner, affinity_record)))
+                }
+                Some(Err(error)) => Some((Err(error), (input, None, None))),
+                None => {
+                    if let Some((context, route)) = affinity_record.take() {
+                        let cache_read = scanner.as_mut().map_or(0, UsageScanner::finish);
+                        affinity::record(&context, route, cache_read);
+                    }
+                    None
+                }
+            }
+        },
+    );
+    let mut response = Response::new(Body::from_stream(body_stream));
     *response.status_mut() = status;
 
     let connection_tokens = headers
@@ -1077,6 +1197,7 @@ fn translated_stream_response(
     from: ApiProtocol,
     to: ApiProtocol,
     model: &str,
+    affinity_record: Option<(AffinityContext, String)>,
 ) -> Response {
     let status = upstream.status();
     let upstream_headers = upstream.headers().clone();
@@ -1087,27 +1208,49 @@ fn translated_stream_response(
             "streaming translation is not supported for this protocol pair",
         );
     };
+    let scanner = affinity_record.as_ref().map(|_| {
+        UsageScanner::new(
+            from,
+            upstream_headers
+                .get(header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok()),
+        )
+    });
     let body_stream = stream::unfold(
-        (upstream.bytes_stream(), translator, VecDeque::new(), false),
-        |(mut input, mut translator, mut pending, mut ended)| async move {
+        (
+            upstream.bytes_stream(),
+            translator,
+            VecDeque::new(),
+            false,
+            scanner,
+            affinity_record,
+        ),
+        |(mut input, mut translator, mut pending, mut ended, mut scanner, mut affinity_record)| async move {
             loop {
                 if let Some(frame) = pending.pop_front() {
                     return Some((
                         Ok::<_, reqwest::Error>(frame),
-                        (input, translator, pending, ended),
+                        (input, translator, pending, ended, scanner, affinity_record),
                     ));
                 }
                 if ended {
+                    if let Some((context, route)) = affinity_record.take() {
+                        let cache_read = scanner.as_mut().map_or(0, UsageScanner::finish);
+                        affinity::record(&context, route, cache_read);
+                    }
                     return None;
                 }
                 match input.next().await {
                     Some(Ok(chunk)) => {
+                        if let Some(scanner) = scanner.as_mut() {
+                            scanner.push(&chunk);
+                        }
                         pending.extend(translator.push(&chunk));
                         ended = translator.is_ended();
                     }
                     Some(Err(error)) => {
                         ended = true;
-                        return Some((Err(error), (input, translator, pending, ended)));
+                        return Some((Err(error), (input, translator, pending, ended, scanner, None)));
                     }
                     None => {
                         pending.extend(translator.finish());
@@ -1261,6 +1404,7 @@ mod tests {
             anthropic: String::new(),
             fallback: Vec::new(),
             routing: String::new(),
+            affinity: String::new(),
             keys: Vec::new(),
             has_configured_keys: false,
             headers: BTreeMap::new(),
@@ -1354,6 +1498,7 @@ mod tests {
                 "second/model".to_owned(),
             ],
             routing: "order".to_owned(),
+            affinity: String::new(),
         };
 
         let candidates = group_candidates(&group, &providers, ApiProtocol::Chat, true);
@@ -1564,5 +1709,83 @@ mod tests {
         move_resting_routes_last(&mut candidates);
         assert_eq!(candidates[0].key, Some("available"));
         assert_eq!(candidates[1].key, Some("limited"));
+    }
+
+    #[test]
+    fn session_affinity_restores_the_key_that_answered_the_previous_request() {
+        let providers = [
+            provider("affinity-session-first", "First", &["model"]),
+            provider("affinity-session-second", "Second", &["model"]),
+        ];
+        let mut candidates = providers
+            .iter()
+            .flat_map(|provider| {
+                key_candidates(provider, "model", ApiProtocol::Chat, ApiProtocol::Chat, true)
+            })
+            .collect::<Vec<_>>();
+        let mut headers = HeaderMap::new();
+        headers.insert("x-session-id", HeaderValue::from_static("session-test"));
+        let body = json!({"messages":[{"role":"user","content":"hello"}]});
+        let previous = affinity::context(
+            "affinity-session-route-test",
+            "session",
+            &headers,
+            ApiProtocol::Chat,
+            &body,
+        );
+        let last_route = candidates[1].id();
+        affinity::record(&previous, last_route.clone(), 0);
+
+        let next = affinity::context(
+            "affinity-session-route-test",
+            "session",
+            &headers,
+            ApiProtocol::Chat,
+            &body,
+        );
+        apply_affinity(&mut candidates, &next, false);
+        assert_eq!(candidates[0].id(), last_route);
+    }
+
+    #[test]
+    fn rotating_affinity_advances_after_the_last_route_on_a_new_turn() {
+        let providers = [
+            provider("affinity-rotate-first", "First", &["model"]),
+            provider("affinity-rotate-second", "Second", &["model"]),
+            provider("affinity-rotate-third", "Third", &["model"]),
+        ];
+        let mut candidates = providers
+            .iter()
+            .flat_map(|provider| {
+                key_candidates(provider, "model", ApiProtocol::Chat, ApiProtocol::Chat, true)
+            })
+            .collect::<Vec<_>>();
+        let mut headers = HeaderMap::new();
+        headers.insert("x-session-id", HeaderValue::from_static("session-test"));
+        let previous_body = json!({"messages":[{"role":"user","content":"first"}]});
+        let previous = affinity::context(
+            "affinity-rotate-route-test",
+            "auto",
+            &headers,
+            ApiProtocol::Chat,
+            &previous_body,
+        );
+        let last_route = candidates[1].id();
+        affinity::record(&previous, last_route, 2048);
+
+        let next_body = json!({"messages":[
+            {"role":"user","content":"first"},
+            {"role":"assistant","content":"answer"},
+            {"role":"user","content":"second"}
+        ]});
+        let next = affinity::context(
+            "affinity-rotate-route-test",
+            "auto",
+            &headers,
+            ApiProtocol::Chat,
+            &next_body,
+        );
+        apply_affinity(&mut candidates, &next, true);
+        assert_eq!(candidates[0].provider.id, "affinity-rotate-third");
     }
 }
