@@ -58,6 +58,13 @@ async fn run(cli: Cli) -> Result<()> {
         .map(|arg| arg.to_string_lossy().into_owned())
         .collect::<Vec<_>>();
 
+    if args
+        .first()
+        .is_some_and(|argument| argument.to_ascii_lowercase().starts_with("magpie:"))
+    {
+        return crate::provider::import_command(&args).await;
+    }
+
     match args.as_slice() {
         [] => {
             println!("{}", usage());
@@ -85,6 +92,7 @@ async fn run(cli: Cli) -> Result<()> {
         [command, rest @ ..] if command == "serve" => crate::gateway::command(rest).await,
         [command, rest @ ..] if command == "backup" => crate::backup::backup_command(rest),
         [command, rest @ ..] if command == "restore" => crate::backup::restore_command(rest),
+        [command, rest @ ..] if command == "import" => crate::provider::import_command(rest).await,
         [command] if command == "ls" || command == "list" => list_agents(true),
         [command] if command == "providers" => crate::provider::list(),
         [command] if command == "models" => crate::provider::models().await,
@@ -241,6 +249,7 @@ fn usage() -> String {
         "  magpie rm <name>                delete a profile",
         "  magpie backup [--no-keys] [file] encrypt settings into a backup",
         "  magpie restore [--no-agents] <file> restore an encrypted backup",
+        "  magpie import [-y] <link>       add a provider from a magpie:// link",
         "",
         "  magpie providers                list API providers",
         "  magpie models                   list exposed provider models",

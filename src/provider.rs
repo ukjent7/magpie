@@ -13,6 +13,9 @@ use url::Url;
 
 use crate::settings;
 
+mod import;
+pub(crate) use import::command as import_command;
+
 const USAGE: &str = "usage: magpie presets | magpie providers | magpie models | magpie provider <id> | magpie provider add <preset> [key] | magpie provider add <name> id=<id> url=<url> key=<key> | magpie provider models <id> [ids…] | magpie provider key <id> <key> | magpie provider keys <id> [add <key> [name=<name>] [protocol=<protocol>] | use|on|off|rm <key-id> | rename <key-id> <name> | protocol <key-id> <protocol|any>] | magpie provider routing <id> [smart|order|rotate|usage] | magpie provider affinity <id> [auto|session|turn|off] | magpie provider fallback <id> [provider/model… | none] | magpie provider rm <id>";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -20,6 +23,13 @@ enum PresetKind {
     Vendor,
     Relay,
     Local,
+}
+
+struct PresetRegion {
+    id: &'static str,
+    chat: &'static str,
+    responses: &'static str,
+    anthropic: &'static str,
 }
 
 struct Preset {
@@ -33,6 +43,7 @@ struct Preset {
     catalog: &'static str,
     website: &'static str,
     keys_url: &'static str,
+    regions: &'static [PresetRegion],
 }
 
 impl Preset {
@@ -47,6 +58,7 @@ impl Preset {
         catalog: "",
         website: "",
         keys_url: "",
+        regions: &[],
     };
 
     fn provider(&self) -> Provider {
@@ -65,6 +77,27 @@ impl Preset {
         }
     }
 }
+
+const YYLX_REGIONS: &[PresetRegion] = &[
+    PresetRegion {
+        id: "auto",
+        chat: "https://app.yylx.io/v1",
+        responses: "",
+        anthropic: "https://app.yylx.io",
+    },
+    PresetRegion {
+        id: "global",
+        chat: "https://global.yylx.io/v1",
+        responses: "",
+        anthropic: "https://global.yylx.io",
+    },
+    PresetRegion {
+        id: "cn",
+        chat: "https://cn.yylx.io/v1",
+        responses: "",
+        anthropic: "https://cn.yylx.io",
+    },
+];
 
 const PRESETS: &[Preset] = &[
     Preset {
@@ -265,6 +298,7 @@ const PRESETS: &[Preset] = &[
         catalog: "opencode-go",
         website: "https://opencode.ai/docs/go",
         keys_url: "https://opencode.ai/auth",
+        regions: &[],
     },
     Preset {
         id: "opencode-zen",
@@ -277,6 +311,7 @@ const PRESETS: &[Preset] = &[
         catalog: "opencode",
         website: "https://opencode.ai/docs/zen",
         keys_url: "https://opencode.ai/auth",
+        regions: &[],
     },
     Preset {
         id: "together",
@@ -342,6 +377,7 @@ const PRESETS: &[Preset] = &[
         anthropic: "https://app.yylx.io",
         website: "https://yylx.io",
         keys_url: "https://app.yylx.io/keys",
+        regions: YYLX_REGIONS,
         ..Preset::EMPTY
     },
     Preset {
@@ -423,6 +459,8 @@ pub(crate) struct Provider {
     name: String,
     #[serde(skip_serializing_if = "String::is_empty")]
     icon: String,
+    #[serde(skip)]
+    icon_url: String,
     #[serde(skip_serializing_if = "String::is_empty")]
     preset: String,
     key: String,
@@ -916,6 +954,42 @@ fn model_endpoints<'a>(provider: &'a Provider, protocol: &str) -> Result<Vec<(&'
     Ok(endpoints)
 }
 
+fn prepare_provider(mut provider: Provider) -> Result<Provider> {
+    provider.name = provider.name.trim().to_owned();
+    ensure!(!provider.name.is_empty(), "provider name is empty");
+    if provider.id.trim().is_empty() {
+        provider.id = slug(&provider.name);
+    } else {
+        let id = provider.id.trim().to_ascii_lowercase();
+        ensure!(
+            id == slug(&id),
+            "provider id must use lowercase letters, digits, and dashes"
+        );
+        provider.id = id;
+    }
+    ensure!(!provider.id.is_empty(), "provider id is empty");
+    ensure!(
+        provider.id != "magpie" && provider.id != "group",
+        "provider id is reserved"
+    );
+    provider.chat = normalize_url(&provider.chat)?;
+    provider.responses = normalize_url(&provider.responses)?;
+    provider.anthropic = normalize_url(&provider.anthropic)?;
+    provider.website = normalize_url(&provider.website)?;
+    provider.keys_url = normalize_url(&provider.keys_url)?;
+    ensure!(
+        !provider.chat.is_empty()
+            || !provider.responses.is_empty()
+            || !provider.anthropic.is_empty(),
+        "provider needs a url, chat, responses, or anthropic base URL"
+    );
+    ensure!(
+        !provider.key.is_empty() || provider.is_local(),
+        "provider needs an API key unless it runs locally"
+    );
+    Ok(provider)
+}
+
 fn add(args: &[String]) -> Result<()> {
     let [name, assignments @ ..] = args else {
         bail!("{USAGE}");
@@ -969,37 +1043,7 @@ fn add(args: &[String]) -> Result<()> {
         }
     }
 
-    ensure!(!provider.name.is_empty(), "provider name is empty");
-    if provider.id.trim().is_empty() {
-        provider.id = slug(&provider.name);
-    } else {
-        let id = provider.id.trim().to_ascii_lowercase();
-        ensure!(
-            id == slug(&id),
-            "provider id must use lowercase letters, digits, and dashes"
-        );
-        provider.id = id;
-    }
-    ensure!(!provider.id.is_empty(), "provider id is empty");
-    ensure!(
-        provider.id != "magpie" && provider.id != "group",
-        "provider id is reserved"
-    );
-    provider.chat = normalize_url(&provider.chat)?;
-    provider.responses = normalize_url(&provider.responses)?;
-    provider.anthropic = normalize_url(&provider.anthropic)?;
-    provider.website = normalize_url(&provider.website)?;
-    provider.keys_url = normalize_url(&provider.keys_url)?;
-    ensure!(
-        !provider.chat.is_empty()
-            || !provider.responses.is_empty()
-            || !provider.anthropic.is_empty(),
-        "provider needs a url, chat, responses, or anthropic base URL"
-    );
-    ensure!(
-        !provider.key.is_empty() || provider.is_local(),
-        "provider needs an API key unless it runs locally"
-    );
+    provider = prepare_provider(provider)?;
 
     let mut file = load()?;
     if let Some(existing) = file.providers.iter().find(|existing| {
