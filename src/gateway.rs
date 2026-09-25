@@ -349,7 +349,12 @@ async fn forward(
         .headers()
         .get(header::CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| value.split(';').next().is_some_and(|media_type| media_type.trim() == "text/event-stream"));
+        .is_some_and(|value| {
+            value
+                .split(';')
+                .next()
+                .is_some_and(|media_type| media_type.trim() == "text/event-stream")
+        });
     if streaming && upstream_sse {
         return translated_stream_response(response, upstream_protocol, protocol, &model);
     }
@@ -644,12 +649,7 @@ fn translated_stream_response(
         );
     };
     let body_stream = stream::unfold(
-        (
-            upstream.bytes_stream(),
-            translator,
-            VecDeque::new(),
-            false,
-        ),
+        (upstream.bytes_stream(), translator, VecDeque::new(), false),
         |(mut input, mut translator, mut pending, mut ended)| async move {
             loop {
                 if let Some(frame) = pending.pop_front() {

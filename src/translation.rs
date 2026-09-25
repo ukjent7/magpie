@@ -115,9 +115,7 @@ impl SseTranslator {
         }
         output.extend(match &mut self.direction {
             StreamDirection::AnthropicToChat(state) => finish_chat_stream(state, &self.model),
-            StreamDirection::ChatToAnthropic(state) => {
-                finish_anthropic_stream(state, &self.model)
-            }
+            StreamDirection::ChatToAnthropic(state) => finish_anthropic_stream(state, &self.model),
         });
         output
     }
@@ -184,10 +182,7 @@ impl SseTranslator {
                     "error",
                     &json!({"type":"error","error":{"type":"api_error","message":message}}),
                 ));
-                output.push(event_frame(
-                    "message_stop",
-                    &json!({"type":"message_stop"}),
-                ));
+                output.push(event_frame("message_stop", &json!({"type":"message_stop"})));
             }
         }
         output
@@ -417,7 +412,10 @@ fn chat_event_to_anthropic(
                 ));
             }
         }
-        if let Some(calls) = choice.pointer("/delta/tool_calls").and_then(Value::as_array) {
+        if let Some(calls) = choice
+            .pointer("/delta/tool_calls")
+            .and_then(Value::as_array)
+        {
             for (ordinal, call) in calls.iter().enumerate() {
                 let index = call
                     .get("index")
@@ -450,11 +448,7 @@ fn chat_event_to_anthropic(
     output
 }
 
-fn emit_anthropic_start(
-    state: &mut AnthropicStream,
-    model: &str,
-    output: &mut Vec<Vec<u8>>,
-) {
+fn emit_anthropic_start(state: &mut AnthropicStream, model: &str, output: &mut Vec<Vec<u8>>) {
     if state.started {
         return;
     }
@@ -474,11 +468,7 @@ fn emit_anthropic_start(
     state.started = true;
 }
 
-fn ensure_text_block(
-    state: &mut AnthropicStream,
-    model: &str,
-    output: &mut Vec<Vec<u8>>,
-) -> usize {
+fn ensure_text_block(state: &mut AnthropicStream, model: &str, output: &mut Vec<Vec<u8>>) -> usize {
     emit_anthropic_start(state, model, output);
     if let Some(index) = state.text_block {
         return index;
@@ -553,10 +543,7 @@ fn finish_anthropic_stream(state: &mut AnthropicStream, model: &str) -> Vec<Vec<
         "message_delta",
         &json!({"type":"message_delta","delta":{"stop_reason":state.stop_reason.as_deref().unwrap_or("end_turn"),"stop_sequence":null},"usage":{"output_tokens":output_tokens}}),
     ));
-    output.push(event_frame(
-        "message_stop",
-        &json!({"type":"message_stop"}),
-    ));
+    output.push(event_frame("message_stop", &json!({"type":"message_stop"})));
     state.ended = true;
     output
 }
@@ -569,7 +556,11 @@ fn chat_stop_reason(reason: &str) -> &'static str {
     }
 }
 
-pub(crate) fn completed_stream(body: &Value, protocol: ApiProtocol, model: &str) -> Result<Vec<u8>> {
+pub(crate) fn completed_stream(
+    body: &Value,
+    protocol: ApiProtocol,
+    model: &str,
+) -> Result<Vec<u8>> {
     let mut output = Vec::new();
     match protocol {
         ApiProtocol::Chat => {
@@ -659,17 +650,28 @@ pub(crate) fn completed_stream(body: &Value, protocol: ApiProtocol, model: &str)
                 .flatten()
                 .enumerate()
             {
-                let block_type = block.get("type").and_then(Value::as_str).unwrap_or_default();
+                let block_type = block
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
                 let start = match block_type {
-                    "text" => Some(json!({"type":"content_block_start","index":index,"content_block":{"type":"text","text":""}})),
-                    "tool_use" => Some(json!({"type":"content_block_start","index":index,"content_block":{"type":"tool_use","id":block.get("id").cloned().unwrap_or(Value::Null),"name":block.get("name").cloned().unwrap_or(Value::Null),"input":{}}})),
+                    "text" => Some(
+                        json!({"type":"content_block_start","index":index,"content_block":{"type":"text","text":""}}),
+                    ),
+                    "tool_use" => Some(
+                        json!({"type":"content_block_start","index":index,"content_block":{"type":"tool_use","id":block.get("id").cloned().unwrap_or(Value::Null),"name":block.get("name").cloned().unwrap_or(Value::Null),"input":{}}}),
+                    ),
                     _ => None,
                 };
                 let Some(start) = start else { continue };
                 output.push(event_frame("content_block_start", &start));
                 let delta = match block_type {
-                    "text" => Some(json!({"type":"content_block_delta","index":index,"delta":{"type":"text_delta","text":block.get("text").cloned().unwrap_or_else(|| json!(""))}})),
-                    "tool_use" => Some(json!({"type":"content_block_delta","index":index,"delta":{"type":"input_json_delta","partial_json":serde_json::to_string(block.get("input").unwrap_or(&Value::Null))?}})),
+                    "text" => Some(
+                        json!({"type":"content_block_delta","index":index,"delta":{"type":"text_delta","text":block.get("text").cloned().unwrap_or_else(|| json!(""))}}),
+                    ),
+                    "tool_use" => Some(
+                        json!({"type":"content_block_delta","index":index,"delta":{"type":"input_json_delta","partial_json":serde_json::to_string(block.get("input").unwrap_or(&Value::Null))?}}),
+                    ),
                     _ => None,
                 };
                 if let Some(delta) = delta {
@@ -684,10 +686,7 @@ pub(crate) fn completed_stream(body: &Value, protocol: ApiProtocol, model: &str)
                 "message_delta",
                 &json!({"type":"message_delta","delta":{"stop_reason":body.get("stop_reason").cloned().unwrap_or_else(|| json!("end_turn")),"stop_sequence":null},"usage":{"output_tokens":usage.get("output_tokens").cloned().unwrap_or_else(|| json!(0))}}),
             ));
-            output.push(event_frame(
-                "message_stop",
-                &json!({"type":"message_stop"}),
-            ));
+            output.push(event_frame("message_stop", &json!({"type":"message_stop"})));
         }
         ApiProtocol::Responses => bail!("Responses streaming is not supported by this translation"),
     }
@@ -1192,12 +1191,9 @@ mod tests {
             "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":1}}\n\n",
             "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
         );
-        let mut translator = SseTranslator::new(
-            ApiProtocol::Anthropic,
-            ApiProtocol::Chat,
-            "provider/model",
-        )
-        .expect("supported protocol pair");
+        let mut translator =
+            SseTranslator::new(ApiProtocol::Anthropic, ApiProtocol::Chat, "provider/model")
+                .expect("supported protocol pair");
         let mut output = Vec::new();
         for chunk in source.as_bytes().chunks(11) {
             output.extend(translator.push(chunk));
@@ -1224,9 +1220,8 @@ mod tests {
             .map(|event| format!("data: {event}\n\n"))
             .collect::<String>()
             + "data: [DONE]\n\n";
-        let mut translator =
-            SseTranslator::new(ApiProtocol::Chat, ApiProtocol::Anthropic, "model")
-                .expect("supported protocol pair");
+        let mut translator = SseTranslator::new(ApiProtocol::Chat, ApiProtocol::Anthropic, "model")
+            .expect("supported protocol pair");
         let mut output = Vec::new();
         for chunk in source.as_bytes().chunks(13) {
             output.extend(translator.push(chunk));
