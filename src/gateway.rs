@@ -284,15 +284,17 @@ async fn forward(
         let is_last = index + 1 == candidates.len();
         let response = match send_upstream(
             state,
-            provider,
-            upstream_model,
-            *upstream_protocol,
-            protocol,
-            &body,
-            streaming,
-            path_override,
-            parts.uri.query(),
-            &parts.headers,
+            UpstreamRequest {
+                provider,
+                model: upstream_model,
+                upstream_protocol: *upstream_protocol,
+                client_protocol: protocol,
+                body: &body,
+                streaming,
+                path_override,
+                query: parts.uri.query(),
+                incoming_headers: &parts.headers,
+            },
         )
         .await
         {
@@ -330,10 +332,10 @@ async fn forward(
             );
             continue;
         }
-        selected = Some((response, *provider, *upstream_model, *upstream_protocol));
+        selected = Some((response, *provider, *upstream_protocol));
         break;
     }
-    let Some((response, provider, upstream_model, upstream_protocol)) = selected else {
+    let Some((response, provider, upstream_protocol)) = selected else {
         return api_error_for(protocol, StatusCode::BAD_GATEWAY, "provider request failed");
     };
     let translated = upstream_protocol != protocol;
@@ -443,24 +445,39 @@ async fn forward(
     translated_response(status, &upstream_headers, bytes, streaming)
 }
 
-async fn send_upstream(
-    state: &GatewayState,
-    provider: &GatewayProvider,
-    model: &str,
+struct UpstreamRequest<'a> {
+    provider: &'a GatewayProvider,
+    model: &'a str,
     upstream_protocol: ApiProtocol,
     client_protocol: ApiProtocol,
-    request: &Value,
+    body: &'a Value,
     streaming: bool,
-    path_override: Option<&str>,
-    query: Option<&str>,
-    incoming_headers: &HeaderMap,
+    path_override: Option<&'a str>,
+    query: Option<&'a str>,
+    incoming_headers: &'a HeaderMap,
+}
+
+async fn send_upstream(
+    state: &GatewayState,
+    request: UpstreamRequest<'_>,
 ) -> Result<reqwest::Response> {
+    let UpstreamRequest {
+        provider,
+        model,
+        upstream_protocol,
+        client_protocol,
+        body: request_body,
+        streaming,
+        path_override,
+        query,
+        incoming_headers,
+    } = request;
     let translated = upstream_protocol != client_protocol;
     let mut body = if translated {
-        crate::translation::request(request, client_protocol, upstream_protocol, model)
+        crate::translation::request(request_body, client_protocol, upstream_protocol, model)
             .context("translate request for provider API")?
     } else {
-        let mut body = request.clone();
+        let mut body = request_body.clone();
         let object = body
             .as_object_mut()
             .context("request body must be a JSON object")?;
