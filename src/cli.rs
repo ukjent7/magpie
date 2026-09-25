@@ -80,9 +80,7 @@ async fn run(cli: Cli) -> Result<()> {
         [command] if command == "ls" || command == "list" => list_agents(true),
         [command] if command == "providers" => crate::provider::list(),
         [command] if command == "models" => crate::provider::models(),
-        [command, rest @ ..] if command == "provider" => {
-            crate::provider::command(rest).await
-        }
+        [command, rest @ ..] if command == "provider" => crate::provider::command(rest).await,
         [command, rest @ ..] if command == "profiles" => profile::list(rest),
         [command, rest @ ..] if command == "save" => profile::save(rest),
         [command, rest @ ..] if command == "use" => profile::apply(rest),

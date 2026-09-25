@@ -521,7 +521,9 @@ pub fn models() -> Result<()> {
         }
     }
     if !found {
-        println!("no models discovered yet · magpie provider models <id> fetches a provider's list");
+        println!(
+            "no models discovered yet · magpie provider models <id> fetches a provider's list"
+        );
     }
     Ok(())
 }
@@ -727,7 +729,10 @@ fn show(id: &str) -> Result<()> {
     } else {
         let available = crate::catalog::live_models(&provider.id);
         if available.is_empty() {
-            println!("  models: not fetched · magpie provider models {}", provider.id);
+            println!(
+                "  models: not fetched · magpie provider models {}",
+                provider.id
+            );
         } else {
             let exposed = crate::catalog::exposed_models(&provider.id, &provider.models);
             println!(

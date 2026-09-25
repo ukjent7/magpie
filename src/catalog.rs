@@ -124,7 +124,11 @@ pub async fn fetch_models(
     let mut attempted = HashSet::new();
     let mut last_error = None;
 
-    for (base, anthropic) in endpoints.iter().copied().filter(|(base, _)| !base.is_empty()) {
+    for (base, anthropic) in endpoints
+        .iter()
+        .copied()
+        .filter(|(base, _)| !base.is_empty())
+    {
         let base = base.trim_end_matches('/');
         for url in candidate_urls(base) {
             if !attempted.insert((url.clone(), anthropic)) {
@@ -182,7 +186,9 @@ pub async fn fetch_models(
             match parse_model_list(&body) {
                 Ok(models) if !models.is_empty() => return Ok((base.to_owned(), models)),
                 Ok(_) => last_error = Some(anyhow::anyhow!("{url}: model list is empty")),
-                Err(error) => last_error = Some(error.context(format!("{url}: invalid model list"))),
+                Err(error) => {
+                    last_error = Some(error.context(format!("{url}: invalid model list")))
+                }
             }
         }
     }
@@ -196,7 +202,8 @@ pub async fn fetch_models(
 pub fn save_live(provider_id: &str, base: &str, models: Vec<Model>) -> Result<()> {
     let path = live_path(provider_id).context("provider id is not safe for the model cache")?;
     let parent = path.parent().context("model cache path has no parent")?;
-    fs::create_dir_all(parent).with_context(|| format!("create model cache {}", parent.display()))?;
+    fs::create_dir_all(parent)
+        .with_context(|| format!("create model cache {}", parent.display()))?;
     let bytes = serde_json::to_vec_pretty(&LiveCache {
         _base: base.to_owned(),
         models,
@@ -211,7 +218,11 @@ fn live_path(provider_id: &str) -> Option<PathBuf> {
         && provider_id
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'));
-    safe.then(|| settings::cache_dir().join("magpie/models").join(format!("{provider_id}.json")))
+    safe.then(|| {
+        settings::cache_dir()
+            .join("magpie/models")
+            .join(format!("{provider_id}.json"))
+    })
 }
 
 fn candidate_urls(base: &str) -> Vec<String> {
@@ -268,8 +279,12 @@ fn parse_model_list(bytes: &[u8]) -> Result<Vec<Model>> {
         } else {
             row.display_name
         };
-        let image_input = (!row.modalities.input.is_empty())
-            .then(|| row.modalities.input.iter().any(|modality| modality == "image"));
+        let image_input = (!row.modalities.input.is_empty()).then(|| {
+            row.modalities
+                .input
+                .iter()
+                .any(|modality| modality == "image")
+        });
         models.push(Model {
             id,
             name,
@@ -329,7 +344,10 @@ mod tests {
         )
         .expect("valid provider model list");
         assert_eq!(
-            models.iter().map(|model| model.id.as_str()).collect::<Vec<_>>(),
+            models
+                .iter()
+                .map(|model| model.id.as_str())
+                .collect::<Vec<_>>(),
             vec!["latest-chat", "vision"]
         );
         assert_eq!(models[0].name, "Latest");
