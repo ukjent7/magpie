@@ -1428,7 +1428,7 @@ mod tests {
 
     #[test]
     fn anthropic_auth_uses_its_protocol_headers() {
-        let mut provider = provider("relay", "Relay", &[]);
+        let provider = provider("relay", "Relay", &[]);
         let mut incoming = HeaderMap::new();
         incoming.insert("anthropic-version", HeaderValue::from_static("2024-01-01"));
 

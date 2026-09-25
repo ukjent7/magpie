@@ -825,7 +825,6 @@ async fn models_command(id: &str, selected: &[String]) -> Result<()> {
         let endpoints = model_endpoints(provider_ref, protocol)?;
         crate::catalog::fetch_models(&endpoints, key, provider_headers)
             .await
-            .map(|(base, models)| (base, models))
     }))
     .await;
 
