@@ -98,6 +98,9 @@ magpie provider deepseek                # one provider in detail
 magpie provider models deepseek         # re-fetch the vendor's list (add ids to choose which to expose)
 magpie provider test deepseek           # one tiny request per API, with latency
 magpie provider key deepseek sk-…       # replace the key
+magpie provider keys deepseek            # list masked keys and their short IDs
+magpie provider keys deepseek add sk-… name=Team protocol=chat
+magpie provider routing deepseek rotate # spread requests over enabled keys
 magpie provider rm deepseek
 magpie models                           # the catalog agents see
 magpie claude deepseek/deepseek-chat    # use it
@@ -108,6 +111,19 @@ Anthropic-compatible base), or both, plus `responses=` when the vendor has a
 separate Responses endpoint, `catalog=` to borrow a models.dev list, and
 `models=` to name the models to expose. Anything a preset does not know can
 be overridden the same way.
+
+Providers can keep several keys. `magpie provider keys <id> add <key>` adds
+one; `name=` labels it, and `protocol=` can pin it to `chat`, `responses`, or
+`anthropic` when a relay issues keys for separate APIs. Use the short ID shown
+by `magpie provider keys <id>` with `use`, `on`, `off`, `rm`, `rename`, and
+`protocol`. A key made for one API is only sent to that API, with translation
+when the request protocol permits it. The provider's `routing` strategy is
+`smart` (the default, configured order), `order` (same order, next key only
+after a failure), `rotate` (start with the next enabled key each request), or
+`usage` (prefer the key served the fewest recent requests; its count halves
+each hour). A key that fails is held back for a minute, or for its numeric
+`Retry-After` value up to an hour. Once every enabled key for a model has been
+tried, the provider's configured model fallbacks can take over.
 
 ### Routing groups
 

@@ -2,7 +2,7 @@ use std::{
     collections::{HashMap, HashSet, VecDeque},
     env,
     sync::{LazyLock, Mutex},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result, bail};
@@ -298,6 +298,9 @@ async fn forward(
             if seen.insert((target.0.id.clone(), target.1.to_owned())) {
                 routed.push(target);
             }
+            if group.is_some() {
+                continue;
+            }
             for fallback in &target.0.fallback {
                 let Ok(fallback_target) = resolve_model(fallback, providers, protocol, true) else {
                     eprintln!(
@@ -314,15 +317,43 @@ async fn forward(
         candidates = routed;
     }
 
+    let mut candidates = candidates
+        .into_iter()
+        .flat_map(|(provider, model, upstream)| {
+            key_candidates(
+                provider,
+                model,
+                protocol,
+                upstream,
+                path_override.is_none(),
+            )
+        })
+        .collect::<Vec<_>>();
+    if candidates.is_empty() {
+        return api_error_for(
+            protocol,
+            StatusCode::NOT_FOUND,
+            &format!("unknown or unavailable model {model:?}; list available models"),
+        );
+    }
+    if group.is_some_and(|group| group.routing == "usage") {
+        sort_by_recent_usage(&mut candidates);
+        candidates.sort_by_key(|candidate| {
+            (!candidate.model_listed, key_fit(*candidate, protocol))
+        });
+    }
+    move_resting_routes_last(&mut candidates);
+
     let mut selected = None;
-    for (index, (provider, upstream_model, upstream_protocol)) in candidates.iter().enumerate() {
+    for (index, candidate) in candidates.iter().enumerate() {
         let is_last = index + 1 == candidates.len();
         let response = match send_upstream(
             state,
             UpstreamRequest {
-                provider,
-                model: upstream_model,
-                upstream_protocol: *upstream_protocol,
+                provider: candidate.provider,
+                model: candidate.model,
+                upstream_protocol: candidate.upstream,
+                key: candidate.key,
                 client_protocol: protocol,
                 body: &body,
                 streaming,
@@ -335,16 +366,28 @@ async fn forward(
         {
             Ok(response) => response,
             Err(error) if !is_last => {
+                if !error
+                    .chain()
+                    .any(|cause| cause.to_string() == "translate request for provider API")
+                {
+                    rest_route(*candidate, ROUTE_COOLDOWN);
+                }
                 eprintln!(
-                    "magpie: provider {} failed before responding; trying its fallback: {error:#}",
-                    provider.id
+                    "magpie: {} failed before responding; trying the next route: {error:#}",
+                    candidate.label()
                 );
                 continue;
             }
             Err(error) => {
+                if !error
+                    .chain()
+                    .any(|cause| cause.to_string() == "translate request for provider API")
+                {
+                    rest_route(*candidate, ROUTE_COOLDOWN);
+                }
                 eprintln!(
                     "magpie: upstream request to {} failed: {error:#}",
-                    provider.id
+                    candidate.label()
                 );
                 if error
                     .chain()
@@ -359,20 +402,36 @@ async fn forward(
                 return api_error_for(protocol, StatusCode::BAD_GATEWAY, "provider request failed");
             }
         };
+        if retryable_status(response.status()) {
+            let retry_after = response
+                .headers()
+                .get(header::RETRY_AFTER)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.parse::<u64>().ok())
+                .map_or(ROUTE_COOLDOWN, Duration::from_secs);
+            rest_route(*candidate, retry_after);
+        } else {
+            clear_route_rest(*candidate);
+        }
         if !is_last && retryable_status(response.status()) {
             eprintln!(
-                "magpie: provider {} returned {}; trying its fallback",
-                provider.id,
+                "magpie: {} returned {}; trying the next route",
+                candidate.label(),
                 response.status()
             );
             continue;
         }
-        selected = Some((response, *provider, *upstream_protocol));
+        selected = Some((response, *candidate));
         break;
     }
-    let Some((response, provider, upstream_protocol)) = selected else {
+    let Some((response, candidate)) = selected else {
         return api_error_for(protocol, StatusCode::BAD_GATEWAY, "provider request failed");
     };
+    if response.status().is_success() {
+        mark_route_used(candidate);
+    }
+    let provider = candidate.provider;
+    let upstream_protocol = candidate.upstream;
     let translated = upstream_protocol != protocol;
     if !translated || !response.status().is_success() {
         return relay(response);
@@ -484,6 +543,7 @@ struct UpstreamRequest<'a> {
     provider: &'a GatewayProvider,
     model: &'a str,
     upstream_protocol: ApiProtocol,
+    key: Option<&'a str>,
     client_protocol: ApiProtocol,
     body: &'a Value,
     streaming: bool,
@@ -500,6 +560,7 @@ async fn send_upstream(
         provider,
         model,
         upstream_protocol,
+        key,
         client_protocol,
         body: request_body,
         streaming,
@@ -529,7 +590,7 @@ async fn send_upstream(
         query,
     )
     .with_context(|| format!("build URL for provider {}", provider.id))?;
-    let headers = upstream_headers(provider, upstream_protocol, incoming_headers)
+    let headers = upstream_headers(provider, upstream_protocol, key, incoming_headers)
         .map_err(anyhow::Error::msg)
         .with_context(|| format!("build headers for provider {}", provider.id))?;
     state
@@ -547,8 +608,261 @@ fn retryable_status(status: StatusCode) -> bool {
     status.is_server_error() || matches!(status.as_u16(), 401 | 402 | 403 | 404 | 408 | 429)
 }
 
-static GROUP_ROTATION: LazyLock<Mutex<HashMap<String, usize>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
+#[derive(Default)]
+struct RoutingState {
+    rotations: HashMap<String, usize>,
+    usage: HashMap<String, (f64, Instant)>,
+    resting: HashMap<String, Instant>,
+}
+
+static ROUTING_STATE: LazyLock<Mutex<RoutingState>> =
+    LazyLock::new(|| Mutex::new(RoutingState::default()));
+
+const USAGE_HALF_LIFE: Duration = Duration::from_secs(60 * 60);
+const ROUTE_COOLDOWN: Duration = Duration::from_secs(60);
+const MAX_ROUTE_COOLDOWN: Duration = Duration::from_secs(60 * 60);
+
+#[derive(Clone, Copy)]
+struct RouteCandidate<'a> {
+    provider: &'a GatewayProvider,
+    model: &'a str,
+    upstream: ApiProtocol,
+    key: Option<&'a str>,
+    key_protocol: Option<ApiProtocol>,
+    model_listed: bool,
+}
+
+impl RouteCandidate<'_> {
+    fn id(self) -> String {
+        self.key.map_or_else(
+            || self.provider.id.clone(),
+            |key| format!("{}#{}", self.provider.id, provider::key_id(key)),
+        )
+    }
+
+    fn label(self) -> String {
+        self.key.map_or_else(
+            || self.provider.id.clone(),
+            |key| format!("{} ({})", self.provider.id, provider::key_id(key)),
+        )
+    }
+}
+
+fn key_candidates<'a>(
+    provider: &'a GatewayProvider,
+    model: &'a str,
+    client_protocol: ApiProtocol,
+    default_upstream: ApiProtocol,
+    allow_translation: bool,
+) -> Vec<RouteCandidate<'a>> {
+    let configured_keys = provider
+        .keys
+        .iter()
+        .filter(|key| key.active)
+        .collect::<Vec<_>>();
+    let unkeyed = !provider.has_configured_keys;
+    if !unkeyed && configured_keys.is_empty() {
+        return Vec::new();
+    }
+
+    let mut candidates = if unkeyed {
+        vec![RouteCandidate {
+            provider,
+            model,
+            upstream: default_upstream,
+            key: None,
+            key_protocol: None,
+            model_listed: true,
+        }]
+    } else {
+        configured_keys
+            .into_iter()
+            .filter_map(|key| {
+                let bound_protocol = if key.protocol.is_empty() {
+                    None
+                } else {
+                    Some(parse_api_protocol(&key.protocol)?)
+                };
+                let upstream = match bound_protocol {
+                    None => default_upstream,
+                    Some(bound) if bound == client_protocol => bound,
+                    Some(bound)
+                        if allow_translation && translation_supported(client_protocol, bound) =>
+                    {
+                        bound
+                    }
+                    Some(_) => return None,
+                };
+                (!upstream.base(provider).is_empty()).then_some(RouteCandidate {
+                    provider,
+                    model,
+                    upstream,
+                    key: Some(key.key.as_str()),
+                    key_protocol: bound_protocol,
+                    model_listed: true,
+                })
+            })
+            .collect::<Vec<_>>()
+    };
+
+    let mut unlisted = Vec::new();
+    if let Some(listed_keys) = provider.model_keys.get(model) {
+        let (listed, mut others): (Vec<_>, Vec<_>) = candidates.into_iter().partition(|candidate| {
+            candidate
+                .key
+                .is_some_and(|key| listed_keys.contains(&provider::key_id(key)))
+        });
+        if listed.is_empty() {
+            candidates = others;
+        } else {
+            candidates = listed;
+            for candidate in &mut others {
+                candidate.model_listed = false;
+            }
+            unlisted = others;
+        }
+    }
+
+    match provider.routing.as_str() {
+        "rotate" => rotate_candidates(&format!("provider/{}", provider.id), &mut candidates),
+        "usage" => sort_by_recent_usage(&mut candidates),
+        _ => {}
+    }
+    candidates.sort_by_key(|candidate| key_fit(*candidate, client_protocol));
+    unlisted.sort_by_key(|candidate| key_fit(*candidate, client_protocol));
+    candidates.extend(unlisted);
+    candidates
+}
+
+fn parse_api_protocol(protocol: &str) -> Option<ApiProtocol> {
+    match protocol {
+        "chat" => Some(ApiProtocol::Chat),
+        "responses" => Some(ApiProtocol::Responses),
+        "anthropic" => Some(ApiProtocol::Anthropic),
+        _ => None,
+    }
+}
+
+fn translation_supported(from: ApiProtocol, to: ApiProtocol) -> bool {
+    matches!(
+        (from, to),
+        (ApiProtocol::Chat, ApiProtocol::Anthropic)
+            | (ApiProtocol::Anthropic, ApiProtocol::Chat)
+    )
+}
+
+fn key_fit(candidate: RouteCandidate<'_>, client_protocol: ApiProtocol) -> u8 {
+    let Some(key_protocol) = candidate.key_protocol else {
+        return 0;
+    };
+    let model = candidate
+        .model
+        .rsplit('/')
+        .next()
+        .unwrap_or(candidate.model)
+        .to_ascii_lowercase();
+    if model.starts_with("claude") {
+        return u8::from(key_protocol != ApiProtocol::Anthropic) * 2;
+    }
+    let o_series = model.starts_with('o')
+        && model
+            .as_bytes()
+            .get(1)
+            .is_some_and(|character| character.is_ascii_digit());
+    if model.starts_with("gpt-") || model.contains("codex") || o_series {
+        return u8::from(key_protocol == ApiProtocol::Anthropic) * 2;
+    }
+    u8::from(candidate.upstream != client_protocol)
+}
+
+fn rotate_candidates<T>(key: &str, candidates: &mut [T]) {
+    if candidates.len() < 2 {
+        return;
+    }
+    let mut state = ROUTING_STATE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let next = state.rotations.entry(key.to_owned()).or_default();
+    let offset = *next % candidates.len();
+    *next = (*next + 1) % candidates.len();
+    candidates.rotate_left(offset);
+}
+
+fn usage_score(id: &str, now: Instant, state: &RoutingState) -> f64 {
+    state.usage.get(id).map_or(0.0, |(requests, last_seen)| {
+        let elapsed = now.saturating_duration_since(*last_seen).as_secs_f64();
+        requests * 0.5_f64.powf(elapsed / USAGE_HALF_LIFE.as_secs_f64())
+    })
+}
+
+fn sort_by_recent_usage(candidates: &mut [RouteCandidate<'_>]) {
+    let now = Instant::now();
+    let state = ROUTING_STATE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut weighted = candidates
+        .iter()
+        .copied()
+        .map(|candidate| {
+            let score = usage_score(&candidate.id(), now, &state);
+            (candidate, score)
+        })
+        .collect::<Vec<_>>();
+    weighted.sort_by(|left, right| left.1.total_cmp(&right.1));
+    for (slot, (candidate, _)) in candidates.iter_mut().zip(weighted) {
+        *slot = candidate;
+    }
+}
+
+fn move_resting_routes_last(candidates: &mut [RouteCandidate<'_>]) {
+    let now = Instant::now();
+    let mut state = ROUTING_STATE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    state.resting.retain(|_, until| *until > now);
+    let mut ordered = candidates
+        .iter()
+        .copied()
+        .map(|candidate| {
+            let resting = state
+                .resting
+                .get(&candidate.id())
+                .is_some_and(|until| *until > now);
+            (candidate, resting)
+        })
+        .collect::<Vec<_>>();
+    ordered.sort_by_key(|(_, resting)| *resting);
+    for (slot, (candidate, _)) in candidates.iter_mut().zip(ordered) {
+        *slot = candidate;
+    }
+}
+
+fn rest_route(candidate: RouteCandidate<'_>, duration: Duration) {
+    let until = Instant::now() + duration.min(MAX_ROUTE_COOLDOWN);
+    ROUTING_STATE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .resting
+        .insert(candidate.id(), until);
+}
+
+fn clear_route_rest(candidate: RouteCandidate<'_>) {
+    ROUTING_STATE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .resting
+        .remove(&candidate.id());
+}
+
+fn mark_route_used(candidate: RouteCandidate<'_>) {
+    let now = Instant::now();
+    let id = candidate.id();
+    let mut state = ROUTING_STATE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let current = usage_score(&id, now, &state) + 1.0;
+    state.usage.insert(id, (current, now));
+}
 
 fn rotate_group_candidates<'a>(
     group_id: &str,
@@ -557,13 +871,7 @@ fn rotate_group_candidates<'a>(
     if candidates.len() < 2 {
         return;
     }
-    let mut rotations = GROUP_ROTATION
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let next = rotations.entry(group_id.to_owned()).or_default();
-    let offset = *next % candidates.len();
-    *next = (*next + 1) % candidates.len();
-    candidates.rotate_left(offset);
+    rotate_candidates(&format!("group/{group_id}"), candidates);
 }
 
 fn group_candidates<'a>(
@@ -697,6 +1005,7 @@ fn upstream_url(base: &str, path_suffix: &str, query: Option<&str>) -> Result<Ur
 fn upstream_headers(
     provider: &GatewayProvider,
     protocol: ApiProtocol,
+    key: Option<&str>,
     incoming: &HeaderMap,
 ) -> std::result::Result<HeaderMap, &'static str> {
     let mut headers = HeaderMap::new();
@@ -704,11 +1013,11 @@ fn upstream_headers(
         header::CONTENT_TYPE,
         HeaderValue::from_static("application/json"),
     );
-    if !provider.key.is_empty() {
+    if let Some(key) = key.filter(|key| !key.is_empty()) {
         let (name, raw_value) = match protocol {
-            ApiProtocol::Anthropic => (HeaderName::from_static("x-api-key"), provider.key.clone()),
+            ApiProtocol::Anthropic => (HeaderName::from_static("x-api-key"), key.to_owned()),
             ApiProtocol::Chat | ApiProtocol::Responses => {
-                (header::AUTHORIZATION, format!("Bearer {}", provider.key))
+                (header::AUTHORIZATION, format!("Bearer {key}"))
             }
         };
         let value = HeaderValue::from_str(&raw_value)
@@ -954,13 +1263,16 @@ mod tests {
         GatewayProvider {
             id: id.to_owned(),
             name: name.to_owned(),
-            key: String::new(),
             chat: "https://api.example/v1".to_owned(),
             responses: String::new(),
             anthropic: String::new(),
             fallback: Vec::new(),
+            routing: String::new(),
+            keys: Vec::new(),
+            has_configured_keys: false,
             headers: BTreeMap::new(),
             models: models.iter().map(|model| (*model).to_owned()).collect(),
+            model_keys: HashMap::new(),
             hidden: false,
         }
     }
@@ -1107,12 +1419,16 @@ mod tests {
     #[test]
     fn custom_auth_header_overrides_the_default_bearer_key() {
         let mut provider = provider("relay", "Relay", &[]);
-        provider.key = "stored-secret".to_owned();
         provider
             .headers
             .insert("authorization".to_owned(), "Token custom-scheme".to_owned());
 
-        let headers = upstream_headers(&provider, ApiProtocol::Chat, &HeaderMap::new())
+        let headers = upstream_headers(
+            &provider,
+            ApiProtocol::Chat,
+            Some("stored-secret"),
+            &HeaderMap::new(),
+        )
             .expect("headers should be valid");
         assert_eq!(headers[header::AUTHORIZATION], "Token custom-scheme");
     }
@@ -1120,14 +1436,177 @@ mod tests {
     #[test]
     fn anthropic_auth_uses_its_protocol_headers() {
         let mut provider = provider("relay", "Relay", &[]);
-        provider.key = "secret".to_owned();
         let mut incoming = HeaderMap::new();
         incoming.insert("anthropic-version", HeaderValue::from_static("2024-01-01"));
 
-        let headers = upstream_headers(&provider, ApiProtocol::Anthropic, &incoming)
-            .expect("headers should be valid");
+        let headers = upstream_headers(
+            &provider,
+            ApiProtocol::Anthropic,
+            Some("secret"),
+            &incoming,
+        )
+        .expect("headers should be valid");
         assert_eq!(headers["x-api-key"], "secret");
         assert_eq!(headers["anthropic-version"], "2024-01-01");
         assert!(!headers.contains_key(header::AUTHORIZATION));
+    }
+
+    #[test]
+    fn key_candidates_use_the_protocol_each_key_was_created_for() {
+        let mut relay = provider("protocol-key-test", "Relay", &["claude-opus", "gpt-5.5"]);
+        relay.anthropic = "https://api.example".to_owned();
+        relay.has_configured_keys = true;
+        relay.keys = vec![
+            provider::GatewayKey {
+                key: "openai-key".to_owned(),
+                protocol: "chat".to_owned(),
+                active: true,
+            },
+            provider::GatewayKey {
+                key: "anthropic-key".to_owned(),
+                protocol: "anthropic".to_owned(),
+                active: true,
+            },
+        ];
+
+        let claude = key_candidates(
+            &relay,
+            "claude-opus",
+            ApiProtocol::Chat,
+            ApiProtocol::Chat,
+            true,
+        );
+        assert_eq!(claude[0].key, Some("anthropic-key"));
+        assert_eq!(claude[0].upstream, ApiProtocol::Anthropic);
+        assert_eq!(claude[1].key, Some("openai-key"));
+        assert_eq!(claude[1].upstream, ApiProtocol::Chat);
+
+        let gpt = key_candidates(
+            &relay,
+            "gpt-5.5",
+            ApiProtocol::Anthropic,
+            ApiProtocol::Anthropic,
+            true,
+        );
+        assert_eq!(gpt[0].key, Some("openai-key"));
+        assert_eq!(gpt[0].upstream, ApiProtocol::Chat);
+    }
+
+    #[test]
+    fn off_keys_are_skipped_and_keyless_providers_remain_usable() {
+        let mut relay = provider("off-key-test", "Relay", &["model"]);
+        relay.has_configured_keys = true;
+        relay.keys.push(provider::GatewayKey {
+            key: "disabled".to_owned(),
+            protocol: String::new(),
+            active: false,
+        });
+        assert!(key_candidates(
+            &relay,
+            "model",
+            ApiProtocol::Chat,
+            ApiProtocol::Chat,
+            true
+        )
+        .is_empty());
+
+        relay.has_configured_keys = false;
+        relay.keys.clear();
+        let candidates = key_candidates(
+            &relay,
+            "model",
+            ApiProtocol::Chat,
+            ApiProtocol::Chat,
+            true,
+        );
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].key, None);
+    }
+
+    #[test]
+    fn key_rotation_advances_between_requests() {
+        let mut relay = provider("key-rotation-test", "Relay", &["model"]);
+        relay.routing = "rotate".to_owned();
+        relay.has_configured_keys = true;
+        relay.keys = ["first", "second", "third"]
+            .into_iter()
+            .map(|key| provider::GatewayKey {
+                key: key.to_owned(),
+                protocol: String::new(),
+                active: true,
+            })
+            .collect();
+
+        let targets = || {
+            key_candidates(
+                &relay,
+                "model",
+                ApiProtocol::Chat,
+                ApiProtocol::Chat,
+                true,
+            )
+        };
+        assert_eq!(targets()[0].key, Some("first"));
+        assert_eq!(targets()[0].key, Some("second"));
+    }
+
+    #[test]
+    fn usage_routing_prefers_the_key_with_fewer_recent_requests() {
+        let mut relay = provider("key-usage-test", "Relay", &["model"]);
+        relay.routing = "usage".to_owned();
+        relay.has_configured_keys = true;
+        relay.keys = ["first", "second"]
+            .into_iter()
+            .map(|key| provider::GatewayKey {
+                key: key.to_owned(),
+                protocol: String::new(),
+                active: true,
+            })
+            .collect();
+
+        let first_pass = key_candidates(
+            &relay,
+            "model",
+            ApiProtocol::Chat,
+            ApiProtocol::Chat,
+            true,
+        );
+        assert_eq!(first_pass[0].key, Some("first"));
+        mark_route_used(first_pass[0]);
+
+        let next_pass = key_candidates(
+            &relay,
+            "model",
+            ApiProtocol::Chat,
+            ApiProtocol::Chat,
+            true,
+        );
+        assert_eq!(next_pass[0].key, Some("second"));
+    }
+
+    #[test]
+    fn failed_routes_are_held_back_until_the_cooldown_expires() {
+        let mut relay = provider("route-cooldown-test", "Relay", &["model"]);
+        relay.has_configured_keys = true;
+        relay.keys = ["limited", "available"]
+            .into_iter()
+            .map(|key| provider::GatewayKey {
+                key: key.to_owned(),
+                protocol: String::new(),
+                active: true,
+            })
+            .collect();
+
+        let mut candidates = key_candidates(
+            &relay,
+            "model",
+            ApiProtocol::Chat,
+            ApiProtocol::Chat,
+            true,
+        );
+        rest_route(candidates[0], ROUTE_COOLDOWN);
+        move_resting_routes_last(&mut candidates);
+        assert_eq!(candidates[0].key, Some("available"));
+        assert_eq!(candidates[1].key, Some("limited"));
     }
 }

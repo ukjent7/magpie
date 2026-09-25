@@ -7,11 +7,12 @@ use std::{
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use url::Url;
 
 use crate::settings;
 
-const USAGE: &str = "usage: magpie presets | magpie providers | magpie models | magpie provider <id> | magpie provider add <preset> [key] | magpie provider add <name> id=<id> url=<url> key=<key> | magpie provider models <id> [ids…] | magpie provider key <id> <key> | magpie provider fallback <id> [provider/model… | none] | magpie provider rm <id>";
+const USAGE: &str = "usage: magpie presets | magpie providers | magpie models | magpie provider <id> | magpie provider add <preset> [key] | magpie provider add <name> id=<id> url=<url> key=<key> | magpie provider models <id> [ids…] | magpie provider key <id> <key> | magpie provider keys <id> [add <key> [name=<name>] [protocol=<protocol>] | use|on|off|rm <key-id> | rename <key-id> <name> | protocol <key-id> <protocol|any>] | magpie provider routing <id> [smart|order|rotate|usage] | magpie provider fallback <id> [provider/model… | none] | magpie provider rm <id>";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum PresetKind {
@@ -402,6 +403,20 @@ pub struct ModelEntry {
 
 #[derive(Clone, Default, Deserialize, Serialize)]
 #[serde(default, rename_all = "camelCase")]
+struct KeyAccount {
+    #[serde(skip_serializing_if = "String::is_empty")]
+    name: String,
+    key: String,
+    #[serde(skip_serializing_if = "is_false")]
+    off: bool,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    protocol: String,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Default, Deserialize, Serialize)]
+#[serde(default, rename_all = "camelCase")]
 struct Provider {
     id: String,
     name: String,
@@ -413,7 +428,7 @@ struct Provider {
     #[serde(skip_serializing_if = "String::is_empty")]
     key_name: String,
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    keys: Vec<Value>,
+    keys: Vec<KeyAccount>,
     #[serde(skip_serializing_if = "String::is_empty")]
     key_protocol: String,
     #[serde(skip_serializing_if = "String::is_empty")]
@@ -451,14 +466,33 @@ struct Provider {
 pub(crate) struct GatewayProvider {
     pub(crate) id: String,
     pub(crate) name: String,
-    pub(crate) key: String,
     pub(crate) chat: String,
     pub(crate) responses: String,
     pub(crate) anthropic: String,
     pub(crate) fallback: Vec<String>,
+    pub(crate) routing: String,
+    pub(crate) keys: Vec<GatewayKey>,
+    pub(crate) has_configured_keys: bool,
     pub(crate) headers: BTreeMap<String, String>,
     pub(crate) models: Vec<String>,
+    pub(crate) model_keys: HashMap<String, HashSet<String>>,
     pub(crate) hidden: bool,
+}
+
+pub(crate) struct GatewayKey {
+    pub(crate) key: String,
+    pub(crate) protocol: String,
+    pub(crate) active: bool,
+}
+
+pub(crate) fn key_id(key: &str) -> String {
+    let digest = Sha256::digest(key.as_bytes());
+    let mut fingerprint = String::with_capacity(10);
+    use std::fmt::Write as _;
+    for byte in &digest[..5] {
+        let _ = write!(fingerprint, "{byte:02x}");
+    }
+    fingerprint
 }
 
 pub(crate) struct GatewayGroup {
@@ -504,16 +538,47 @@ pub(crate) fn gateway_catalog() -> Result<GatewayCatalog> {
             .into_iter()
             .map(|model| model.id)
             .collect();
+            let model_keys = crate::catalog::available_models(
+                &provider.id,
+                provider.catalog_id(),
+            )
+            .into_iter()
+            .filter(|model| !model.keys.is_empty())
+            .map(|model| (model.id, model.keys.into_iter().collect()))
+            .collect();
+            let keys = std::iter::once(GatewayKey {
+                key: provider.key.clone(),
+                protocol: provider.key_protocol.clone(),
+                active: true,
+            })
+            .filter(|key| !key.key.is_empty())
+            .chain(
+                provider
+                    .keys
+                    .iter()
+                    .filter(|key| !key.key.is_empty())
+                    .map(|key| GatewayKey {
+                        key: key.key.clone(),
+                        protocol: key.protocol.clone(),
+                        active: !key.off,
+                    }),
+            )
+            .collect();
+            let has_configured_keys = !provider.key.is_empty()
+                || provider.keys.iter().any(|key| !key.key.is_empty());
             GatewayProvider {
                 id: provider.id,
                 name: provider.name,
-                key: provider.key,
                 chat: provider.chat,
                 responses: provider.responses,
                 anthropic: provider.anthropic,
                 fallback: provider.fallback,
+                routing: provider.routing,
+                keys,
+                has_configured_keys,
                 headers: provider.headers,
                 models,
+                model_keys,
                 hidden: provider.hidden,
             }
         })
@@ -710,6 +775,8 @@ pub async fn command(args: &[String]) -> Result<()> {
         [verb] if verb == "presets" => presets(),
         [verb, rest @ ..] if verb == "add" => add(rest),
         [verb, id, key] if verb == "key" => change_key(id, key),
+        [verb, rest @ ..] if verb == "keys" => keys_command(rest),
+        [verb, id, selected @ ..] if verb == "routing" => set_routing(id, selected),
         [verb, id, fallback @ ..] if verb == "fallback" => set_fallback(id, fallback),
         [verb, id, rest @ ..] if verb == "models" => models_command(id, rest).await,
         [verb, id] if verb == "rm" => remove(id),
@@ -739,17 +806,105 @@ async fn models_command(id: &str, selected: &[String]) -> Result<()> {
     }
 
     let provider = find(id)?;
-    let endpoints = [
-        (provider.chat.as_str(), false),
-        (provider.responses.as_str(), false),
-        (provider.anthropic.as_str(), true),
-    ];
-    let (base, models) =
-        crate::catalog::fetch_models(&endpoints, &provider.key, &provider.headers).await?;
+    let mut keys = Vec::new();
+    if !provider.key.is_empty() {
+        keys.push((provider.key.clone(), provider.key_protocol.clone()));
+    }
+    keys.extend(
+        provider
+            .keys
+            .iter()
+            .filter(|key| !key.key.is_empty())
+            .map(|key| (key.key.clone(), key.protocol.clone())),
+    );
+    if keys.is_empty() {
+        keys.push((String::new(), String::new()));
+    }
+
+    let old_models = crate::catalog::live_models(&provider.id);
+    let provider_ref = &provider;
+    let provider_headers = &provider.headers;
+    let fetched = futures_util::future::join_all(keys.iter().map(|(key, protocol)| async move {
+        let endpoints = model_endpoints(provider_ref, protocol)?;
+        crate::catalog::fetch_models(&endpoints, key, provider_headers)
+            .await
+            .map(|(base, models)| (base, models))
+    }))
+    .await;
+
+    let mut base = String::new();
+    let mut models: Vec<crate::catalog::Model> = Vec::new();
+    let mut model_indices: HashMap<String, usize> = HashMap::new();
+    let track_key_access = keys.len() > 1;
+    let mut merge_model = |mut model: crate::catalog::Model, key: Option<String>| {
+        if let Some(index) = model_indices.get(&model.id).copied() {
+            let existing: &mut crate::catalog::Model = &mut models[index];
+            existing.images &= model.images;
+            existing.image_input = match (existing.image_input, model.image_input) {
+                (Some(false), _) | (_, Some(false)) => Some(false),
+                (Some(true), Some(true)) => Some(true),
+                _ => None,
+            };
+            if let Some(key) = key
+                && !existing.keys.contains(&key)
+            {
+                existing.keys.push(key);
+            }
+        } else {
+            model.keys = key.into_iter().collect();
+            model_indices.insert(model.id.clone(), models.len());
+            models.push(model);
+        }
+    };
+
+    let mut last_error = None;
+    for ((key, _), result) in keys.iter().zip(fetched) {
+        let fingerprint = (track_key_access && !key.is_empty()).then(|| key_id(key));
+        match result {
+            Ok((found_base, fetched_models)) => {
+                if base.is_empty() {
+                    base = found_base;
+                }
+                for model in fetched_models {
+                    merge_model(model, fingerprint.clone());
+                }
+            }
+            Err(error) => {
+                eprintln!("magpie: model list fetch failed for key {}: {error:#}", fingerprint.as_deref().unwrap_or("primary"));
+                last_error = Some(error);
+                if let Some(fingerprint) = fingerprint {
+                    for model in old_models.iter().filter(|model| model.keys.contains(&fingerprint)) {
+                        merge_model(model.clone(), Some(fingerprint.clone()));
+                    }
+                }
+            }
+        }
+    }
+    if base.is_empty() {
+        if let Some(error) = last_error {
+            return Err(error);
+        }
+        bail!("provider has no endpoint to ask for models");
+    }
     let count = models.len();
     crate::catalog::save_live(&provider.id, &base, models)?;
     println!("✓ fetched {count} models from {}", provider.host());
     show(&provider.id)
+}
+
+fn model_endpoints<'a>(provider: &'a Provider, protocol: &str) -> Result<Vec<(&'a str, bool)>> {
+    let endpoints = match protocol {
+        "" => vec![
+            (provider.chat.as_str(), false),
+            (provider.responses.as_str(), false),
+            (provider.anthropic.as_str(), true),
+        ],
+        "chat" => vec![(provider.chat.as_str(), false)],
+        "responses" => vec![(provider.responses.as_str(), false)],
+        "anthropic" => vec![(provider.anthropic.as_str(), true)],
+        _ => bail!("unknown key protocol {protocol:?}"),
+    };
+    Ok(endpoints)
 }
 
 fn add(args: &[String]) -> Result<()> {
@@ -793,10 +948,7 @@ fn add(args: &[String]) -> Result<()> {
             "balance.path" => provider.balance_path = value.to_owned(),
             "models" => provider.models = clean_list(value),
             "fallback" => provider.fallback = clean_list(value),
-            "routing" if matches!(value, "order" | "rotate" | "usage") => {
-                provider.routing = value.to_owned();
-            }
-            "routing" => bail!("routing must be order, rotate, or usage"),
+            "routing" => provider.routing = normalize_routing(value)?,
             "affinity" | "stays" if matches!(value, "session" | "turn" | "off") => {
                 provider.affinity = value.to_owned();
             }
@@ -901,6 +1053,18 @@ fn show(id: &str) -> Result<()> {
             mask(&provider.key)
         }
     );
+    let active_keys = usize::from(!provider.key.is_empty())
+        + provider
+            .keys
+            .iter()
+            .filter(|key| !key.key.is_empty() && !key.off)
+            .count();
+    if active_keys > 1 || !provider.keys.is_empty() {
+        println!("  keys: {active_keys} on · magpie provider keys {}", provider.id);
+    }
+    if !provider.routing.is_empty() {
+        println!("  key routing: {}", provider.routing);
+    }
     if !provider.models.is_empty() {
         println!("  models: {}", provider.models.join(", "));
     } else {
@@ -1018,6 +1182,288 @@ fn change_key(id: &str, key: &str) -> Result<()> {
     store(file)?;
     println!("✓ {name} key {masked}");
     Ok(())
+}
+
+fn keys_command(args: &[String]) -> Result<()> {
+    let [id, action @ ..] = args else {
+        bail!("{USAGE}");
+    };
+    if action.is_empty() {
+        return list_keys(id);
+    }
+
+    match action {
+        [verb, key, options @ ..] if verb == "add" => add_key(id, key, options),
+        [verb, key_id] if matches!(verb.as_str(), "use" | "on" | "off" | "rm") => {
+            update_key(id, verb, key_id)
+        }
+        [verb, key_id, value] if verb == "rename" => rename_key(id, key_id, value),
+        [verb, key_id, protocol] if verb == "protocol" => {
+            set_key_protocol(id, key_id, protocol)
+        }
+        _ => bail!("{USAGE}"),
+    }
+}
+
+fn list_keys(id: &str) -> Result<()> {
+    let provider = find(id)?;
+    println!("{} ({}) API keys", provider.name, provider.id);
+    let mut count = 0;
+    if !provider.key.is_empty() {
+        count += 1;
+        print_key(
+            &provider.key,
+            &provider.key_name,
+            true,
+            true,
+            &provider.key_protocol,
+        );
+    }
+    for key in &provider.keys {
+        if key.key.is_empty() {
+            continue;
+        }
+        count += 1;
+        print_key(&key.key, &key.name, !key.off, false, &key.protocol);
+    }
+    if count == 0 {
+        println!("  no keys · magpie provider key {} <key>", provider.id);
+    }
+    Ok(())
+}
+
+fn print_key(key: &str, name: &str, on: bool, primary: bool, protocol: &str) {
+    let label = if name.is_empty() { "unnamed" } else { name };
+    let status = if on {
+        "on"
+    } else {
+        "off"
+    };
+    let primary = if primary { " · primary" } else { "" };
+    let protocol = if protocol.is_empty() {
+        "any"
+    } else {
+        protocol
+    };
+    println!(
+        "  {}  {label} · {status}{primary} · {protocol} · {}",
+        key_id(key),
+        mask(key)
+    );
+}
+
+fn add_key(id: &str, key: &str, options: &[String]) -> Result<()> {
+    let key = key.trim();
+    ensure!(!key.is_empty(), "provider key is empty");
+    let mut name = String::new();
+    let mut protocol = String::new();
+    for option in options {
+        let (field, value) = option
+            .split_once('=')
+            .with_context(|| format!("expected name=<name> or protocol=<protocol>, got {option:?}"))?;
+        match field.to_ascii_lowercase().as_str() {
+            "name" => name = value.trim().to_owned(),
+            "protocol" => protocol = parse_key_protocol(value)?,
+            _ => bail!("unknown key option {field:?}; use name= or protocol="),
+        }
+    }
+
+    let mut file = load()?;
+    let provider = find_provider_mut(&mut file, id)?;
+    let fingerprint = key_id(key);
+    ensure!(
+        provider.key.is_empty() || fingerprint != key_id(&provider.key),
+        "key is already configured"
+    );
+    ensure!(
+        !provider
+            .keys
+            .iter()
+            .any(|saved| key_id(&saved.key) == fingerprint),
+        "key is already configured"
+    );
+
+    if provider.key.is_empty() {
+        provider.key = key.to_owned();
+        provider.key_name = name;
+        provider.key_protocol = protocol;
+    } else {
+        provider.keys.push(KeyAccount {
+            name,
+            key: key.to_owned(),
+            off: false,
+            protocol,
+            ..KeyAccount::default()
+        });
+    }
+    let provider_name = provider.name.clone();
+    let provider_id = provider.id.clone();
+    store(file)?;
+    println!("✓ added API key to {provider_name} ({provider_id}) · {fingerprint}");
+    Ok(())
+}
+
+fn update_key(id: &str, action: &str, reference: &str) -> Result<()> {
+    let mut file = load()?;
+    let provider = find_provider_mut(&mut file, id)?;
+    let index = locate_key(provider, reference)
+        .with_context(|| format!("{} has no key {reference:?}", provider.name))?;
+    let provider_name = provider.name.clone();
+    let label = reference.to_owned();
+
+    match action {
+        "use" if index > 0 => {
+            let selected = provider.keys.remove(index - 1);
+            let mut selected = selected;
+            selected.off = false;
+            let previous = KeyAccount {
+                name: std::mem::take(&mut provider.key_name),
+                key: std::mem::replace(&mut provider.key, selected.key),
+                off: false,
+                protocol: std::mem::take(&mut provider.key_protocol),
+                ..KeyAccount::default()
+            };
+            provider.key_name = selected.name;
+            provider.key_protocol = selected.protocol;
+            if !previous.key.is_empty() {
+                provider.keys.insert(0, previous);
+            }
+        }
+        "use" | "on" if index == 0 => {}
+        "on" => provider.keys[index - 1].off = false,
+        "off" if index > 0 => provider.keys[index - 1].off = true,
+        "off" => {
+            let Some(next) = provider.keys.iter().position(|key| !key.off && !key.key.is_empty()) else {
+                bail!("that's the only key in use; turn another on first");
+            };
+            let previous = KeyAccount {
+                name: std::mem::take(&mut provider.key_name),
+                key: std::mem::take(&mut provider.key),
+                off: true,
+                protocol: std::mem::take(&mut provider.key_protocol),
+                ..KeyAccount::default()
+            };
+            let mut promoted = provider.keys.remove(next);
+            promoted.off = false;
+            provider.key = promoted.key;
+            provider.key_name = promoted.name;
+            provider.key_protocol = promoted.protocol;
+            provider.keys.insert(0, previous);
+        }
+        "rm" if index > 0 => {
+            provider.keys.remove(index - 1);
+        }
+        "rm" => {
+            let Some(next) = provider.keys.iter().position(|key| !key.off && !key.key.is_empty()) else {
+                bail!("that's the only key in use; turn another on before removing it");
+            };
+            let promoted = provider.keys.remove(next);
+            provider.key = promoted.key;
+            provider.key_name = promoted.name;
+            provider.key_protocol = promoted.protocol;
+        }
+        _ => bail!("unsupported key action {action:?}"),
+    }
+
+    store(file)?;
+    println!("✓ {provider_name} key {label} {action}");
+    Ok(())
+}
+
+fn rename_key(id: &str, reference: &str, name: &str) -> Result<()> {
+    let mut file = load()?;
+    let provider = find_provider_mut(&mut file, id)?;
+    let index = locate_key(provider, reference)
+        .with_context(|| format!("{} has no key {reference:?}", provider.name))?;
+    let name = name.trim().to_owned();
+    if index == 0 {
+        provider.key_name = name;
+    } else {
+        provider.keys[index - 1].name = name;
+    }
+    let provider_name = provider.name.clone();
+    store(file)?;
+    println!("✓ renamed {provider_name} key {reference}");
+    Ok(())
+}
+
+fn set_key_protocol(id: &str, reference: &str, protocol: &str) -> Result<()> {
+    let protocol = parse_key_protocol(protocol)?;
+    let mut file = load()?;
+    let provider = find_provider_mut(&mut file, id)?;
+    let index = locate_key(provider, reference)
+        .with_context(|| format!("{} has no key {reference:?}", provider.name))?;
+    if index == 0 {
+        provider.key_protocol = protocol;
+    } else {
+        provider.keys[index - 1].protocol = protocol;
+    }
+    let provider_name = provider.name.clone();
+    store(file)?;
+    println!("✓ changed {provider_name} key {reference} protocol");
+    Ok(())
+}
+
+fn parse_key_protocol(protocol: &str) -> Result<String> {
+    let protocol = protocol.trim().to_ascii_lowercase();
+    match protocol.as_str() {
+        "" | "any" | "*" => Ok(String::new()),
+        "chat" | "responses" | "anthropic" => Ok(protocol),
+        _ => bail!("protocol must be any, chat, responses or anthropic"),
+    }
+}
+
+fn locate_key(provider: &Provider, reference: &str) -> Option<usize> {
+    if !provider.key.is_empty() && key_id(&provider.key) == reference {
+        return Some(0);
+    }
+    provider
+        .keys
+        .iter()
+        .position(|key| key_id(&key.key) == reference)
+        .map(|index| index + 1)
+}
+
+fn find_provider_mut<'a>(file: &'a mut ProviderFile, id: &str) -> Result<&'a mut Provider> {
+    file.providers
+        .iter_mut()
+        .find(|provider| provider.id == id || provider.name.eq_ignore_ascii_case(id))
+        .with_context(|| format!("no provider {id:?}"))
+}
+
+fn set_routing(id: &str, selected: &[String]) -> Result<()> {
+    let mut file = load()?;
+    let provider = find_provider_mut(&mut file, id)?;
+    if selected.is_empty() {
+        println!(
+            "{} key routing: {}",
+            provider.name,
+            if provider.routing.is_empty() { "smart" } else { &provider.routing }
+        );
+        return Ok(());
+    }
+    ensure!(selected.len() == 1, "choose one key routing strategy");
+    provider.routing = normalize_routing(&selected[0])?;
+    let provider_name = provider.name.clone();
+    let routing = if provider.routing.is_empty() {
+        "smart"
+    } else {
+        &provider.routing
+    };
+    let message = format!("✓ {provider_name} key routing: {routing}");
+    store(file)?;
+    println!("{message}");
+    Ok(())
+}
+
+fn normalize_routing(value: &str) -> Result<String> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "" | "smart" | "default" => Ok(String::new()),
+        "order" => Ok("order".to_owned()),
+        "rotate" | "round-robin" => Ok("rotate".to_owned()),
+        "usage" | "least-used" => Ok("usage".to_owned()),
+        value => bail!("unknown key routing {value:?}; use smart, order, rotate or usage"),
+    }
 }
 
 fn remove(id: &str) -> Result<()> {
@@ -1492,5 +1938,31 @@ mod tests {
         });
         let file: ProviderFile = serde_json::from_value(value.clone()).unwrap();
         assert_eq!(serde_json::to_value(file).unwrap(), value);
+    }
+
+    #[test]
+    fn key_accounts_keep_unknown_fields_when_saved() {
+        let value = serde_json::json!({
+            "name": "Team",
+            "key": "secret",
+            "off": true,
+            "protocol": "anthropic",
+            "futureField": {"enabled": true}
+        });
+        let key: KeyAccount = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(serde_json::to_value(key).unwrap(), value);
+    }
+
+    #[test]
+    fn key_ids_match_go_gateway_fingerprints() {
+        assert_eq!(key_id("k"), "8254c329a9");
+    }
+
+    #[test]
+    fn provider_key_routing_accepts_documented_aliases() {
+        assert_eq!(normalize_routing("smart").unwrap(), "");
+        assert_eq!(normalize_routing("round-robin").unwrap(), "rotate");
+        assert_eq!(normalize_routing("least-used").unwrap(), "usage");
+        assert!(normalize_routing("random").is_err());
     }
 }

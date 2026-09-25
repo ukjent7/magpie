@@ -37,6 +37,8 @@ pub struct Model {
     pub image_input: Option<bool>,
     #[serde(alias = "Context")]
     pub context: usize,
+    #[serde(alias = "Keys", skip_serializing_if = "Vec::is_empty")]
+    pub keys: Vec<String>,
 }
 
 #[derive(Default, Deserialize, Serialize)]
@@ -392,6 +394,7 @@ fn catalog_models(provider_id: &str) -> Vec<Model> {
                     } else {
                         raw.limit.context
                     },
+                    keys: Vec::new(),
                 }
             })
         })
