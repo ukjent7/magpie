@@ -1,6 +1,12 @@
 name: Rust format
 
 on:
+  push:
+    paths:
+      - .github/workflows/rust-format.yml
+      - Cargo.toml
+      - Cargo.lock
+      - src/**/*.rs
   workflow_dispatch:
 
 permissions:
