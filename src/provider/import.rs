@@ -18,19 +18,35 @@ use super::{
 };
 
 pub(crate) async fn command(args: &[String]) -> Result<()> {
+    if args
+        .iter()
+        .find(|argument| !matches!(argument.as_str(), "-y" | "--yes"))
+        .is_some_and(|argument| {
+            matches!(
+                argument.as_str(),
+                "apps" | "claude" | "codex" | "claude-code"
+            )
+        })
+    {
+        return super::import_apps::command(args);
+    }
+
     let mut confirm_automatically = false;
     let mut link = None;
     for argument in args {
         match argument.as_str() {
             "-y" | "--yes" => confirm_automatically = true,
             value if value.starts_with('-') => {
-                bail!("unknown flag {value} (magpie import [-y] <link>)")
+                bail!(
+                    "unknown flag {value} (magpie import [-y] <link> | magpie import apps [claude|codex] [-y])"
+                )
             }
             _ if link.is_none() => link = Some(argument.as_str()),
             _ => bail!("usage: magpie import [-y] <link>"),
         }
     }
-    let link = link.context("usage: magpie import [-y] <link>")?;
+    let link =
+        link.context("usage: magpie import [-y] <link> | magpie import apps [claude|codex] [-y]")?;
     let mut provider = parse_import(link)?;
     let existing = load()?
         .providers

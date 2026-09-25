@@ -259,6 +259,7 @@ fn usage() -> String {
         "  magpie backup [--no-keys] [file] encrypt settings into a backup",
         "  magpie restore [--no-agents] <file> restore an encrypted backup",
         "  magpie import [-y] <link>       add a provider from a magpie:// link",
+        "  magpie import apps [claude|codex] [-y] import configured providers",
         "",
         "  magpie providers                list API providers",
         "  magpie models                   list exposed provider models",

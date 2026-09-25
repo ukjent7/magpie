@@ -17,6 +17,7 @@ use crate::settings;
 mod balance;
 mod icon;
 mod import;
+mod import_apps;
 mod test;
 pub(crate) use import::command as import_command;
 

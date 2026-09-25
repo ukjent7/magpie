@@ -274,6 +274,12 @@ Opening one brings up magpie with what the link would add: the name, the
 hosts your prompts and key would go to, the models. Nothing is saved until
 you press *Add*. `magpie import <link>` does the same in a terminal.
 
+The Rust CLI can also import explicit provider settings from Claude Code or
+Codex. `magpie import apps` previews both; `magpie import apps claude` and
+`magpie import apps codex` select one source. It asks before saving by
+default; add `--yes` to skip the prompt. Shell environment variables are
+never read as provider credentials.
+
 | Parameter   | Meaning                                                            |
 | ----------- | ------------------------------------------------------------------ |
 | `preset`    | a preset id (`magpie presets`); its endpoints are used             |
