@@ -512,6 +512,7 @@ pub(crate) struct Provider {
 #[derive(Clone)]
 pub(crate) enum ProviderAccount {
     Codex { auth_file: PathBuf },
+    Copilot { account: crate::copilot::Account },
 }
 
 pub(crate) struct GatewayProvider {
@@ -528,7 +529,8 @@ pub(crate) struct GatewayProvider {
     pub(crate) headers: BTreeMap<String, String>,
     pub(crate) models: Vec<String>,
     pub(crate) model_keys: HashMap<String, HashSet<String>>,
-    pub(crate) codex_auth_file: Option<PathBuf>,
+    pub(crate) model_apis: HashMap<String, HashSet<String>>,
+    pub(crate) account: Option<ProviderAccount>,
     pub(crate) hidden: bool,
 }
 
@@ -549,23 +551,37 @@ pub(crate) fn key_id(key: &str) -> String {
 }
 
 fn providers_with_local_accounts(mut providers: Vec<Provider>) -> Vec<Provider> {
-    if providers.iter().any(|provider| provider.id == "codex") {
-        return providers;
+    if !providers.iter().any(|provider| provider.id == "codex")
+        && let Some(auth_file) = crate::codex::signed_in_auth_file()
+    {
+        providers.push(Provider {
+            id: "codex".to_owned(),
+            name: "Codex".to_owned(),
+            icon: "codex-color".to_owned(),
+            responses: "https://chatgpt.com/backend-api/codex".to_owned(),
+            catalog: "codex".to_owned(),
+            website: "https://chatgpt.com/codex".to_owned(),
+            models: Vec::new(),
+            account: Some(ProviderAccount::Codex { auth_file }),
+            ..Provider::default()
+        });
     }
-    let Some(auth_file) = crate::codex::signed_in_auth_file() else {
-        return providers;
-    };
-    providers.push(Provider {
-        id: "codex".to_owned(),
-        name: "Codex".to_owned(),
-        icon: "codex-color".to_owned(),
-        responses: "https://chatgpt.com/backend-api/codex".to_owned(),
-        catalog: "codex".to_owned(),
-        website: "https://chatgpt.com/codex".to_owned(),
-        models: Vec::new(),
-        account: Some(ProviderAccount::Codex { auth_file }),
-        ..Provider::default()
-    });
+    if !providers.iter().any(|provider| provider.id == "copilot")
+        && let Some(account) = crate::copilot::signed_in_account()
+    {
+        providers.push(Provider {
+            id: "copilot".to_owned(),
+            name: "Copilot".to_owned(),
+            icon: "githubcopilot".to_owned(),
+            chat: "https://api.githubcopilot.com".to_owned(),
+            responses: "https://api.githubcopilot.com".to_owned(),
+            anthropic: "https://api.githubcopilot.com".to_owned(),
+            catalog: "copilot".to_owned(),
+            website: "https://github.com/features/copilot".to_owned(),
+            account: Some(ProviderAccount::Copilot { account }),
+            ..Provider::default()
+        });
+    }
     providers
 }
 
@@ -577,6 +593,15 @@ fn has_provider_credential(provider: &Provider) -> bool {
             .any(|key| !key.off && !key.key.is_empty())
         || provider.is_local()
         || provider.account.is_some()
+}
+
+fn account_label(account: &ProviderAccount) -> String {
+    match account {
+        ProviderAccount::Copilot { account } if !account.user.is_empty() => {
+            format!("signed in as {}", account.user)
+        }
+        _ => "signed in".to_owned(),
+    }
 }
 
 pub(crate) struct GatewayGroup {
@@ -630,6 +655,11 @@ pub(crate) fn gateway_catalog() -> Result<GatewayCatalog> {
                 .filter(|model| !model.keys.is_empty())
                 .map(|model| (model.id, model.keys.into_iter().collect()))
                 .collect();
+            let model_apis = crate::catalog::available_models(&provider.id, provider.catalog_id())
+                .into_iter()
+                .filter(|model| !model.apis.is_empty())
+                .map(|model| (model.id, model.apis.into_iter().collect()))
+                .collect();
             let keys = std::iter::once(GatewayKey {
                 key: provider.key.clone(),
                 protocol: provider.key_protocol.clone(),
@@ -664,9 +694,8 @@ pub(crate) fn gateway_catalog() -> Result<GatewayCatalog> {
                 headers: provider.headers,
                 models,
                 model_keys,
-                codex_auth_file: provider.account.as_ref().map(|account| match account {
-                    ProviderAccount::Codex { auth_file } => auth_file.clone(),
-                }),
+                model_apis,
+                account: provider.account.clone(),
                 hidden: provider.hidden,
             }
         })
@@ -797,8 +826,8 @@ pub fn list() -> Result<()> {
             } else {
                 Some(provider.key.as_str())
             };
-            let key = if provider.account.is_some() {
-                "● signed in".to_owned()
+            let key = if let Some(account) = provider.account.as_ref() {
+                format!("● {}", account_label(account))
             } else {
                 match key {
                     Some(key) => format!("● {}", mask(key)),
@@ -1067,7 +1096,7 @@ async fn models_command(id: &str, selected: &[String]) -> Result<()> {
         let provider = find(id)?;
         ensure!(
             provider.account.is_none(),
-            "Codex account models follow the signed-in account and cannot be selected manually"
+            "signed-in account models follow the account's available model list and cannot be selected manually"
         );
         let mut file = load()?;
         let provider = file
@@ -1104,8 +1133,14 @@ async fn test_provider_command(id: &str) -> Result<()> {
 }
 
 async fn refresh_models(provider: &Provider, report_failures: bool) -> Result<usize> {
-    if let Some(ProviderAccount::Codex { auth_file }) = provider.account.as_ref() {
-        return crate::codex::refresh_models(auth_file).await;
+    match provider.account.as_ref() {
+        Some(ProviderAccount::Codex { auth_file }) => {
+            return crate::codex::refresh_models(auth_file).await;
+        }
+        Some(ProviderAccount::Copilot { account }) => {
+            return crate::copilot::refresh_models(account).await;
+        }
+        None => {}
     }
     let mut keys = Vec::new();
     if !provider.key.is_empty() {
@@ -1353,8 +1388,8 @@ async fn show(id: &str) -> Result<()> {
     );
     println!(
         "  key: {}",
-        if provider.account.is_some() {
-            "signed in".to_owned()
+        if let Some(account) = provider.account.as_ref() {
+            account_label(account)
         } else if provider.key.is_empty() {
             "no key".to_owned()
         } else {

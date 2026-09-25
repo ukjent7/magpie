@@ -12,6 +12,7 @@ pub mod catalog;
 pub mod cli;
 mod codex;
 pub mod config;
+mod copilot;
 pub mod gateway;
 pub mod groups;
 pub mod profile;

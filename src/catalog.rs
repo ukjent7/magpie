@@ -29,6 +29,8 @@ pub struct Model {
     pub released: String,
     #[serde(alias = "Efforts")]
     pub efforts: Vec<String>,
+    #[serde(default, alias = "APIs", skip_serializing_if = "Vec::is_empty")]
+    pub apis: Vec<String>,
     #[serde(alias = "Temperature")]
     pub temperature: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]

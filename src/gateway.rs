@@ -466,7 +466,12 @@ async fn forward(
     }
     let provider = candidate.provider;
     let upstream_protocol = candidate.upstream;
-    if provider.codex_auth_file.is_some() && !streaming && response.status().is_success() {
+    if matches!(
+        provider.account.as_ref(),
+        Some(provider::ProviderAccount::Codex { .. })
+    ) && !streaming
+        && response.status().is_success()
+    {
         return codex_non_stream_response(response, affinity_record, usage_request).await;
     }
     let translated = upstream_protocol != protocol;
@@ -638,7 +643,10 @@ async fn send_upstream(
         object.insert("model".to_owned(), json!(model));
         body
     };
-    if provider.codex_auth_file.is_some() {
+    if matches!(
+        provider.account.as_ref(),
+        Some(provider::ProviderAccount::Codex { .. })
+    ) {
         body = crate::codex::request_body(&body).await;
     }
     if translated && streaming {
@@ -646,25 +654,47 @@ async fn send_upstream(
     }
     let body_value = body;
     let body = serde_json::to_vec(&body_value).context("serialize upstream request")?;
+    let (base, headers, accept) = match provider.account.as_ref() {
+        Some(provider::ProviderAccount::Codex { auth_file }) => {
+            let credentials = crate::codex::credentials(&state.client, auth_file).await?;
+            (
+                upstream_protocol.base(provider).to_owned(),
+                codex_upstream_headers(&credentials, &body_value)?,
+                None,
+            )
+        }
+        Some(provider::ProviderAccount::Copilot { account }) => {
+            let session = crate::copilot::session(&state.client, &account.github_token).await?;
+            crate::copilot::accept_model(&state.client, account, &session, model).await;
+            let base = if session.api_endpoint.is_empty() {
+                upstream_protocol.base(provider)
+            } else {
+                &session.api_endpoint
+            };
+            (
+                base.to_owned(),
+                crate::copilot::upstream_headers(&session, &body_value)?,
+                Some("application/json, text/event-stream"),
+            )
+        }
+        None => (
+            upstream_protocol.base(provider).to_owned(),
+            upstream_headers(provider, upstream_protocol, key, incoming_headers)
+                .map_err(anyhow::Error::msg)
+                .with_context(|| format!("build headers for provider {}", provider.id))?,
+            Some("application/json, text/event-stream"),
+        ),
+    };
     let url = upstream_url(
-        upstream_protocol.base(provider),
+        &base,
         path_override.unwrap_or_else(|| upstream_protocol.path()),
         query,
     )
     .with_context(|| format!("build URL for provider {}", provider.id))?;
-    let headers = if let Some(auth_file) = provider.codex_auth_file.as_deref() {
-        let credentials = crate::codex::credentials(&state.client, auth_file).await?;
-        codex_upstream_headers(&credentials, &body_value)?
-    } else {
-        upstream_headers(provider, upstream_protocol, key, incoming_headers)
-            .map_err(anyhow::Error::msg)
-            .with_context(|| format!("build headers for provider {}", provider.id))?
-    };
     let request = state.client.post(url).headers(headers);
-    let request = if provider.codex_auth_file.is_some() {
-        request
-    } else {
-        request.header(header::ACCEPT, "application/json, text/event-stream")
+    let request = match accept {
+        Some(value) => request.header(header::ACCEPT, value),
+        None => request,
     };
     request
         .body(body)
@@ -1154,6 +1184,14 @@ pub(crate) enum ApiProtocol {
 }
 
 impl ApiProtocol {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Chat => "chat",
+            Self::Responses => "responses",
+            Self::Anthropic => "anthropic",
+        }
+    }
+
     fn base(self, provider: &GatewayProvider) -> &str {
         match self {
             Self::Chat => &provider.chat,
@@ -1199,7 +1237,7 @@ fn resolve_model<'a>(
                         || provider.name.eq_ignore_ascii_case(provider_id))
             })
             .find_map(|provider| {
-                endpoint_for(protocol, provider, allow_translation)
+                endpoint_for(protocol, provider, model, allow_translation)
                     .map(|upstream| (provider, model, upstream))
             })
             .ok_or(ResolveError::Unknown);
@@ -1209,7 +1247,8 @@ fn resolve_model<'a>(
         if provider.hidden || !provider.models.iter().any(|model| model == requested) {
             return None;
         }
-        endpoint_for(protocol, provider, allow_translation).map(|upstream| (provider, upstream))
+        endpoint_for(protocol, provider, requested, allow_translation)
+            .map(|upstream| (provider, upstream))
     });
     let (provider, upstream) = matches.next().ok_or(ResolveError::Unknown)?;
     if matches.next().is_some() {
@@ -1221,9 +1260,21 @@ fn resolve_model<'a>(
 fn endpoint_for(
     protocol: ApiProtocol,
     provider: &GatewayProvider,
+    model: &str,
     allow_translation: bool,
 ) -> Option<ApiProtocol> {
-    if !protocol.base(provider).is_empty() {
+    let supports = |api: ApiProtocol| {
+        provider.model_apis.get(model).map_or_else(
+            || {
+                !matches!(
+                    provider.account.as_ref(),
+                    Some(provider::ProviderAccount::Copilot { .. })
+                ) || api == ApiProtocol::Chat
+            },
+            |apis| apis.contains(api.name()),
+        )
+    };
+    if supports(protocol) && !protocol.base(provider).is_empty() {
         return Some(protocol);
     }
     if !allow_translation {
@@ -1234,7 +1285,7 @@ fn endpoint_for(
         ApiProtocol::Anthropic => ApiProtocol::Chat,
         ApiProtocol::Responses => return None,
     };
-    (!alternative.base(provider).is_empty()).then_some(alternative)
+    (supports(alternative) && !alternative.base(provider).is_empty()).then_some(alternative)
 }
 
 fn upstream_url(base: &str, path_suffix: &str, query: Option<&str>) -> Result<Url> {
@@ -1635,7 +1686,8 @@ mod tests {
             headers: BTreeMap::new(),
             models: models.iter().map(|model| (*model).to_owned()).collect(),
             model_keys: HashMap::new(),
-            codex_auth_file: None,
+            model_apis: HashMap::new(),
+            account: None,
             hidden: false,
         }
     }
