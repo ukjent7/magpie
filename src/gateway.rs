@@ -1,4 +1,8 @@
-use std::{collections::HashSet, env, time::Duration};
+use std::{
+    collections::{HashSet, VecDeque},
+    env,
+    time::Duration,
+};
 
 use anyhow::{Context, Result, bail};
 use axum::{
@@ -9,6 +13,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post},
 };
+use futures_util::{StreamExt, stream};
 use reqwest::Client;
 use serde_json::{Value, json};
 use url::Url;
@@ -273,6 +278,9 @@ async fn forward(
                 );
             }
         };
+        if streaming {
+            body["stream"] = json!(true);
+        }
     } else if let Some(object) = body.as_object_mut() {
         object.insert("model".to_owned(), json!(upstream_model));
     } else {
@@ -337,6 +345,14 @@ async fn forward(
     if !translated || !response.status().is_success() {
         return relay(response);
     }
+    let upstream_sse = response
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.split(';').next().is_some_and(|media_type| media_type.trim() == "text/event-stream"));
+    if streaming && upstream_sse {
+        return translated_stream_response(response, upstream_protocol, protocol, &model);
+    }
 
     let status = response.status();
     let upstream_headers = response.headers().clone();
@@ -400,7 +416,7 @@ async fn forward(
         }
     };
     let bytes = if streaming {
-        match crate::translation::stream(&translated_body, protocol, &model) {
+        match crate::translation::completed_stream(&translated_body, protocol, &model) {
             Ok(bytes) => bytes,
             Err(error) => {
                 eprintln!("magpie: encode translated stream for {protocol:?}: {error:#}");
@@ -612,6 +628,74 @@ fn relay(upstream: reqwest::Response) -> Response {
     response
 }
 
+fn translated_stream_response(
+    upstream: reqwest::Response,
+    from: ApiProtocol,
+    to: ApiProtocol,
+    model: &str,
+) -> Response {
+    let status = upstream.status();
+    let upstream_headers = upstream.headers().clone();
+    let Some(translator) = crate::translation::SseTranslator::new(from, to, model) else {
+        return api_error_for(
+            to,
+            StatusCode::BAD_GATEWAY,
+            "streaming translation is not supported for this protocol pair",
+        );
+    };
+    let body_stream = stream::unfold(
+        (
+            upstream.bytes_stream(),
+            translator,
+            VecDeque::new(),
+            false,
+        ),
+        |(mut input, mut translator, mut pending, mut ended)| async move {
+            loop {
+                if let Some(frame) = pending.pop_front() {
+                    return Some((
+                        Ok::<_, reqwest::Error>(frame),
+                        (input, translator, pending, ended),
+                    ));
+                }
+                if ended {
+                    return None;
+                }
+                match input.next().await {
+                    Some(Ok(chunk)) => {
+                        pending.extend(translator.push(&chunk));
+                        ended = translator.is_ended();
+                    }
+                    Some(Err(error)) => {
+                        ended = true;
+                        return Some((Err(error), (input, translator, pending, ended)));
+                    }
+                    None => {
+                        pending.extend(translator.finish());
+                        ended = true;
+                    }
+                }
+            }
+        },
+    );
+    let mut response = Response::new(Body::from_stream(body_stream));
+    *response.status_mut() = status;
+    copy_translated_headers(&mut response, &upstream_headers);
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/event-stream; charset=utf-8"),
+    );
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("no-cache, no-transform"),
+    );
+    response.headers_mut().insert(
+        HeaderName::from_static("x-accel-buffering"),
+        HeaderValue::from_static("no"),
+    );
+    response
+}
+
 fn translated_response(
     status: StatusCode,
     upstream_headers: &HeaderMap,
@@ -620,7 +704,29 @@ fn translated_response(
 ) -> Response {
     let mut response = Response::new(Body::from(body));
     *response.status_mut() = status;
+    copy_translated_headers(&mut response, upstream_headers);
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        if streaming {
+            HeaderValue::from_static("text/event-stream; charset=utf-8")
+        } else {
+            HeaderValue::from_static("application/json")
+        },
+    );
+    if streaming {
+        response.headers_mut().insert(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static("no-cache, no-transform"),
+        );
+        response.headers_mut().insert(
+            HeaderName::from_static("x-accel-buffering"),
+            HeaderValue::from_static("no"),
+        );
+    }
+    response
+}
 
+fn copy_translated_headers(response: &mut Response, upstream_headers: &HeaderMap) {
     let connection_tokens = upstream_headers
         .get_all(header::CONNECTION)
         .iter()
@@ -649,25 +755,6 @@ fn translated_response(
         }
         response.headers_mut().append(name.clone(), value.clone());
     }
-    response.headers_mut().insert(
-        header::CONTENT_TYPE,
-        if streaming {
-            HeaderValue::from_static("text/event-stream; charset=utf-8")
-        } else {
-            HeaderValue::from_static("application/json")
-        },
-    );
-    if streaming {
-        response.headers_mut().insert(
-            header::CACHE_CONTROL,
-            HeaderValue::from_static("no-cache, no-transform"),
-        );
-        response.headers_mut().insert(
-            HeaderName::from_static("x-accel-buffering"),
-            HeaderValue::from_static("no"),
-        );
-    }
-    response
 }
 
 async fn not_found() -> Response {

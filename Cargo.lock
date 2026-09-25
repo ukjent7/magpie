@@ -832,6 +832,7 @@ dependencies = [
  "anyhow",
  "axum",
  "clap",
+ "futures-util",
  "jsonc-parser",
  "reqwest",
  "serde",
