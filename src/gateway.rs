@@ -1162,7 +1162,7 @@ fn relay(
             affinity_record,
             usage_request,
         ),
-        |(mut input, mut scanner, mut affinity_record, mut usage_request)| async move {
+        move |(mut input, mut scanner, mut affinity_record, mut usage_request)| async move {
             match input.next().await {
                 Some(Ok(chunk)) => {
                     if let Some(scanner) = scanner.as_mut() {
@@ -1261,7 +1261,7 @@ fn translated_stream_response(
             affinity_record,
             usage_request,
         ),
-        |(
+        move |(
             mut input,
             mut translator,
             mut pending,
