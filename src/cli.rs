@@ -41,6 +41,8 @@ pub fn entry() -> ExitCode {
 }
 
 fn run(cli: Cli) -> Result<()> {
+    settings::migrate();
+
     if cli.help {
         println!("{}", usage());
         return Ok(());

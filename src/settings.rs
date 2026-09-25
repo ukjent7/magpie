@@ -41,6 +41,24 @@ pub fn profiles_path() -> PathBuf {
     config_dir().join("magpie/profiles.json")
 }
 
+pub fn migrate() {
+    let config = config_dir();
+    copy_tree(&config.join("dial"), &config.join("magpie"));
+
+    let cache = env::var_os("XDG_CACHE_HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            env::var_os("HOME")
+                .filter(|value| !value.is_empty())
+                .or_else(|| env::var_os("USERPROFILE").filter(|value| !value.is_empty()))
+                .map(PathBuf::from)
+                .map(|home| home.join(".cache"))
+        })
+        .unwrap_or_else(|| PathBuf::from(".cache"));
+    copy_tree(&cache.join("dial"), &cache.join("magpie"));
+}
+
 pub fn load() -> Settings {
     let path = path();
     let Ok(contents) = fs::read_to_string(path) else {
@@ -70,6 +88,41 @@ fn config_dir() -> PathBuf {
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".config")
+}
+
+fn copy_tree(source: &std::path::Path, destination: &std::path::Path) {
+    if destination.exists() || !source.is_dir() || fs::create_dir(destination).is_err() {
+        return;
+    }
+    copy_contents(source, destination);
+    if let Ok(metadata) = fs::metadata(source) {
+        let _ = fs::set_permissions(destination, metadata.permissions());
+    }
+}
+
+fn copy_contents(source: &std::path::Path, destination: &std::path::Path) {
+    let Ok(entries) = fs::read_dir(source) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let source_path = entry.path();
+        let destination_path = destination.join(entry.file_name());
+        let Ok(kind) = entry.file_type() else {
+            continue;
+        };
+        if kind.is_dir() {
+            if fs::create_dir(&destination_path).is_ok() {
+                copy_contents(&source_path, &destination_path);
+                if let Ok(metadata) = fs::metadata(source_path) {
+                    let _ = fs::set_permissions(destination_path, metadata.permissions());
+                }
+            }
+        } else if kind.is_file() && fs::copy(&source_path, &destination_path).is_ok()
+            && let Ok(metadata) = fs::metadata(source_path)
+        {
+            let _ = fs::set_permissions(destination_path, metadata.permissions());
+        }
+    }
 }
 
 #[cfg(test)]
