@@ -7,7 +7,359 @@ use url::Url;
 
 use crate::settings;
 
-const USAGE: &str = "usage: magpie providers | magpie provider <id> | magpie provider add <name> id=<id> url=<url> key=<key> [header.X-Name=value] | magpie provider key <id> <key> | magpie provider rm <id>";
+const USAGE: &str = "usage: magpie presets | magpie providers | magpie provider <id> | magpie provider add <preset> [key] | magpie provider add <name> id=<id> url=<url> key=<key> | magpie provider key <id> <key> | magpie provider rm <id>";
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PresetKind {
+    Vendor,
+    Relay,
+    Local,
+}
+
+struct Preset {
+    id: &'static str,
+    name: &'static str,
+    icon: &'static str,
+    kind: PresetKind,
+    chat: &'static str,
+    responses: &'static str,
+    anthropic: &'static str,
+    catalog: &'static str,
+    website: &'static str,
+    keys_url: &'static str,
+}
+
+impl Preset {
+    const EMPTY: Self = Self {
+        id: "",
+        name: "",
+        icon: "",
+        kind: PresetKind::Vendor,
+        chat: "",
+        responses: "",
+        anthropic: "",
+        catalog: "",
+        website: "",
+        keys_url: "",
+    };
+
+    fn provider(&self) -> Provider {
+        Provider {
+            id: self.id.to_owned(),
+            name: self.name.to_owned(),
+            icon: self.icon.to_owned(),
+            preset: self.id.to_owned(),
+            chat: self.chat.to_owned(),
+            responses: self.responses.to_owned(),
+            anthropic: self.anthropic.to_owned(),
+            catalog: self.catalog.to_owned(),
+            website: self.website.to_owned(),
+            keys_url: self.keys_url.to_owned(),
+            ..Provider::default()
+        }
+    }
+}
+
+const PRESETS: &[Preset] = &[
+    Preset {
+        id: "anthropic",
+        name: "Anthropic",
+        icon: "claude-color",
+        anthropic: "https://api.anthropic.com",
+        catalog: "anthropic",
+        website: "https://console.anthropic.com",
+        keys_url: "https://console.anthropic.com/settings/keys",
+        ..Preset::EMPTY
+    },
+    Preset {
+        id: "openai",
+        name: "OpenAI",
+        icon: "openai",
+        chat: "https://api.openai.com/v1",
+        responses: "https://api.openai.com/v1",
+        catalog: "openai",
+        website: "https://platform.openai.com",
+        keys_url: "https://platform.openai.com/api-keys",
+        ..Preset::EMPTY
+    },
+    Preset {
+        id: "google",
+        name: "Google Gemini",
+        icon: "gemini-color",
+        chat: "https://generativelanguage.googleapis.com/v1beta/openai",
+        catalog: "google",
+        website: "https://aistudio.google.com",
+        keys_url: "https://aistudio.google.com/apikey",
+        ..Preset::EMPTY
+    },
+    Preset {
+        id: "deepseek",
+        name: "DeepSeek",
+        icon: "deepseek-color",
+        chat: "https://api.deepseek.com/v1",
+        responses: "https://api.deepseek.com/v1",
+        anthropic: "https://api.deepseek.com/anthropic",
+        catalog: "deepseek",
+        website: "https://platform.deepseek.com",
+        keys_url: "https://platform.deepseek.com/api_keys",
+        ..Preset::EMPTY
+    },
+    Preset {
+        id: "xai",
+        name: "xAI",
+        icon: "xai",
+        chat: "https://api.x.ai/v1",
+        responses: "https://api.x.ai/v1",
+        anthropic: "https://api.x.ai",
+        catalog: "xai",
+        website: "https://console.x.ai",
+        keys_url: "https://console.x.ai",
+        ..Preset::EMPTY
+    },
+    Preset {
+        id: "moonshot",
+        name: "Kimi",
+        icon: "kimi",
+        chat: "https://api.moonshot.ai/v1",
+        anthropic: "https://api.moonshot.ai/anthropic",
+        catalog: "moonshotai",
+        website: "https://platform.moonshot.ai",
+        keys_url: "https://platform.moonshot.ai/console/api-keys",
+        ..Preset::EMPTY
+    },
+    Preset {
+        id: "moonshot-cn",
+        name: "Kimi (China)",
+        icon: "kimi",
+        chat: "https://api.moonshot.cn/v1",
+        anthropic: "https://api.moonshot.cn/anthropic",
+        catalog: "moonshotai",
+        website: "https://platform.moonshot.cn",
+        keys_url: "https://platform.moonshot.cn/console/api-keys",
+        ..Preset::EMPTY
+    },
+    Preset {
+        id: "zhipu",
+        name: "Zhipu GLM",
+        icon: "zhipu-color",
+        chat: "https://open.bigmodel.cn/api/paas/v4",
+        anthropic: "https://open.bigmodel.cn/api/anthropic",
+        catalog: "zhipuai",
+        website: "https://open.bigmodel.cn",
+        keys_url: "https://open.bigmodel.cn/usercenter/proj-mgmt/apikeys",
+        ..Preset::EMPTY
+    },
+    Preset {
+        id: "zai",
+        name: "Z.ai",
+        icon: "zai",
+        chat: "https://api.z.ai/api/paas/v4",
+        anthropic: "https://api.z.ai/api/anthropic",
+        catalog: "zhipuai",
+        website: "https://z.ai",
+        keys_url: "https://z.ai/manage-apikey/apikey-list",
+        ..Preset::EMPTY
+    },
+    Preset {
+        id: "minimax",
+        name: "MiniMax",
+        icon: "minimax-color",
+        chat: "https://api.minimax.io/v1",
+        anthropic: "https://api.minimax.io/anthropic",
+        catalog: "minimax",
+        website: "https://platform.minimax.io",
+        keys_url: "https://platform.minimax.io/user-center/basic-information/interface-key",
+        ..Preset::EMPTY
+    },
+    Preset {
+        id: "minimax-cn",
+        name: "MiniMax (China)",
+        icon: "minimax-color",
+        chat: "https://api.minimaxi.com/v1",
+        anthropic: "https://api.minimaxi.com/anthropic",
+        catalog: "minimax",
+        website: "https://platform.minimaxi.com",
+        keys_url: "https://platform.minimaxi.com/user-center/basic-information/interface-key",
+        ..Preset::EMPTY
+    },
+    Preset {
+        id: "qwen",
+        name: "Qwen",
+        icon: "qwen-color",
+        chat: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+        anthropic: "https://dashscope-intl.aliyuncs.com/apps/anthropic",
+        catalog: "alibaba",
+        website: "https://modelstudio.console.alibabacloud.com",
+        keys_url: "https://modelstudio.console.alibabacloud.com/?tab=playground#/api-key",
+        ..Preset::EMPTY
+    },
+    Preset {
+        id: "qwen-cn",
+        name: "Qwen (China)",
+        icon: "qwen-color",
+        chat: "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        anthropic: "https://dashscope.aliyuncs.com/apps/anthropic",
+        catalog: "alibaba",
+        website: "https://bailian.console.aliyun.com",
+        keys_url: "https://bailian.console.aliyun.com/?tab=model#/api-key",
+        ..Preset::EMPTY
+    },
+    Preset {
+        id: "mistral",
+        name: "Mistral",
+        icon: "mistral-color",
+        chat: "https://api.mistral.ai/v1",
+        catalog: "mistral",
+        website: "https://console.mistral.ai",
+        keys_url: "https://console.mistral.ai/api-keys",
+        ..Preset::EMPTY
+    },
+    Preset {
+        id: "groq",
+        name: "Groq",
+        icon: "groq",
+        chat: "https://api.groq.com/openai/v1",
+        responses: "https://api.groq.com/openai/v1",
+        catalog: "groq",
+        website: "https://console.groq.com",
+        keys_url: "https://console.groq.com/keys",
+        ..Preset::EMPTY
+    },
+    Preset {
+        id: "ollama-cloud",
+        name: "Ollama Cloud",
+        icon: "ollama",
+        chat: "https://ollama.com/v1",
+        anthropic: "https://ollama.com",
+        catalog: "ollama-cloud",
+        website: "https://docs.ollama.com/cloud",
+        keys_url: "https://ollama.com/settings/keys",
+        ..Preset::EMPTY
+    },
+    Preset {
+        id: "openrouter",
+        name: "OpenRouter",
+        icon: "openrouter",
+        kind: PresetKind::Relay,
+        chat: "https://openrouter.ai/api/v1",
+        anthropic: "https://openrouter.ai/api",
+        catalog: "openrouter",
+        website: "https://openrouter.ai",
+        keys_url: "https://openrouter.ai/keys",
+        ..Preset::EMPTY
+    },
+    Preset {
+        id: "opencode-go",
+        name: "OpenCode Go",
+        icon: "opencode",
+        kind: PresetKind::Relay,
+        chat: "https://opencode.ai/zen/go/v1",
+        responses: "https://opencode.ai/zen/go/v1",
+        anthropic: "https://opencode.ai/zen/go",
+        catalog: "opencode-go",
+        website: "https://opencode.ai/docs/go",
+        keys_url: "https://opencode.ai/auth",
+        ..Preset::EMPTY
+    },
+    Preset {
+        id: "opencode-zen",
+        name: "OpenCode Zen",
+        icon: "opencode",
+        kind: PresetKind::Relay,
+        chat: "https://opencode.ai/zen/v1",
+        responses: "https://opencode.ai/zen/v1",
+        anthropic: "https://opencode.ai/zen",
+        catalog: "opencode",
+        website: "https://opencode.ai/docs/zen",
+        keys_url: "https://opencode.ai/auth",
+        ..Preset::EMPTY
+    },
+    Preset {
+        id: "together",
+        name: "Together AI",
+        icon: "together-color",
+        kind: PresetKind::Relay,
+        chat: "https://api.together.xyz/v1",
+        catalog: "togetherai",
+        website: "https://api.together.ai",
+        keys_url: "https://api.together.ai/settings/api-keys",
+        ..Preset::EMPTY
+    },
+    Preset {
+        id: "fireworks",
+        name: "Fireworks",
+        icon: "fireworks-color",
+        kind: PresetKind::Relay,
+        chat: "https://api.fireworks.ai/inference/v1",
+        catalog: "fireworks-ai",
+        website: "https://fireworks.ai",
+        keys_url: "https://app.fireworks.ai/settings/users/api-keys",
+        ..Preset::EMPTY
+    },
+    Preset {
+        id: "siliconflow",
+        name: "SiliconFlow",
+        icon: "siliconcloud-color",
+        kind: PresetKind::Relay,
+        chat: "https://api.siliconflow.cn/v1",
+        catalog: "siliconflow",
+        website: "https://cloud.siliconflow.cn",
+        keys_url: "https://cloud.siliconflow.cn/account/ak",
+        ..Preset::EMPTY
+    },
+    Preset {
+        id: "aihubmix",
+        name: "AiHubMix",
+        icon: "aihubmix-color",
+        kind: PresetKind::Relay,
+        chat: "https://aihubmix.com/v1",
+        anthropic: "https://aihubmix.com",
+        website: "https://aihubmix.com",
+        keys_url: "https://console.aihubmix.com/token",
+        ..Preset::EMPTY
+    },
+    Preset {
+        id: "302ai",
+        name: "302.AI",
+        icon: "ai302-color",
+        kind: PresetKind::Relay,
+        chat: "https://api.302.ai/v1",
+        anthropic: "https://api.302.ai",
+        website: "https://302.ai",
+        keys_url: "https://302.ai/api-keys/list",
+        ..Preset::EMPTY
+    },
+    Preset {
+        id: "yylx",
+        name: "鱼鱼连线",
+        icon: "yylx",
+        kind: PresetKind::Relay,
+        chat: "https://app.yylx.io/v1",
+        anthropic: "https://app.yylx.io",
+        website: "https://yylx.io",
+        keys_url: "https://app.yylx.io/keys",
+        ..Preset::EMPTY
+    },
+    Preset {
+        id: "ollama",
+        name: "Ollama",
+        icon: "ollama",
+        kind: PresetKind::Local,
+        chat: "http://localhost:11434/v1",
+        anthropic: "http://localhost:11434",
+        website: "https://ollama.com",
+        ..Preset::EMPTY
+    },
+    Preset {
+        id: "lmstudio",
+        name: "LM Studio",
+        icon: "lmstudio",
+        kind: PresetKind::Local,
+        chat: "http://localhost:1234/v1",
+        website: "https://lmstudio.ai",
+        ..Preset::EMPTY
+    },
+];
 
 #[derive(Default, Deserialize, Serialize)]
 #[serde(default)]
@@ -124,9 +476,28 @@ pub fn list() -> Result<()> {
     Ok(())
 }
 
+pub fn presets() -> Result<()> {
+    for (kind, label) in [
+        (PresetKind::Vendor, "vendors"),
+        (PresetKind::Relay, "relays"),
+        (PresetKind::Local, "local"),
+    ] {
+        println!("{label}:");
+        for preset in PRESETS.iter().filter(|preset| preset.kind == kind) {
+            let endpoint = [preset.chat, preset.responses, preset.anthropic]
+                .into_iter()
+                .find(|url| !url.is_empty())
+                .unwrap_or("no endpoint");
+            println!("  {:16} {:20} {endpoint}", preset.id, preset.name);
+        }
+    }
+    Ok(())
+}
+
 pub fn command(args: &[String]) -> Result<()> {
     match args {
         [] => bail!("{USAGE}"),
+        [verb] if verb == "presets" => presets(),
         [verb, rest @ ..] if verb == "add" => add(rest),
         [verb, id, key] if verb == "key" => change_key(id, key),
         [verb, id] if verb == "rm" => remove(id),
@@ -139,10 +510,23 @@ fn add(args: &[String]) -> Result<()> {
     let [name, assignments @ ..] = args else {
         bail!("{USAGE}");
     };
-    let mut provider = Provider {
-        name: name.trim().to_owned(),
-        ..Provider::default()
-    };
+    let preset = find_preset(name);
+    let mut provider = preset.map_or_else(
+        || Provider {
+            name: name.trim().to_owned(),
+            ..Provider::default()
+        },
+        Preset::provider,
+    );
+    let mut assignments = assignments;
+    if preset.is_some() {
+        if let [key] = assignments {
+            if !is_provider_assignment(key) {
+                provider.key = key.trim().to_owned();
+                assignments = &[];
+            }
+        }
+    }
 
     for assignment in assignments {
         let (key, value) = assignment
@@ -344,6 +728,40 @@ fn store(file: ProviderFile) -> Result<()> {
         .with_context(|| format!("write {}", path.display()))
 }
 
+fn find_preset(query: &str) -> Option<&'static Preset> {
+    let query = query.trim();
+    PRESETS.iter().find(|preset| {
+        preset.id.eq_ignore_ascii_case(query) || preset.name.eq_ignore_ascii_case(query)
+    })
+}
+
+fn is_provider_assignment(value: &str) -> bool {
+    let Some((name, _)) = value.split_once('=') else {
+        return false;
+    };
+    let normalized = name.to_ascii_lowercase();
+    matches!(
+        normalized.as_str(),
+        "id" | "name"
+            | "url"
+            | "chat"
+            | "responses"
+            | "anthropic"
+            | "key"
+            | "icon"
+            | "catalog"
+            | "website"
+            | "keysurl"
+            | "balance"
+            | "balance.path"
+            | "models"
+            | "fallback"
+            | "routing"
+            | "affinity"
+            | "stays"
+    ) || normalized.starts_with("header.")
+}
+
 fn normalize_url(value: &str) -> Result<String> {
     let value = value.trim();
     if value.is_empty() {
@@ -405,6 +823,38 @@ fn mask(secret: &str) -> String {
 
 fn is_false(value: &bool) -> bool {
     !value
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn presets_build_providers_with_protocol_specific_endpoints() {
+        let provider = find_preset("OpenAI")
+            .expect("OpenAI should be a built-in preset")
+            .provider();
+        assert_eq!(provider.id, "openai");
+        assert_eq!(provider.chat, "https://api.openai.com/v1");
+        assert_eq!(provider.responses, provider.chat);
+        assert!(provider.key.is_empty());
+    }
+
+    #[test]
+    fn local_presets_are_keyless_and_recognized_as_local() {
+        let provider = find_preset("ollama")
+            .expect("Ollama should be a built-in preset")
+            .provider();
+        assert!(provider.key.is_empty());
+        assert!(provider.is_local());
+    }
+
+    #[test]
+    fn raw_preset_keys_can_contain_equals_signs() {
+        assert!(!is_provider_assignment("sk-example=="));
+        assert!(is_provider_assignment("key=sk-example"));
+        assert!(is_provider_assignment("header.Authorization=Token"));
+    }
 }
 
 impl Provider {
