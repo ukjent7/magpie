@@ -5,7 +5,7 @@ use clap::{ArgAction, Parser};
 
 use crate::{agent, profile, settings};
 
-const VERSION: &str = env!("CARGO_PKG_VERSION");
+const VERSION: &str = crate::VERSION;
 
 #[derive(Debug, Parser)]
 #[command(name = "magpie", disable_help_flag = true, disable_version_flag = true)]
@@ -102,6 +102,7 @@ async fn run(cli: Cli) -> Result<()> {
         [command, rest @ ..] if command == "backup" => crate::backup::backup_command(rest),
         [command, rest @ ..] if command == "restore" => crate::backup::restore_command(rest),
         [command, rest @ ..] if command == "import" => crate::provider::import_command(rest).await,
+        [command, rest @ ..] if command == "update" => crate::update::command(rest).await,
         [command] if command == "ls" || command == "list" => list_agents(true),
         [command] if command == "providers" => crate::provider::list(),
         [command] if command == "models" => crate::provider::models().await,
@@ -268,6 +269,7 @@ fn usage() -> String {
         "  magpie group rm <id>            remove a routing group",
         "  magpie presets                  list provider presets",
         "  magpie sync                     refresh the model catalog",
+        "  magpie update [check]           check for or install an update",
         "  magpie serve                    run the local API gateway",
         "  magpie provider <id>            show a provider",
         "  magpie provider add <preset> [key]",
