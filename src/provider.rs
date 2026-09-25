@@ -3,6 +3,7 @@ use std::{
     fs,
     path::PathBuf,
     str::FromStr,
+    time::Duration,
 };
 
 use anyhow::{Context, Result, bail, ensure};
@@ -809,6 +810,27 @@ pub async fn models() -> Result<()> {
     Ok(())
 }
 
+pub(crate) async fn sync_live_models() -> Result<Vec<(String, usize)>> {
+    let providers = load()?.providers;
+    let mut refreshed = Vec::new();
+
+    for provider in providers.into_iter().filter(|provider| {
+        !provider.hidden
+            && (!provider.key.is_empty() || provider.is_local())
+            && (!provider.chat.is_empty()
+                || !provider.responses.is_empty()
+                || !provider.anthropic.is_empty())
+    }) {
+        let result =
+            tokio::time::timeout(Duration::from_secs(8), refresh_models(&provider, false)).await;
+        if let Ok(Ok(count)) = result {
+            refreshed.push((provider.id, count));
+        }
+    }
+
+    Ok(refreshed)
+}
+
 pub async fn command(args: &[String]) -> Result<()> {
     match args {
         [] => bail!("{USAGE}"),
@@ -849,6 +871,12 @@ async fn models_command(id: &str, selected: &[String]) -> Result<()> {
     }
 
     let provider = find(id)?;
+    let count = refresh_models(&provider, true).await?;
+    println!("✓ fetched {count} models from {}", provider.host());
+    show(&provider.id)
+}
+
+async fn refresh_models(provider: &Provider, report_failures: bool) -> Result<usize> {
     let mut keys = Vec::new();
     if !provider.key.is_empty() {
         keys.push((provider.key.clone(), provider.key_protocol.clone()));
@@ -865,7 +893,7 @@ async fn models_command(id: &str, selected: &[String]) -> Result<()> {
     }
 
     let old_models = crate::catalog::live_models(&provider.id);
-    let provider_ref = &provider;
+    let provider_ref = provider;
     let provider_headers = &provider.headers;
     let fetched = futures_util::future::join_all(keys.iter().map(|(key, protocol)| async move {
         let endpoints = model_endpoints(provider_ref, protocol)?;
@@ -911,10 +939,12 @@ async fn models_command(id: &str, selected: &[String]) -> Result<()> {
                 }
             }
             Err(error) => {
-                eprintln!(
-                    "magpie: model list fetch failed for key {}: {error:#}",
-                    fingerprint.as_deref().unwrap_or("primary")
-                );
+                if report_failures {
+                    eprintln!(
+                        "magpie: model list fetch failed for key {}: {error:#}",
+                        fingerprint.as_deref().unwrap_or("primary")
+                    );
+                }
                 last_error = Some(error);
                 if let Some(fingerprint) = fingerprint {
                     for model in old_models
@@ -935,8 +965,7 @@ async fn models_command(id: &str, selected: &[String]) -> Result<()> {
     }
     let count = models.len();
     crate::catalog::save_live(&provider.id, &base, models)?;
-    println!("✓ fetched {count} models from {}", provider.host());
-    show(&provider.id)
+    Ok(count)
 }
 
 fn model_endpoints<'a>(provider: &'a Provider, protocol: &str) -> Result<Vec<(&'a str, bool)>> {

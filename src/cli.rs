@@ -87,6 +87,15 @@ async fn run(cli: Cli) -> Result<()> {
         [command] if command == "sync" => {
             let providers = crate::catalog::sync_models_dev().await?;
             println!("✓ refreshed models.dev for {providers} providers");
+            let refreshed = crate::provider::sync_live_models().await?;
+            if !refreshed.is_empty() {
+                let models = refreshed
+                    .iter()
+                    .map(|(id, count)| format!("{id} ({count})"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                println!("✓ model lists: {models}");
+            }
             Ok(())
         }
         [command, rest @ ..] if command == "serve" => crate::gateway::command(rest).await,
