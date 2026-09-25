@@ -71,9 +71,10 @@ async fn run(cli: Cli) -> Result<()> {
             println!("magpie {VERSION}");
             Ok(())
         }
-        [command] if matches!(command.as_str(), "app" | "gui" | "tray" | "tui") => {
-            bail!("the Rust migration does not include the desktop or terminal interface yet")
+        [command] if matches!(command.as_str(), "app" | "gui" | "tray") => {
+            bail!("the Rust build does not include the desktop interface yet")
         }
+        [command, rest @ ..] if command == "tui" => crate::tui::command(rest).await,
         [command] if command == "agents" => list_agents(false),
         [command] if command == "presets" => crate::provider::presets(),
         [command] if command == "sync" => {
@@ -227,6 +228,7 @@ fn usage() -> String {
         "",
         "  magpie agents                   list every supported agent",
         "  magpie ls                       list agents detected on this machine",
+        "  magpie tui                      open the terminal interface",
         "  magpie <agent>                  show its current settings",
         "  magpie <agent> <model>          set its model",
         "  magpie <agent> <field> <value>  set one field",

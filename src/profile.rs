@@ -26,10 +26,46 @@ pub fn list(args: &[String]) -> Result<()> {
     Ok(())
 }
 
+pub fn list_entries() -> Result<Vec<(String, String)>> {
+    Ok(load()?
+        .into_iter()
+        .map(|(name, values)| {
+            let count = values
+                .keys()
+                .filter(|key| key.as_str() != "library")
+                .count();
+            (name, format!("{count} settings"))
+        })
+        .collect())
+}
+
+pub fn snapshot_entries() -> Result<Vec<(String, String)>> {
+    let mut snapshot = Vec::new();
+    for current in agent::all().into_iter().filter(|current| current.is_detected()) {
+        for (field, value) in current.values()? {
+            if !value.is_empty() {
+                snapshot.push((format!("{}.{field}", current.spec.id), value));
+            }
+        }
+    }
+    Ok(snapshot)
+}
+
 pub fn save(args: &[String]) -> Result<()> {
     let [name] = args else {
         bail!("usage: magpie save <name>");
     };
+    let name = name.trim();
+    if name.is_empty() {
+        bail!("profile name is empty");
+    }
+
+    save_named(name)?;
+    println!("✓ saved profile {name}");
+    Ok(())
+}
+
+pub fn save_named(name: &str) -> Result<()> {
     let name = name.trim();
     if name.is_empty() {
         bail!("profile name is empty");
@@ -70,7 +106,6 @@ pub fn save(args: &[String]) -> Result<()> {
     }
     profiles.insert(name.to_owned(), snapshot);
     settings::write_json(&settings::profiles_path(), &profiles)?;
-    println!("✓ saved profile {name}");
     Ok(())
 }
 
@@ -78,6 +113,12 @@ pub fn apply(args: &[String]) -> Result<()> {
     let [name] = args else {
         bail!("usage: magpie use <name>");
     };
+    let changed = apply_named(name)?;
+    println!("✓ applied {name} ({changed} settings changed)");
+    Ok(())
+}
+
+pub fn apply_named(name: &str) -> Result<usize> {
     let profiles = load()?;
     let profile = profiles
         .get(name)
@@ -115,20 +156,24 @@ pub fn apply(args: &[String]) -> Result<()> {
             _ => continue,
         }
     }
-    println!("✓ applied {name} ({changed} settings changed)");
-    Ok(())
+    Ok(changed)
 }
 
 pub fn remove(args: &[String]) -> Result<()> {
     let [name] = args else {
         bail!("usage: magpie rm <name>");
     };
+    delete_named(name)?;
+    println!("✓ removed profile {name}");
+    Ok(())
+}
+
+pub fn delete_named(name: &str) -> Result<()> {
     let mut profiles = load()?;
     if profiles.remove(name).is_none() {
         bail!("no profile named {name:?}");
     }
     settings::write_json(&settings::profiles_path(), &profiles)?;
-    println!("✓ removed profile {name}");
     Ok(())
 }
 

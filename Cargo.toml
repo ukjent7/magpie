@@ -2,7 +2,7 @@
 name = "magpie"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.98"
+rust-version = "1.98.1"
 license = "MIT"
 description = "A model switchboard for local AI coding agents"
 
@@ -14,8 +14,10 @@ path = "src/main.rs"
 anyhow = "1.0.104"
 axum = "0.8.9"
 clap = { version = "4.6.7", features = ["derive"] }
+crossterm = "0.29.0"
 futures-util = "0.3.34"
 jsonc-parser = { version = "0.33.2", features = ["cst", "serde_json"] }
+ratatui = { version = "0.30.2", default-features = false, features = ["crossterm"] }
 reqwest = { version = "0.13.5", default-features = false, features = ["http2", "rustls", "stream"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"

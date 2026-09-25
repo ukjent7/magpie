@@ -2,7 +2,7 @@ use std::{
     collections::{BTreeMap, HashMap, HashSet},
     fs,
     path::PathBuf,
-    sync::OnceLock,
+    sync::{OnceLock, RwLock},
     time::{Duration, Instant, SystemTime},
 };
 
@@ -110,7 +110,7 @@ struct ModelLimit {
     input: usize,
 }
 
-static CATALOG: OnceLock<HashMap<String, CatalogProvider>> = OnceLock::new();
+static CATALOG: OnceLock<RwLock<HashMap<String, CatalogProvider>>> = OnceLock::new();
 
 pub fn live_models(provider_id: &str) -> Vec<Model> {
     let Some(path) = live_path(provider_id) else {
@@ -314,13 +314,18 @@ pub async fn sync_models_dev() -> Result<usize> {
         bytes.extend_from_slice(&chunk);
     }
     let catalog = parse_catalog(&bytes)?;
+    let provider_count = catalog.len();
     let path = catalog_path();
     let parent = path.parent().context("catalog path has no parent")?;
     fs::create_dir_all(parent)
         .with_context(|| format!("create catalog directory {}", parent.display()))?;
     config::atomic_write_for_settings(&path, &bytes)
         .with_context(|| format!("write models.dev catalog {}", path.display()))?;
-    Ok(catalog.len())
+    let cache = CATALOG.get_or_init(|| RwLock::new(HashMap::new()));
+    *cache
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = catalog;
+    Ok(provider_count)
 }
 
 pub fn is_stale() -> bool {
@@ -345,11 +350,15 @@ pub async fn sync_if_stale() -> Result<Option<usize>> {
 
 fn catalog_models(provider_id: &str) -> Vec<Model> {
     let providers = CATALOG.get_or_init(|| {
-        fs::read(catalog_path())
+        let providers = fs::read(catalog_path())
             .ok()
             .and_then(|bytes| parse_catalog(&bytes).ok())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        RwLock::new(providers)
     });
+    let providers = providers
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let Some(provider) = providers.get(provider_id) else {
         return Vec::new();
     };
