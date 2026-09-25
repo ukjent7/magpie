@@ -164,7 +164,7 @@ pub fn restore_command(args: &[String]) -> Result<()> {
 }
 
 fn collect(include_keys: bool) -> Result<Bundle> {
-    let (providers, icons) = provider::backup_snapshot(include_keys)?;
+    let provider::BackupSnapshot { providers, icons } = provider::backup_snapshot(include_keys)?;
     let profiles = profile::backup_entries()?;
     let agents = profile::snapshot_entries()?
         .into_iter()

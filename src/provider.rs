@@ -1560,9 +1560,12 @@ fn store(file: ProviderFile) -> Result<()> {
 
 const MAX_ICON_BYTES: usize = 1 << 20;
 
-pub(crate) fn backup_snapshot(
-    include_keys: bool,
-) -> Result<(Vec<Provider>, BTreeMap<String, Vec<u8>>)> {
+pub(crate) struct BackupSnapshot {
+    pub(crate) providers: Vec<Provider>,
+    pub(crate) icons: BTreeMap<String, Vec<u8>>,
+}
+
+pub(crate) fn backup_snapshot(include_keys: bool) -> Result<BackupSnapshot> {
     let mut providers = Vec::new();
     let mut icons = BTreeMap::new();
     for mut provider in load()?.providers {
@@ -1586,7 +1589,7 @@ pub(crate) fn backup_snapshot(
         }
         providers.push(provider);
     }
-    Ok((providers, icons))
+    Ok(BackupSnapshot { providers, icons })
 }
 
 pub(crate) fn restore_backup_icons(icons: &BTreeMap<String, Vec<u8>>) -> Result<()> {
