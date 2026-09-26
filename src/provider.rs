@@ -1892,8 +1892,70 @@ async fn refresh_models(provider: &Provider, report_failures: bool) -> Result<us
         bail!("provider has no endpoint to ask for models");
     }
     let count = models.len();
+    let models = if provider.id == "cursor" {
+        with_cursor_contexts(models)
+    } else {
+        models
+    };
     crate::catalog::save_live(&provider.id, &base, models)?;
     Ok(count)
+}
+
+// cursor_default_context is the context Cursor gives a model it doesn't name
+// 1M; the ones it does name get their millions, a model known to hold less
+// keeps its own.
+const CURSOR_DEFAULT_CONTEXT: usize = 200_000;
+
+// with_cursor_contexts fills in a Cursor model's context: its ids
+// ("claude-opus-5-5-high-fast") are its own, so no catalog knows them, and
+// an agent given none took every Cursor model for its own default. The name
+// says which is which ("Claude Opus 5.5 1M").
+fn with_cursor_contexts(mut models: Vec<crate::catalog::Model>) -> Vec<crate::catalog::Model> {
+    for model in &mut models {
+        if model.context == 0 {
+            model.context = cursor_context(&model.id, &model.name);
+        }
+    }
+    models
+}
+
+fn cursor_context(id: &str, name: &str) -> usize {
+    for token in name.split([' ', '(', ')', ',']) {
+        let token = token.trim();
+        if let Some(digits) = token.strip_suffix('M').or_else(|| token.strip_suffix('m')) {
+            if let Ok(n) = digits.parse::<usize>()
+                && (1..=100).contains(&n)
+            {
+                return n * 1_000_000;
+            }
+        }
+    }
+    let mut base = id.strip_prefix("cursor-").unwrap_or(id);
+    loop {
+        let trimmed = base
+            .trim_end_matches("-fast")
+            .trim_end_matches("-none")
+            .trim_end_matches("-low")
+            .trim_end_matches("-medium")
+            .trim_end_matches("-high")
+            .trim_end_matches("-xhigh")
+            .trim_end_matches("-extra-high")
+            .trim_end_matches("-max")
+            .trim_end_matches("-thinking");
+        if trimmed == base {
+            break;
+        }
+        base = trimmed;
+    }
+    if base == "auto" {
+        // Cursor's pick, not a model of that name
+        return CURSOR_DEFAULT_CONTEXT;
+    }
+    let known = crate::catalog::context_of(base);
+    if known > 0 && known < CURSOR_DEFAULT_CONTEXT {
+        return known;
+    }
+    CURSOR_DEFAULT_CONTEXT
 }
 
 fn model_endpoints<'a>(provider: &'a Provider, protocol: &str) -> Result<Vec<(&'a str, bool)>> {

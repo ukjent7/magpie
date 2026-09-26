@@ -685,13 +685,20 @@ async fn forward(
             );
         }
     };
-    let Some(model) = body.get("model").and_then(Value::as_str).map(str::to_owned) else {
+    let Some(requested_model) = body.get("model").and_then(Value::as_str).map(str::to_owned) else {
         return api_error_for(
             protocol,
             StatusCode::BAD_REQUEST,
             "request must include a model",
         );
     };
+    // Claude Code's mark for a model with a 1M window; it drops the mark
+    // before asking, but a value in its settings still has it
+    let model = requested_model
+        .trim()
+        .strip_suffix("[1m]")
+        .unwrap_or(requested_model.trim())
+        .to_owned();
     let catalog = match configured_catalog().await {
         Ok(catalog) => catalog,
         Err(error) => return api_error_for(protocol, error.status, error.message),

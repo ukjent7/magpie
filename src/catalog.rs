@@ -413,7 +413,6 @@ fn catalog_models(provider_id: &str) -> Vec<Model> {
     let Some(provider) = providers.get(provider_id) else {
         return Vec::new();
     };
-
     let mut models = provider
         .models
         .iter()
@@ -476,6 +475,29 @@ fn parse_catalog(bytes: &[u8]) -> Result<HashMap<String, CatalogProvider>> {
         serde_json::from_slice(bytes).context("models.dev returned an invalid catalog")?;
     ensure!(!catalog.is_empty(), "models.dev returned an empty catalog");
     Ok(catalog)
+}
+
+// context_of is the context models.dev knows for a model id, under any
+// provider that names it.
+pub fn context_of(model_id: &str) -> usize {
+    let providers = CATALOG.get_or_init(|| {
+        let providers = fs::read(catalog_path())
+            .ok()
+            .and_then(|bytes| parse_catalog(&bytes).ok())
+            .unwrap_or_default();
+        RwLock::new(providers)
+    });
+    let providers = providers
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    for provider in providers.values() {
+        if let Some(model) = provider.models.get(model_id)
+            && model.limit.context > 0
+        {
+            return model.limit.context;
+        }
+    }
+    0
 }
 
 fn catalog_path() -> PathBuf {
