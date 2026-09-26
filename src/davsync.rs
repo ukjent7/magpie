@@ -725,10 +725,8 @@ async fn sync_once(config: &Config, state: &mut State) -> Result<()> {
         bring(&remote, part).with_context(|| format!("bringing in the {part}"))?;
     }
 
-    // the server's file is in; what is pushed next counts as changed here
-    // until the push is done
-    // what was brought in is now this computer's own, and counts as the
-    // start for the next round
+    // the server's file is in; what was brought in is this computer's own
+    // now, and counts as changed here until the push is done
     let (local, now) = if bring_in.is_empty() {
         (local, here)
     } else {

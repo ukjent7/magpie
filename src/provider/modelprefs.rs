@@ -12,7 +12,12 @@
 // agents' files — offer only those, in the vendor's order; a request for
 // another still reaches the vendor as it did.
 
-use std::collections::BTreeMap;
+use std::{
+    collections::BTreeMap,
+    fs,
+    sync::{LazyLock, Mutex, PoisonError},
+    time::SystemTime,
+};
 
 use anyhow::{Result, bail, ensure};
 
@@ -38,23 +43,71 @@ const USAGE: &str = concat!(
     "       magpie model efforts openai/gpt-6 low,medium,high",
 );
 
+// Preferences are what the user gave the models of every provider: names,
+// and the levels left to offer.
+#[derive(Clone, Default)]
+struct Preferences {
+    names: BTreeMap<String, String>,
+    efforts: BTreeMap<String, Vec<String>>,
+}
+
+// PREFS remembers them by when settings.json last changed: a gateway
+// request reads every provider's models, and the file says the same thing
+// until someone edits it.
+static PREFS: LazyLock<Mutex<Option<(SystemTime, u64, Preferences)>>> =
+    LazyLock::new(|| Mutex::new(None));
+
+fn preferences() -> Preferences {
+    let path = settings::path();
+    let changed = fs::metadata(&path).and_then(|meta| Ok((meta.modified()?, meta.len())));
+    let mut found = PREFS.lock().unwrap_or_else(PoisonError::into_inner);
+    if let Ok((when, len)) = &changed {
+        if let Some((at, size, kept)) = found.as_ref()
+            && at == when
+            && size == len
+        {
+            return kept.clone();
+        }
+    }
+    let saved = loaded();
+    if let Ok((when, len)) = changed {
+        *found = Some((when, len, saved.clone()));
+    }
+    saved
+}
+
+fn loaded() -> Preferences {
+    let saved = settings::load();
+    Preferences {
+        names: saved.model_names,
+        efforts: saved.model_efforts,
+    }
+}
+
+// forget is what a change to the settings does to the remembered ones: the
+// file may keep the same size and its time may not move, and a name the
+// user just gave has to show at once.
+fn forget() {
+    *PREFS.lock().unwrap_or_else(PoisonError::into_inner) = None;
+}
+
 // shown is what the user asked of these models: named as they named it, and
 // offering only the levels they kept.
 pub(crate) fn shown(provider_id: &str, models: Vec<catalog::Model>) -> Vec<catalog::Model> {
-    let preferences = settings::load();
-    if preferences.model_names.is_empty() && preferences.model_efforts.is_empty() {
+    let preferences = preferences();
+    if preferences.names.is_empty() && preferences.efforts.is_empty() {
         return models;
     }
     models
         .into_iter()
         .map(|mut model| {
             let key = format!("{provider_id}/{}", model.id);
-            if let Some(name) = preferences.model_names.get(&key)
+            if let Some(name) = preferences.names.get(&key)
                 && !name.is_empty()
             {
                 model.name.clone_from(name);
             }
-            if let Some(kept) = preferences.model_efforts.get(&key) {
+            if let Some(kept) = preferences.efforts.get(&key) {
                 model.efforts = efforts_kept(&model.efforts, kept);
             }
             model
@@ -79,7 +132,7 @@ pub(crate) fn efforts_kept(all: &[String], kept: &[String]) -> Vec<String> {
 
 // name_of is the name the user gave a provider's model, if any.
 pub fn name_of(provider_id: &str, model: &str) -> Option<String> {
-    named_in(&settings::load().model_names, provider_id, model)
+    named_in(&preferences().names, provider_id, model)
 }
 
 fn named_in(names: &BTreeMap<String, String>, provider_id: &str, model: &str) -> Option<String> {
@@ -124,16 +177,17 @@ pub fn set_name(reference: &str, name: &str) -> Result<()> {
         provider.id
     );
     let key = format!("{}/{}", provider.id, model);
-    let mut preferences = settings::load();
-    if preferences.model_names.get(&key).cloned().unwrap_or_default() == name {
+    let mut saved = settings::load();
+    if saved.model_names.get(&key).cloned().unwrap_or_default() == name {
         return Ok(());
     }
     if name.is_empty() {
-        preferences.model_names.remove(&key);
+        saved.model_names.remove(&key);
     } else {
-        preferences.model_names.insert(key, name);
+        saved.model_names.insert(key, name);
     }
-    settings::save(&preferences)?;
+    settings::save(&saved)?;
+    forget();
     agent::sync_catalog_models()
 }
 
@@ -171,16 +225,17 @@ pub fn set_efforts(reference: &str, efforts: &[String]) -> Result<()> {
         keep.clear();
     }
     let key = format!("{}/{}", provider.id, model);
-    let mut preferences = settings::load();
-    if preferences.model_efforts.get(&key).cloned().unwrap_or_default() == keep {
+    let mut saved = settings::load();
+    if saved.model_efforts.get(&key).cloned().unwrap_or_default() == keep {
         return Ok(());
     }
     if keep.is_empty() {
-        preferences.model_efforts.remove(&key);
+        saved.model_efforts.remove(&key);
     } else {
-        preferences.model_efforts.insert(key, keep);
+        saved.model_efforts.insert(key, keep);
     }
-    settings::save(&preferences)?;
+    settings::save(&saved)?;
+    forget();
     agent::sync_catalog_models()
 }
 
@@ -259,11 +314,7 @@ fn efforts(args: &[String]) -> Result<()> {
             println!("{id} has no reasoning levels");
             return Ok(());
         }
-        let kept = settings::load()
-            .model_efforts
-            .get(&id)
-            .cloned()
-            .unwrap_or_default();
+        let kept = preferences().efforts.get(&id).cloned().unwrap_or_default();
         let line = all
             .iter()
             .map(|level| {
@@ -297,11 +348,7 @@ fn efforts(args: &[String]) -> Result<()> {
         }
     }
     set_efforts(&id, &levels)?;
-    let kept = settings::load()
-        .model_efforts
-        .get(&id)
-        .cloned()
-        .unwrap_or_default();
+    let kept = preferences().efforts.get(&id).cloned().unwrap_or_default();
     if kept.is_empty() {
         println!("✓ {id} offers every level it has: {}", all.join(", "));
     } else {
@@ -311,11 +358,11 @@ fn efforts(args: &[String]) -> Result<()> {
 }
 
 fn list() -> Result<()> {
-    let preferences = settings::load();
+    let preferences = preferences();
     let mut keys = preferences
-        .model_names
+        .names
         .keys()
-        .chain(preferences.model_efforts.keys())
+        .chain(preferences.efforts.keys())
         .collect::<Vec<_>>();
     keys.sort();
     keys.dedup();
@@ -326,14 +373,10 @@ fn list() -> Result<()> {
     let width = keys.iter().map(|key| key.len()).max().unwrap_or_default();
     for key in keys {
         let mut line = format!("  {key:<width$}");
-        if let Some(name) = preferences.model_names.get(*key).filter(|name| !name.is_empty()) {
+        if let Some(name) = preferences.names.get(*key).filter(|name| !name.is_empty()) {
             line.push_str(&format!("  {name}"));
         }
-        if let Some(levels) = preferences
-            .model_efforts
-            .get(*key)
-            .filter(|levels| !levels.is_empty())
-        {
+        if let Some(levels) = preferences.efforts.get(*key).filter(|levels| !levels.is_empty()) {
             line.push_str(&format!("  {}", levels.join("/")));
         }
         println!("{line}");
