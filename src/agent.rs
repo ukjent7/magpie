@@ -399,6 +399,9 @@ impl Agent {
         if self.spec.id == "omp" && field.key == "model" {
             return self.set_omp_model(value);
         }
+        if self.spec.id == "cursor" && field.key == "model" {
+            return self.set_cursor_model(value);
+        }
         if self.spec.id == "gemini" && field.key == "model" {
             return self.set_gemini_model(value);
         }
@@ -795,6 +798,25 @@ impl Agent {
             config::delete(&models_path, ConfigFormat::Yaml, "providers.magpie")?;
         }
         Ok(())
+    }
+
+    fn set_cursor_model(&self, value: &str) -> Result<()> {
+        if value.is_empty() {
+            return config::delete_many(
+                &self.path,
+                self.spec.format,
+                &["model", "hasChangedDefaultModel"],
+            );
+        }
+        config::set_jsonc_values(
+            &self.path,
+            &[
+                ("model.modelId", Value::String(value.to_owned())),
+                ("model.displayModelId", Value::String(value.to_owned())),
+                ("model.displayName", Value::String(value.to_owned())),
+                ("hasChangedDefaultModel", Value::Bool(true)),
+            ],
+        )
     }
 }
 
