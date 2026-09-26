@@ -254,8 +254,9 @@ struct PlanQuota {
     error: Option<String>,
 }
 
-static CACHE: LazyLock<Mutex<Option<(Instant, Vec<PlanQuota>)>>> =
-    LazyLock::new(|| Mutex::new(None));
+type PlanQuotaCache = Option<(Instant, Vec<PlanQuota>)>;
+
+static CACHE: LazyLock<Mutex<PlanQuotaCache>> = LazyLock::new(|| Mutex::new(None));
 
 // plan_quotas is the windows of every plan magpie has a key for, each key
 // on a card of its own when a provider has several. What was asked less

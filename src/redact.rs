@@ -68,12 +68,11 @@ fn load_key() -> Vec<u8> {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .clone();
-    if let Some(path) = &path {
-        if let Ok(b) = fs::read(path) {
-            if b.len() >= 32 {
-                return b[..32].to_vec();
-            }
-        }
+    if let Some(path) = &path
+        && let Ok(b) = fs::read(path)
+        && b.len() >= 32
+    {
+        return b[..32].to_vec();
     }
     let mut b = vec![0u8; 32];
     let _ = getrandom::fill(&mut b);
@@ -117,10 +116,10 @@ fn hmac_sha256(key: &[u8], msg: &[u8]) -> [u8; 32] {
         opad[i] ^= k;
     }
     let mut inner = Sha256::new();
-    inner.update(&ipad);
+    inner.update(ipad);
     inner.update(msg);
     let mut outer = Sha256::new();
-    outer.update(&opad);
+    outer.update(opad);
     outer.update(inner.finalize());
     let out = outer.finalize();
     let mut h = [0u8; 32];
@@ -169,10 +168,10 @@ pub fn mask(s: &str, o: &Options) -> (String, usize) {
             if !r.bound.is_empty() && bounded(s, a, e, r.bound) {
                 continue;
             }
-            if let Some(ok) = r.ok {
-                if !ok(&s[a..e]) {
-                    continue;
-                }
+            if let Some(ok) = r.ok
+                && !ok(&s[a..e])
+            {
+                continue;
             }
             found.push((a, e, r.kind));
         }
@@ -472,11 +471,11 @@ fn find_gh(s: &str) -> Vec<(usize, usize)> {
     let mut i = 0;
     while i < b.len() {
         let mut next = i + 1;
-        if b[i] == b'g' {
-            if let Some(e) = gh_at(b, i) {
-                out.push((i, e));
-                next = e;
-            }
+        if b[i] == b'g'
+            && let Some(e) = gh_at(b, i)
+        {
+            out.push((i, e));
+            next = e;
         }
         i = next;
     }
@@ -912,21 +911,21 @@ fn find_phone(s: &str) -> Vec<(usize, usize)> {
         }
         if j + 1 < b.len() && b[j] == b'8' && b[j + 1] == b'6' {
             let k0 = j + 2;
-            if matches!(b.get(k0), Some(b'-') | Some(b' ')) {
-                if let Some(e) = phone_rest(b, k0 + 1) {
-                    hit = Some((i, e));
-                }
-            }
-            if hit.is_none() {
-                if let Some(e) = phone_rest(b, k0) {
-                    hit = Some((i, e));
-                }
-            }
-        }
-        if hit.is_none() {
-            if let Some(e) = phone_rest(b, i) {
+            if matches!(b.get(k0), Some(b'-') | Some(b' '))
+                && let Some(e) = phone_rest(b, k0 + 1)
+            {
                 hit = Some((i, e));
             }
+            if hit.is_none()
+                && let Some(e) = phone_rest(b, k0)
+            {
+                hit = Some((i, e));
+            }
+        }
+        if hit.is_none()
+            && let Some(e) = phone_rest(b, i)
+        {
+            hit = Some((i, e));
         }
         match hit {
             Some((a, e)) => {
@@ -955,12 +954,12 @@ fn find_bank_card(s: &str) -> Vec<(usize, usize)> {
     let mut out = vec![];
     let mut i = 0;
     while i < b.len() {
-        if (b'3'..=b'6').contains(&b[i]) {
-            if let Some(e) = bank_at(b, i) {
-                out.push((i, e));
-                i = e;
-                continue;
-            }
+        if (b'3'..=b'6').contains(&b[i])
+            && let Some(e) = bank_at(b, i)
+        {
+            out.push((i, e));
+            i = e;
+            continue;
         }
         i += 1;
     }
@@ -1000,10 +999,11 @@ fn bank_at(b: &[u8], i: usize) -> Option<usize> {
 }
 
 fn bank_group(b: &[u8], p: usize) -> Option<usize> {
-    if matches!(b.get(p), Some(b' ') | Some(b'-')) {
-        if p + 5 <= b.len() && b[p + 1..p + 5].iter().all(u8::is_ascii_digit) {
-            return Some(p + 5);
-        }
+    if matches!(b.get(p), Some(b' ') | Some(b'-'))
+        && p + 5 <= b.len()
+        && b[p + 1..p + 5].iter().all(u8::is_ascii_digit)
+    {
+        return Some(p + 5);
     }
     (p + 4 <= b.len() && b[p..p + 4].iter().all(u8::is_ascii_digit)).then_some(p + 4)
 }
@@ -1121,7 +1121,7 @@ fn find_placeholders(s: &str) -> Vec<(usize, usize)> {
             && b[e - 1] == b'_'
             && b[e..e + 8]
                 .iter()
-                .all(|c| (b'a'..=b'z').contains(c) || (b'2'..=b'7').contains(c))
+                .all(|c| c.is_ascii_lowercase() || (b'2'..=b'7').contains(c))
             && &b[e + 8..e + 10] == b"}}";
         if body_ok {
             out.push((rel, e + 10));
@@ -1188,10 +1188,7 @@ fn partial_tail(s: &str) -> usize {
         return 0;
     }
     if body.iter().all(|&c| {
-        c.is_ascii_uppercase()
-            || c == b'_'
-            || (b'a'..=b'z').contains(&c)
-            || (b'2'..=b'7').contains(&c)
+        c.is_ascii_uppercase() || c == b'_' || c.is_ascii_lowercase() || (b'2'..=b'7').contains(&c)
     }) {
         return t.len();
     }
@@ -1661,7 +1658,8 @@ fn rebuild(pre: &[u8], data: &[u8], post: &[u8]) -> Vec<u8> {
 
 // finds the one data line of an event that has JSON in it: what comes before
 // the JSON, the JSON, and what comes after it
-fn split_event(ev: &[u8]) -> Option<(String, &[u8], &[u8], &[u8])> {
+type SplitEvent<'a> = (String, &'a [u8], &'a [u8], &'a [u8]);
+fn split_event(ev: &[u8]) -> Option<SplitEvent<'_>> {
     let lines: Vec<&[u8]> = ev.split_inclusive(|&c| c == b'\n').collect();
     let mut name = String::new();
     let mut at = None;
@@ -1963,7 +1961,7 @@ mod tests {
                     .to_string();
             format!("event: content_block_delta\ndata: {data}\n\n")
         };
-        let events = vec![
+        let events = [
             text_event(&format!("use {}", &masked[..5])),
             text_event(&masked[5..12]),
             text_event(&format!("{} now {{", &masked[12..])),

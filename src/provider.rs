@@ -435,7 +435,7 @@ pub struct Group {
     #[serde(skip_serializing_if = "is_false")]
     pub hidden: bool,
     #[serde(flatten)]
-    extra: BTreeMap<String, Value>,
+    pub(crate) extra: BTreeMap<String, Value>,
 }
 
 #[derive(Clone, Debug)]
@@ -1606,7 +1606,7 @@ pub async fn visible_command(args: &[String]) -> Result<()> {
         bail!("no agent {:?} ({id_ids})", args[0], id_ids = ids);
     }
     if args.len() == 1 {
-        return models(&[id.clone()]).await;
+        return models(std::slice::from_ref(&id)).await;
     }
     let list = args[1..]
         .join(",")
@@ -1993,12 +1993,11 @@ fn with_cursor_contexts(mut models: Vec<crate::catalog::Model>) -> Vec<crate::ca
 fn cursor_context(id: &str, name: &str) -> usize {
     for token in name.split([' ', '(', ')', ',']) {
         let token = token.trim();
-        if let Some(digits) = token.strip_suffix('M').or_else(|| token.strip_suffix('m')) {
-            if let Ok(n) = digits.parse::<usize>()
-                && (1..=100).contains(&n)
-            {
-                return n * 1_000_000;
-            }
+        if let Some(digits) = token.strip_suffix('M').or_else(|| token.strip_suffix('m'))
+            && let Ok(n) = digits.parse::<usize>()
+            && (1..=100).contains(&n)
+        {
+            return n * 1_000_000;
         }
     }
     let mut base = id.strip_prefix("cursor-").unwrap_or(id);

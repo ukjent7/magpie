@@ -214,7 +214,7 @@ fn rules_write(path: &Path, on: bool) -> Result<()> {
         let mut ids = Vec::new();
         for model in magpie_models().unwrap_or_default() {
             ids.push(model.id.clone());
-            if by_hand.iter().any(|id| *id == model.id) {
+            if by_hand.contains(&model.id) {
                 continue;
             }
             let mut properties = json!({"inputFormat": {"supportsImage": model.images}});

@@ -174,7 +174,7 @@ fn save(path: &Path, doc: &DocumentMut) -> Result<()> {
 
 // model_table_mut is the config's [model] table, made implicit when new —
 // magpie only adds [model."magpie/…"] tables to it, never a bare header.
-fn model_table_mut<'a>(doc: &'a mut DocumentMut) -> Result<&'a mut Table> {
+fn model_table_mut(doc: &mut DocumentMut) -> Result<&mut Table> {
     let item = doc.entry("model").or_insert_with(|| {
         let mut model = Table::new();
         model.set_implicit(true);
@@ -299,9 +299,9 @@ mod tests {
         let (last, parents) = keys.split_last().unwrap();
         let mut item = doc.as_table();
         for key in parents {
-            item = item.get(*key)?.as_table()?;
+            item = item.get(key)?.as_table()?;
         }
-        item.get(*last)?.as_table().cloned()
+        item.get(last)?.as_table().cloned()
     }
 
     #[test]
