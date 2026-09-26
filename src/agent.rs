@@ -386,6 +386,9 @@ impl Agent {
         if self.spec.id == "pi" && field.key == "effort" {
             return self.set_pi_effort(value);
         }
+        if self.spec.id == "crush" && field.provider_path.is_some() {
+            return self.set_crush_model(field, value);
+        }
         if self.spec.id == "gemini" && field.key == "model" {
             return self.set_gemini_model(value);
         }
@@ -688,6 +691,48 @@ impl Agent {
         }
         Ok(())
     }
+
+    fn set_crush_model(&self, field: &FieldSpec, value: &str) -> Result<()> {
+        let provider_path = field
+            .provider_path
+            .context("Crush model field has no provider path")?;
+        let route = value.strip_prefix("magpie/");
+        if let Some(model) = route {
+            ensure!(
+                is_gateway_model(model)?,
+                "{model:?} is not a model currently served by magpie"
+            );
+            config::set_jsonc_value(&self.path, "providers.magpie", &crush_provider()?)?;
+            config::set_many(
+                &self.path,
+                self.spec.format,
+                &[(provider_path, "magpie"), (field.path, model)],
+            )?;
+            return Ok(());
+        }
+
+        if value.is_empty() {
+            let model_path = provider_path
+                .strip_suffix(".provider")
+                .context("Crush provider path does not end in .provider")?;
+            config::delete(&self.path, self.spec.format, model_path)?;
+        } else {
+            let (provider, model) = value
+                .split_once('/')
+                .filter(|(provider, model)| !provider.is_empty() && !model.is_empty())
+                .with_context(|| format!("expected provider/model, got {value:?}"))?;
+            config::set_many(
+                &self.path,
+                self.spec.format,
+                &[(provider_path, provider), (field.path, model)],
+            )?;
+        }
+
+        if !crush_has_magpie_model(self)? {
+            config::delete(&self.path, self.spec.format, "providers.magpie")?;
+        }
+        Ok(())
+    }
 }
 
 pub fn sync_catalog_models() -> Result<()> {
@@ -720,6 +765,12 @@ pub fn sync_catalog_models() -> Result<()> {
             "providers.magpie",
             &pi_provider()?,
         )?;
+    }
+
+    if let Some(agent) = all().into_iter().find(|agent| agent.spec.id == "crush")
+        && crush_has_magpie_model(&agent)?
+    {
+        config::set_jsonc_value(&agent.path, "providers.magpie", &crush_provider()?)?;
     }
 
     let Some(agent) = all().into_iter().find(|agent| agent.spec.id == "opencode") else {
@@ -1366,6 +1417,89 @@ fn pi_model(id: &str, name: &str, efforts: &[String], images: bool, context: usi
         fields.insert("contextWindow".to_owned(), json!(context));
     }
     model
+}
+
+fn crush_has_magpie_model(agent: &Agent) -> Result<bool> {
+    for field in [CRUSH_LARGE, CRUSH_SMALL] {
+        if config::get(
+            &agent.path,
+            agent.spec.format,
+            field.provider_path.unwrap_or_default(),
+        )?
+        .as_deref()
+            == Some("magpie")
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn crush_provider() -> Result<Value> {
+    let (groups, entries) = crate::provider::desktop_group_data()?;
+    let entries_by_id = entries
+        .iter()
+        .map(|entry| (entry.id.as_str(), entry))
+        .collect::<HashMap<_, _>>();
+    let mut models = Vec::with_capacity(entries.len() + groups.len());
+    for entry in &entries {
+        let name = if entry.model.name.is_empty() {
+            &entry.model.id
+        } else {
+            &entry.model.name
+        };
+        models.push(crush_model(
+            &entry.id,
+            &format!("{name} · {}", entry.provider_name),
+            entry.model.context,
+            !entry.model.efforts.is_empty(),
+        ));
+    }
+    for group in groups.into_iter().filter(|group| !group.hidden) {
+        let members = group
+            .members
+            .iter()
+            .filter_map(|member| entries_by_id.get(member.as_str()).copied())
+            .collect::<Vec<_>>();
+        let Some((first, rest)) = members.split_first() else {
+            continue;
+        };
+        let can_reason = !first.model.efforts.is_empty()
+            && first.model.efforts.iter().all(|effort| {
+                rest.iter()
+                    .all(|member| member.model.efforts.contains(effort))
+            });
+        let context = members
+            .iter()
+            .map(|member| member.model.context)
+            .filter(|context| *context > 0)
+            .min()
+            .unwrap_or_default();
+        models.push(crush_model(
+            &format!("group/{}", group.id),
+            &format!("{} · routing group", group.name),
+            context,
+            can_reason,
+        ));
+    }
+
+    Ok(json!({
+        "type": "openai",
+        "name": "magpie",
+        "base_url": crate::gateway::v1_url(),
+        "api_key": crate::gateway::TOKEN,
+        "models": models,
+    }))
+}
+
+fn crush_model(id: &str, name: &str, context: usize, can_reason: bool) -> Value {
+    json!({
+        "id": id,
+        "name": name,
+        "context_window": if context == 0 { 200_000 } else { context },
+        "default_max_tokens": 16_384,
+        "can_reason": can_reason,
+    })
 }
 
 fn opencode_model(name: &str, images: bool) -> Value {
