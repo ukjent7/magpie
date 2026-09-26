@@ -715,8 +715,8 @@ impl SyncResult {
 // sync writes the library into every agent on this machine.
 fn sync_library(homes: &Homes, store: &Store, l: &mut Library) -> SyncResult {
     let mut res = SyncResult::default();
-    let mut b = l.kept.take().unwrap_or_else(Backups::new);
-    let all = targets(&homes);
+    let mut b = l.kept.take().unwrap_or_default();
+    let all = targets(homes);
     for t in &all {
         instructions::sync_instructions(store, l, t, &mut b, &mut res);
         mcp::sync_mcp(l, t, &mut b, &mut res);
@@ -1405,10 +1405,6 @@ pub(crate) mod testing {
                 home,
             }
         }
-
-        pub(crate) fn path(&self, relative: &str) -> PathBuf {
-            self.home.join(relative)
-        }
     }
 
     impl Drop for Sandbox {
@@ -1429,6 +1425,8 @@ pub(crate) mod testing {
         fs::read_to_string(path).unwrap_or_default()
     }
 
+    // write_bytes is a test's own file, bytes and all — CC Switch's database.
+    #[cfg(unix)]
     pub(crate) fn write_bytes(path: impl AsRef<Path>, bytes: &[u8]) {
         let path = path.as_ref();
         if let Some(parent) = path.parent() {

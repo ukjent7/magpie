@@ -116,7 +116,7 @@ fn test_server_every_format() {
                 want.name
             );
         }
-        if got.get("mine").is_none() && before[t.agent.spec.id].contains("mine") {
+        if !got.contains_key("mine") && before[t.agent.spec.id].contains("mine") {
             panic!("{} lost the user's server", t.agent.spec.id);
         }
     }
@@ -137,7 +137,7 @@ fn test_server_every_format() {
         let Some(f) = &t.mcp else { continue };
         let got = read(f).unwrap();
         assert!(
-            got.get("fs").is_none() && got.get("web").is_none(),
+            !got.contains_key("fs") && !got.contains_key("web"),
             "{} still has them:\n{}",
             t.agent.spec.id,
             read_file(&f.path)
@@ -239,7 +239,7 @@ fn test_del_codex_removes_child_tables() {
         path: path.clone(),
         format: Format::Codex,
     };
-    assert!(entries(&f).unwrap().get("x").is_none());
+    assert!(!entries(&f).unwrap().contains_key("x"));
 }
 
 #[test]
@@ -292,7 +292,7 @@ fn test_put_codex_preserves_child_array_values() {
     );
     del(&f, "x").unwrap();
     let after = entries(&f).unwrap();
-    assert!(after.get("x").is_none());
+    assert!(!after.contains_key("x"));
     assert_eq!(read_file(&path), other);
 }
 

@@ -2,11 +2,11 @@
 // ccswitch_test.go's GitHub update.
 
 use super::*;
-use crate::library::testing::write;
 // linking a skill into an agent's folder needs a unix filesystem
 #[cfg(unix)]
-use crate::library::testing::{Sandbox, read as read_file};
+use crate::library::testing::{Sandbox, read as read_file, write};
 
+#[cfg(unix)]
 fn skill_folder(dir: &std::path::Path, name: &str, description: &str) {
     write(
         dir.join("SKILL.md"),

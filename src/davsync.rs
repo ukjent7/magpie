@@ -206,9 +206,11 @@ pub fn status() -> View {
         passphrase_set: !config.passphrase.is_empty(),
         keys: config.keys,
         agents: config.agents,
-        last: (state.key == state_key(&config))
-            .then(|| state.last.clone())
-            .unwrap_or_default(),
+        last: if state.key == state_key(&config) {
+            state.last.clone()
+        } else {
+            String::new()
+        },
         error: state.error.clone(),
         notice: state.notice.clone(),
     }
@@ -595,7 +597,7 @@ fn changed(part: &str) -> Option<OffsetDateTime> {
         fs::metadata(path)
             .and_then(|meta| meta.modified())
             .ok()
-            .and_then(|modified| OffsetDateTime::try_from(modified).ok())
+            .map(OffsetDateTime::from)
     }
     match part {
         "providers" => mtime(&settings::providers_path()),
@@ -704,13 +706,13 @@ async fn sync_once(config: &Config, state: &mut State) -> Result<()> {
         // the copies are a courtesy: a sync that can't keep them goes ahead
         let dir = kept_dir()?;
         let stamp = folder_stamp();
-        if !replaced_here.is_empty() {
-            if let Ok(sealed) = backup::seal(&local, &config.passphrase) {
-                let _ = config::atomic_write_secret_for_settings(
-                    &dir.join(format!("{stamp}-this-computer{}", backup::EXTENSION)),
-                    &sealed,
-                );
-            }
+        if !replaced_here.is_empty()
+            && let Ok(sealed) = backup::seal(&local, &config.passphrase)
+        {
+            let _ = config::atomic_write_secret_for_settings(
+                &dir.join(format!("{stamp}-this-computer{}", backup::EXTENSION)),
+                &sealed,
+            );
         }
         if !replaced_there.is_empty() {
             let _ = config::atomic_write_secret_for_settings(

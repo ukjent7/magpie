@@ -121,9 +121,9 @@ fn construct(lengths: &[u8]) -> Result<Huffman> {
     counts[0] = 0;
     // over-subscribed codes are a corrupt stream
     let mut left = 1i32;
-    for len in 1..16 {
+    for count in &counts[1..16] {
         left <<= 1;
-        left -= i32::from(counts[len]);
+        left -= i32::from(*count);
         if left < 0 {
             bail!("over-subscribed Huffman code");
         }
@@ -405,7 +405,7 @@ pub(crate) fn untar(data: &[u8], dst: &std::path::Path, max_total: u64) -> Resul
 }
 
 fn align(pos: usize) -> usize {
-    (pos + 511) / 512 * 512
+    pos.div_ceil(512) * 512
 }
 
 fn cstr(bytes: &[u8]) -> String {
@@ -432,7 +432,7 @@ fn octal(bytes: &[u8]) -> Result<u64> {
 
 // gzip_stored_for_tests builds a gzip stream with stored (uncompressed)
 // DEFLATE blocks, for tests that need a server handing out a tarball.
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) fn gzip_stored_for_tests(data: &[u8]) -> Vec<u8> {
     let mut out = vec![0x1f, 0x8b, 0x08, 0, 0, 0, 0, 0, 0, 0xff];
     if data.is_empty() {
@@ -453,7 +453,7 @@ pub(crate) fn gzip_stored_for_tests(data: &[u8]) -> Vec<u8> {
 
 // tar_gz_for_tests builds a tar.gz of a few files, as codeload would hand
 // one out, for tests that need a server.
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) fn tar_gz_for_tests(files: &[(&str, &str)]) -> Vec<u8> {
     let mut tar = Vec::new();
     for (name, body) in files {
@@ -463,7 +463,7 @@ pub(crate) fn tar_gz_for_tests(files: &[(&str, &str)]) -> Vec<u8> {
     gzip_stored_for_tests(&tar)
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn tar_entry_for_tests(out: &mut Vec<u8>, name: &str, body: &[u8]) {
     let mut header = [0u8; 512];
     header[..name.len()].copy_from_slice(name.as_bytes());
@@ -481,7 +481,7 @@ fn tar_entry_for_tests(out: &mut Vec<u8>, name: &str, body: &[u8]) {
     out.extend_from_slice(&header);
     out.extend_from_slice(body);
     let pad = (512 - body.len() % 512) % 512;
-    out.extend(std::iter::repeat(0u8).take(pad));
+    out.extend(std::iter::repeat_n(0u8, pad));
 }
 
 #[cfg(test)]

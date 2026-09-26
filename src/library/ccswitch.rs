@@ -344,15 +344,17 @@ fn be_int(bytes: &[u8]) -> Result<i64> {
 mod tests {
     use super::*;
     use base64::Engine;
-    use std::sync::{Arc, Mutex};
 
-    use crate::library::Homes;
-    use crate::library::testing::Sandbox;
-    // reading CC Switch's skills means linking them, which unix does
+    // reading CC Switch's own database is portable; what follows links a
+    // skill from it into the library, which only unix can do
     #[cfg(unix)]
-    use crate::library::Store;
+    use crate::library::testing::Sandbox;
+    #[cfg(unix)]
+    use crate::library::{Homes, Store};
     #[cfg(unix)]
     use crate::library::testing::write;
+    #[cfg(unix)]
+    use std::sync::{Arc, Mutex};
 
     // A database CC Switch might have written: the skills table with one
     // skill of a known repository and one without.
@@ -377,6 +379,7 @@ mod tests {
         assert!(owner, "mine has no repo_owner");
     }
 
+    #[cfg(unix)]
     fn homes_with_db(sb: &Sandbox) -> Homes {
         let db = base64::engine::general_purpose::STANDARD
             .decode(DB)
@@ -476,6 +479,7 @@ mod tests {
 
     // serve_tarball answers every path with the same tarball, remembering
     // what was asked.
+    #[cfg(unix)]
     async fn serve_tarball(tarball: Vec<u8>) -> (String, Arc<Mutex<Vec<String>>>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();

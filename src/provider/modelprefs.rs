@@ -61,13 +61,12 @@ fn preferences() -> Preferences {
     let path = settings::path();
     let changed = fs::metadata(&path).and_then(|meta| Ok((meta.modified()?, meta.len())));
     let mut found = PREFS.lock().unwrap_or_else(PoisonError::into_inner);
-    if let Ok((when, len)) = &changed {
-        if let Some((at, size, kept)) = found.as_ref()
-            && at == when
-            && size == len
-        {
-            return kept.clone();
-        }
+    if let Ok((when, len)) = &changed
+        && let Some((at, size, kept)) = found.as_ref()
+        && at == when
+        && size == len
+    {
+        return kept.clone();
     }
     let saved = loaded();
     if let Ok((when, len)) = changed {

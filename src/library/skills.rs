@@ -426,7 +426,7 @@ fn expand(p: &str) -> PathBuf {
 // base at their own server.
 static TARBALL_BASE: Mutex<Option<String>> = Mutex::new(None);
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) fn set_tarball_base(base: Option<String>) {
     *TARBALL_BASE
         .lock()
@@ -810,7 +810,7 @@ fn finish_update(
     change_in(store, homes, move |l| {
         let next = skill_dir(store, &format!(".{name}.next"));
         let old = skill_dir(store, &format!(".{name}.old"));
-        let here = skill_dir(store, &name);
+        let here = skill_dir(store, name);
         let _ = std::fs::remove_dir_all(&next);
         let _ = std::fs::remove_dir_all(&old);
         if let Err(error) = copy_dir(&from, &next) {

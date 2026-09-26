@@ -332,17 +332,17 @@ pub(crate) fn restore(bundle: &Bundle, parts: Parts) -> Result<RestoreResult> {
     }
 
     let mut settings_restored = false;
-    if parts.settings {
-        if let Some(saved) = bundle.settings.as_ref() {
-            // the proxy and the window are this computer's own
-            let here = settings::load();
-            let mut saved = saved.clone();
-            saved.proxy.clone_from(&here.proxy);
-            saved.window.clone_from(&here.window);
-            saved.dock = here.dock;
-            settings::write_json(&settings::path(), &saved)?;
-            settings_restored = true;
-        }
+    if parts.settings
+        && let Some(saved) = bundle.settings.as_ref()
+    {
+        // the proxy and the window are this computer's own
+        let here = settings::load();
+        let mut saved = saved.clone();
+        saved.proxy.clone_from(&here.proxy);
+        saved.window.clone_from(&here.window);
+        saved.dock = here.dock;
+        settings::write_json(&settings::path(), &saved)?;
+        settings_restored = true;
     }
 
     let profiles = if parts.profiles {
