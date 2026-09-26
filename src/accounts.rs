@@ -14,9 +14,11 @@ mod codex_oauth;
 mod codex_usage;
 mod copilot_oauth;
 mod copilot_usage;
+mod grok_identity;
+mod grok_oauth;
 mod oauth;
 
-const USAGE: &str = "usage: magpie accounts [claude|codex|grok|copilot|gemini|antigravity] [--json] | magpie accounts add claude|codex|copilot | magpie accounts switch|forget claude|codex|copilot <user>";
+const USAGE: &str = "usage: magpie accounts [claude|codex|grok|copilot|gemini|antigravity] [--json] | magpie accounts add claude|codex|grok|copilot | magpie accounts switch|forget claude|codex|grok|copilot <user>";
 
 #[derive(Clone, Default, Deserialize, Serialize)]
 #[serde(default)]
@@ -27,6 +29,8 @@ struct SavedLogin {
     plan: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     profile: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    home: Option<PathBuf>,
     seen: Option<Value>,
     #[serde(skip_serializing_if = "is_false")]
     on: bool,
@@ -58,6 +62,10 @@ struct AccountRow {
     copilot_token: Option<String>,
     #[serde(skip)]
     copilot_own: bool,
+    #[serde(skip)]
+    grok_home: Option<PathBuf>,
+    #[serde(skip)]
+    grok_own: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -100,7 +108,8 @@ pub(crate) async fn command(args: &[String]) -> Result<()> {
             Some(agent) if agent.eq_ignore_ascii_case("copilot") => {
                 copilot_oauth::command(args).await
             }
-            _ => bail!("usage: magpie accounts add claude|codex|copilot"),
+            Some(agent) if agent.eq_ignore_ascii_case("grok") => grok_oauth::command(args).await,
+            _ => bail!("usage: magpie accounts add claude|codex|grok|copilot"),
         };
     }
 
@@ -142,6 +151,11 @@ pub(crate) async fn command(args: &[String]) -> Result<()> {
             login.profile,
         );
     }
+    if (agent_filter.is_none() || agent_filter == Some("grok"))
+        && let Some(login) = grok_identity::live_login()
+    {
+        merge_grok_account(&mut rows, login);
+    }
     if let Some(auth) = codex::signed_in_auth()
         && let Some((user, plan)) = codex::identity_from_auth(&auth)
     {
@@ -152,6 +166,7 @@ pub(crate) async fn command(args: &[String]) -> Result<()> {
     {
         merge_copilot_account(&mut rows, account);
     }
+    select_grok_account(&mut rows);
     select_copilot_account(&mut rows);
 
     if let Some(agent) = agent_filter {
@@ -201,7 +216,64 @@ fn merge_copilot_account(rows: &mut Vec<AccountRow>, account: copilot::Account) 
             first: false,
             copilot_token: Some(account.github_token),
             copilot_own: true,
+            grok_home: None,
+            grok_own: false,
         });
+    }
+}
+
+fn merge_grok_account(rows: &mut Vec<AccountRow>, login: SavedLogin) {
+    let home = grok_identity::home_dir();
+    if let Some(row) = rows
+        .iter_mut()
+        .find(|row| row.agent == "grok" && row.grok_own)
+    {
+        row.user = login.user;
+        row.plan = login.plan;
+        row.grok_home = home;
+        return;
+    }
+    rows.push(AccountRow {
+        agent: "grok".to_owned(),
+        user: login.user,
+        plan: login.plan,
+        active: true,
+        on: true,
+        windows: Vec::new(),
+        error: None,
+        auth: None,
+        profile: None,
+        first: false,
+        copilot_token: None,
+        copilot_own: false,
+        grok_home: home,
+        grok_own: true,
+    });
+}
+
+fn select_grok_account(rows: &mut Vec<AccountRow>) {
+    rows.retain(|row| {
+        row.agent != "grok"
+            || row
+                .grok_home
+                .as_deref()
+                .and_then(grok_identity::read_credential)
+                .is_some_and(|credential| credential.email.eq_ignore_ascii_case(&row.user))
+    });
+    let active = rows
+        .iter()
+        .rposition(|row| row.agent == "grok" && row.first)
+        .or_else(|| {
+            rows.iter()
+                .position(|row| row.agent == "grok" && row.grok_own)
+        })
+        .or_else(|| rows.iter().position(|row| row.agent == "grok"));
+    for row in rows.iter_mut().filter(|row| row.agent == "grok") {
+        row.active = false;
+    }
+    if let Some(active) = active {
+        rows[active].active = true;
+        rows[active].on = true;
     }
 }
 
@@ -232,8 +304,8 @@ async fn mutate_account(args: &[String]) -> Result<()> {
         bail!("unknown agent {agent:?}\n{USAGE}");
     };
     ensure!(
-        matches!(agent, "claude" | "codex" | "copilot"),
-        "Rust account switching and forgetting currently support Claude Code, Codex, and Copilot"
+        matches!(agent, "claude" | "codex" | "copilot" | "grok"),
+        "Rust account switching and forgetting currently support Claude Code, Codex, Grok, and Copilot"
     );
 
     match (action.to_ascii_lowercase().as_str(), agent) {
@@ -243,6 +315,8 @@ async fn mutate_account(args: &[String]) -> Result<()> {
         ("forget", "claude") => forget_claude_account(user).await?,
         ("switch", "copilot") => switch_copilot_account(user)?,
         ("forget", "copilot") => forget_copilot_account(user)?,
+        ("switch", "grok") => switch_grok_account(user)?,
+        ("forget", "grok") => forget_grok_account(user)?,
         _ => unreachable!("mutate_account only handles switch and forget"),
     }
     if action.eq_ignore_ascii_case("switch") {
@@ -363,6 +437,142 @@ fn forget_copilot_account(user: &str) -> Result<()> {
         "no saved Copilot account {user:?}"
     );
     write_saved_logins(&mut logins)
+}
+
+fn switch_grok_account(user: &str) -> Result<()> {
+    let mut logins = read_saved_logins()?;
+    let own_user = grok_identity::live_login().map(|login| login.user);
+    let own_target = own_user
+        .as_deref()
+        .is_some_and(|own| own.eq_ignore_ascii_case(user));
+    let target_index = logins.iter().position(|login| {
+        login.agent == "grok"
+            && login.user.eq_ignore_ascii_case(user)
+            && grok_saved_login_matches(login)
+    });
+    ensure!(
+        target_index.is_some() || own_target,
+        "no saved Grok account {user:?}"
+    );
+    let active_user = grok_active_user(&logins, own_user.as_deref());
+    if let Some(active) = active_user.filter(|active| !active.eq_ignore_ascii_case(user)) {
+        if own_user
+            .as_deref()
+            .is_some_and(|own| own.eq_ignore_ascii_case(&active))
+        {
+            remember_grok_own(&mut logins, &active, true, true)?;
+        } else if let Some(login) = logins
+            .iter_mut()
+            .find(|login| login.agent == "grok" && login.user.eq_ignore_ascii_case(&active))
+        {
+            login.on = true;
+        }
+    }
+    for login in logins.iter_mut().filter(|login| login.agent == "grok") {
+        login.first = false;
+    }
+    if own_target {
+        remember_grok_own(&mut logins, user, true, true)?;
+    } else if let Some(index) = target_index {
+        logins[index].first = true;
+        logins[index].on = true;
+    }
+    write_saved_logins(&mut logins)
+}
+
+fn forget_grok_account(user: &str) -> Result<()> {
+    let own_user = grok_identity::live_login().map(|login| login.user);
+    if own_user
+        .as_deref()
+        .is_some_and(|own| own.eq_ignore_ascii_case(user))
+    {
+        bail!("Grok is signed in as {user} in its CLI; sign out there first");
+    }
+    let mut logins = read_saved_logins()?;
+    let active = grok_active_user(&logins, own_user.as_deref());
+    ensure!(
+        !active
+            .as_deref()
+            .is_some_and(|active| active.eq_ignore_ascii_case(user)),
+        "magpie uses {user} first; put another account first"
+    );
+    let index = logins
+        .iter()
+        .position(|login| {
+            login.agent == "grok"
+                && login.user.eq_ignore_ascii_case(user)
+                && grok_saved_login_matches(login)
+        })
+        .with_context(|| format!("no saved Grok account {user:?}"))?;
+    let home = logins.remove(index).home;
+    write_saved_logins(&mut logins)?;
+    if let Some(home) = home {
+        let _ = grok_identity::remove_login_home(&home);
+    }
+    Ok(())
+}
+
+fn grok_active_user(logins: &[SavedLogin], own_user: Option<&str>) -> Option<String> {
+    logins
+        .iter()
+        .rfind(|login| login.first && grok_login_usable(login, own_user))
+        .map(|login| login.user.clone())
+        .or_else(|| own_user.map(str::to_owned))
+        .or_else(|| {
+            logins
+                .iter()
+                .find(|login| grok_login_usable(login, own_user))
+                .map(|login| login.user.clone())
+        })
+}
+
+fn grok_login_usable(login: &SavedLogin, own_user: Option<&str>) -> bool {
+    login.agent == "grok"
+        && (grok_saved_login_matches(login)
+            || (login.home.is_none()
+                && own_user.is_some_and(|user| login.user.eq_ignore_ascii_case(user))))
+}
+
+fn grok_saved_login_matches(login: &SavedLogin) -> bool {
+    login.home.as_deref().is_some_and(|home| {
+        grok_identity::read_credential(home)
+            .is_some_and(|credential| credential.email.eq_ignore_ascii_case(&login.user))
+    })
+}
+
+fn remember_grok_own(
+    logins: &mut Vec<SavedLogin>,
+    user: &str,
+    on: bool,
+    first: bool,
+) -> Result<()> {
+    if let Some(login) = logins.iter_mut().find(|login| {
+        login.agent == "grok" && login.user.eq_ignore_ascii_case(user) && login.home.is_none()
+    }) {
+        login.on |= on;
+        login.first = first;
+        return Ok(());
+    }
+    if logins
+        .iter()
+        .any(|login| login.agent == "grok" && login.user.eq_ignore_ascii_case(user))
+    {
+        return Ok(());
+    }
+    let seen = Value::String(
+        OffsetDateTime::now_utc()
+            .format(&Rfc3339)
+            .context("format account timestamp")?,
+    );
+    logins.push(SavedLogin {
+        agent: "grok".to_owned(),
+        user: user.to_owned(),
+        seen: Some(seen),
+        on,
+        first,
+        ..SavedLogin::default()
+    });
+    Ok(())
 }
 
 fn copilot_active_user(logins: &[SavedLogin], own_user: Option<&str>) -> Option<String> {
@@ -624,6 +834,15 @@ fn same_login(left: &SavedLogin, right: &SavedLogin) -> bool {
 fn account_row(login: SavedLogin) -> AccountRow {
     let is_copilot = login.agent == "copilot";
     let copilot_own = is_copilot && login.auth.is_none();
+    let is_grok = login.agent == "grok";
+    let grok_own = is_grok && login.home.is_none();
+    let grok_home = login.home.clone().or_else(|| {
+        if is_grok {
+            grok_identity::home_dir()
+        } else {
+            None
+        }
+    });
     let user = if is_copilot && login.user.is_empty() {
         "GitHub".to_owned()
     } else {
@@ -653,6 +872,8 @@ fn account_row(login: SavedLogin) -> AccountRow {
         first: login.first,
         copilot_token,
         copilot_own,
+        grok_home,
+        grok_own,
     }
 }
 
@@ -709,6 +930,8 @@ fn merge_active(
         first: false,
         copilot_token: None,
         copilot_own: false,
+        grok_home: None,
+        grok_own: false,
     });
 }
 

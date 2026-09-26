@@ -25,6 +25,74 @@ pub(crate) fn builder() -> ClientBuilder {
     Client::builder().no_proxy().proxy(Proxy::custom(proxy_for))
 }
 
+pub(crate) fn configure_process_proxy(command: &mut tokio::process::Command, host: &str) {
+    const PROXY_VARIABLES: &[&str] = &[
+        "HTTPS_PROXY",
+        "https_proxy",
+        "HTTP_PROXY",
+        "http_proxy",
+        "ALL_PROXY",
+        "all_proxy",
+        "NO_PROXY",
+        "no_proxy",
+    ];
+
+    let configured = crate::settings::load().proxy;
+    let configured = configured.trim();
+    if configured == "direct" {
+        for variable in PROXY_VARIABLES {
+            command.env_remove(*variable);
+        }
+        return;
+    }
+
+    let (url, bypass) = if configured.is_empty() {
+        if [
+            "HTTPS_PROXY",
+            "https_proxy",
+            "HTTP_PROXY",
+            "http_proxy",
+            "ALL_PROXY",
+            "all_proxy",
+        ]
+        .iter()
+        .any(|variable| env::var_os(*variable).is_some_and(|value| !value.is_empty()))
+        {
+            return;
+        }
+        let system = system_proxy();
+        let Some(url) = system.url else {
+            return;
+        };
+        if bypassed(host, system.bypass.iter().map(String::as_str), false) {
+            return;
+        }
+        (url.to_string(), system.bypass)
+    } else {
+        let Some(proxy) = parse_proxy(configured) else {
+            return;
+        };
+        (proxy.to_string(), Vec::new())
+    };
+
+    let mut no_proxy = vec!["localhost", "127.0.0.1", "::1"]
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    no_proxy.extend(bypass.into_iter().filter_map(|entry| {
+        let entry = entry.trim().trim_start_matches('*');
+        (!entry.is_empty() && entry != "<local>").then(|| entry.to_owned())
+    }));
+    let no_proxy = no_proxy.join(",");
+    for variable in ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"] {
+        command.env(variable, &url);
+    }
+    for variable in ["ALL_PROXY", "all_proxy"] {
+        command.env(variable, &url);
+    }
+    command.env("NO_PROXY", &no_proxy).env("no_proxy", no_proxy);
+}
+
 fn proxy_for(request: &Url) -> Option<Url> {
     let host = request.host_str()?;
     if is_loopback(host) {
