@@ -2,10 +2,7 @@
 // that agent's own format, taking back only what magpie wrote.
 
 use std::collections::BTreeMap;
-use std::{
-    path::Path,
-    str::FromStr,
-};
+use std::{path::Path, str::FromStr};
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -357,7 +354,8 @@ fn decode(format: Format, name: &str, m: &Value) -> Option<Server> {
     match format {
         Format::OpenCode => {
             if value_str(m, "type") == "remote" {
-                remote(&mut s, 
+                remote(
+                    &mut s,
                     "http",
                     value_str(m, "url"),
                     m.get("headers").unwrap_or(&Value::Null),
@@ -365,7 +363,8 @@ fn decode(format: Format, name: &str, m: &Value) -> Option<Server> {
             } else {
                 let command = value_list_at(m, "command");
                 if let Some((first, rest)) = command.split_first() {
-                    local(&mut s, 
+                    local(
+                        &mut s,
                         first.clone(),
                         &Value::Array(rest.iter().cloned().map(Value::String).collect()),
                         m.get("environment").unwrap_or(&Value::Null),
@@ -375,21 +374,24 @@ fn decode(format: Format, name: &str, m: &Value) -> Option<Server> {
         }
         Format::Goose => match value_str(m, "type").as_str() {
             "stdio" => {
-                local(&mut s, 
+                local(
+                    &mut s,
                     value_str(m, "cmd"),
                     m.get("args").unwrap_or(&Value::Null),
                     m.get("envs").unwrap_or(&Value::Null),
                 );
             }
             "streamable_http" => {
-                remote(&mut s, 
+                remote(
+                    &mut s,
                     "http",
                     value_str(m, "uri"),
                     m.get("headers").unwrap_or(&Value::Null),
                 );
             }
             "sse" => {
-                remote(&mut s, 
+                remote(
+                    &mut s,
                     "sse",
                     value_str(m, "uri"),
                     m.get("headers").unwrap_or(&Value::Null),
@@ -400,9 +402,15 @@ fn decode(format: Format, name: &str, m: &Value) -> Option<Server> {
         Format::Codex => {
             let url = value_str(m, "url");
             if !url.is_empty() {
-                remote(&mut s, "http", url, m.get("http_headers").unwrap_or(&Value::Null));
+                remote(
+                    &mut s,
+                    "http",
+                    url,
+                    m.get("http_headers").unwrap_or(&Value::Null),
+                );
             } else {
-                local(&mut s, 
+                local(
+                    &mut s,
                     value_str(m, "command"),
                     m.get("args").unwrap_or(&Value::Null),
                     m.get("env").unwrap_or(&Value::Null),
@@ -413,7 +421,12 @@ fn decode(format: Format, name: &str, m: &Value) -> Option<Server> {
             let http_url = value_str(m, "httpUrl");
             let url = value_str(m, "url");
             if !http_url.is_empty() {
-                remote(&mut s, "http", http_url, m.get("headers").unwrap_or(&Value::Null));
+                remote(
+                    &mut s,
+                    "http",
+                    http_url,
+                    m.get("headers").unwrap_or(&Value::Null),
+                );
             } else if !url.is_empty() {
                 let t = if value_str(m, "type") == "http" {
                     "http"
@@ -422,7 +435,8 @@ fn decode(format: Format, name: &str, m: &Value) -> Option<Server> {
                 };
                 remote(&mut s, t, url, m.get("headers").unwrap_or(&Value::Null));
             } else {
-                local(&mut s, 
+                local(
+                    &mut s,
                     value_str(m, "command"),
                     m.get("args").unwrap_or(&Value::Null),
                     m.get("env").unwrap_or(&Value::Null),
@@ -441,7 +455,8 @@ fn decode(format: Format, name: &str, m: &Value) -> Option<Server> {
                 };
                 remote(&mut s, t, url, m.get("headers").unwrap_or(&Value::Null));
             } else {
-                local(&mut s, 
+                local(
+                    &mut s,
                     value_str(m, "command"),
                     m.get("args").unwrap_or(&Value::Null),
                     m.get("env").unwrap_or(&Value::Null),
@@ -458,7 +473,8 @@ fn decode(format: Format, name: &str, m: &Value) -> Option<Server> {
                 }
                 remote(&mut s, &t, url, m.get("headers").unwrap_or(&Value::Null));
             } else {
-                local(&mut s, 
+                local(
+                    &mut s,
                     value_str(m, "command"),
                     m.get("args").unwrap_or(&Value::Null),
                     m.get("env").unwrap_or(&Value::Null),
@@ -713,10 +729,7 @@ fn put(f: &McpFile, s: &Server, old: Option<&Value>) -> Result<()> {
     match f.format {
         Format::Codex => codex_put(&f.path, &s.name, &entry),
         Format::Goose => {
-            config::set_yaml_values(
-            &f.path,
-            &[(&format!("extensions.{}", s.name), entry)],
-        )
+            config::set_yaml_values(&f.path, &[(&format!("extensions.{}", s.name), entry)])
         }
         _ => config::set_jsonc_value(&f.path, &format!("{}.{}", key(f.format), s.name), &entry),
     }

@@ -206,7 +206,9 @@ pub fn status() -> View {
         passphrase_set: !config.passphrase.is_empty(),
         keys: config.keys,
         agents: config.agents,
-        last: (state.key == state_key(&config)).then(|| state.last.clone()).unwrap_or_default(),
+        last: (state.key == state_key(&config))
+            .then(|| state.last.clone())
+            .unwrap_or_default(),
         error: state.error.clone(),
         notice: state.notice.clone(),
     }
@@ -349,7 +351,11 @@ impl Dav {
 
     fn url(&self, parts: &[&str]) -> Result<Url> {
         let mut url = self.base.clone();
-        let path = format!("{}/{}", self.base.path().trim_end_matches('/'), parts.join("/"));
+        let path = format!(
+            "{}/{}",
+            self.base.path().trim_end_matches('/'),
+            parts.join("/")
+        );
         url.set_path(&path)
             .map_err(|_| anyhow!("the WebDAV address has nothing to put the file in"))?;
         Ok(url)
@@ -376,7 +382,9 @@ impl Dav {
             .send()
             .await
             .with_context(|| format!("ask the WebDAV server at {url}"))?;
-        if response.status() == StatusCode::UNAUTHORIZED || response.status() == StatusCode::FORBIDDEN {
+        if response.status() == StatusCode::UNAUTHORIZED
+            || response.status() == StatusCode::FORBIDDEN
+        {
             bail!(
                 "the WebDAV server refused the user name or password (HTTP {})",
                 response.status().as_u16()
@@ -417,10 +425,7 @@ impl Dav {
     // was one, making the folder if the server has none.
     async fn put(&self, data: &[u8], etag: &str) -> Result<()> {
         let url = self.url(&[FOLDER, FILE])?;
-        let mut headers = vec![(
-            header::CONTENT_TYPE,
-            "application/octet-stream".to_owned(),
-        )];
+        let mut headers = vec![(header::CONTENT_TYPE, "application/octet-stream".to_owned())];
         if !etag.is_empty() {
             headers.push((header::IF_MATCH, etag.to_owned()));
         }
@@ -492,7 +497,9 @@ fn hashes(bundle: &backup::Bundle) -> Result<BTreeMap<String, String>> {
         own.remove("dock");
     }
     let hash = |piece: Value| -> Result<String> {
-        Ok(sum(&serde_json::to_vec(&piece).context("hash a part of the setup")?))
+        Ok(sum(
+            &serde_json::to_vec(&piece).context("hash a part of the setup")?
+        ))
     };
     Ok(BTreeMap::from([
         (
@@ -501,7 +508,7 @@ fn hashes(bundle: &backup::Bundle) -> Result<BTreeMap<String, String>> {
                 value.get("providers").cloned().unwrap_or_else(empty_object),
                 value.get("icons").cloned().unwrap_or_else(empty_object),
                 value.get("groups").cloned().unwrap_or_else(empty_object)
-           ]))?,
+            ]))?,
         ),
         (
             "settings".to_owned(),
@@ -531,7 +538,8 @@ fn take(merged: &mut backup::Bundle, local: &backup::Bundle, part: &str) {
                     .map(|saved| (saved.id.clone(), saved))
                     .collect::<HashMap<_, _>>();
                 for given in &mut providers {
-                    if given.key.is_empty() && given.keys.is_empty()
+                    if given.key.is_empty()
+                        && given.keys.is_empty()
                         && let Some(saved) = server.get(&given.id)
                     {
                         given.key.clone_from(&saved.key);

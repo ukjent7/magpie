@@ -2865,7 +2865,8 @@ pub(crate) fn mirror_backup(providers: &[Provider], groups: &[Group]) -> Result<
         .cloned()
         .map(|mut provider| {
             provider.icon_url.clear();
-            if provider.key.is_empty() && provider.keys.is_empty()
+            if provider.key.is_empty()
+                && provider.keys.is_empty()
                 && let Some(existing) = here.get(&provider.id)
             {
                 provider.key.clone_from(&existing.key);

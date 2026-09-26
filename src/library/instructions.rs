@@ -318,8 +318,7 @@ pub fn import_instructions(id: &str) -> Result<SyncResult> {
 }
 
 pub(crate) fn import_instructions_at(store: &Store, homes: &Homes, id: &str) -> Result<SyncResult> {
-    let Some(path) = crate::library::target_by_id(homes, id)
-        .and_then(|target| target.instructions)
+    let Some(path) = crate::library::target_by_id(homes, id).and_then(|target| target.instructions)
     else {
         anyhow::bail!("{id} has no instructions file magpie knows");
     };

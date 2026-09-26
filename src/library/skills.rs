@@ -827,8 +827,7 @@ fn finish_update(
                 renamed = false;
             }
             Ok(_) => {
-                std::fs::rename(&here, &old)
-                    .with_context(|| format!("move {}", here.display()))?;
+                std::fs::rename(&here, &old).with_context(|| format!("move {}", here.display()))?;
             }
             Err(_) => {
                 let _ = std::fs::remove_dir_all(&next);

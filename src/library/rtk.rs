@@ -402,16 +402,14 @@ async fn rtk_install(
     // Claude Code is given a directory of its own to install into, so the
     // hook lands where magpie can see it, not in the user's real one.
     let aside = if sp.with_claude {
-        let dir = std::env::temp_dir()
-            .join(format!("magpie-rtk-{}-{}", std::process::id(), now_nanos()));
+        let dir =
+            std::env::temp_dir().join(format!("magpie-rtk-{}-{}", std::process::id(), now_nanos()));
         std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
         Some(dir)
     } else {
         None
     };
-    let text = aside
-        .as_ref()
-        .map(|dir| dir.to_string_lossy().into_owned());
+    let text = aside.as_ref().map(|dir| dir.to_string_lossy().into_owned());
     if let Some(dir) = &text {
         env_all.push(("CLAUDE_CONFIG_DIR", dir));
     }
