@@ -40,9 +40,12 @@
   const nameOf = (id) => agentOf(id)?.name || id;
   // An agent with no MCP of its own (Pi) reads its servers through an
   // extension, which each of its chips says.
-  const mcpAgents = () => lib.agents.filter((a) => a.mcp)
+  // An agent hidden on the Agents page is left out here too (#71): what it
+  // already has stays with it, and a new server or skill isn't given to it.
+  const shownAgents = () => lib.agents.filter((a) => !isHidden(a));
+  const mcpAgents = () => shownAgents().filter((a) => a.mcp)
     .map((a) => a.mcpVia ? { ...a, aside: t("{agent} reads MCP servers through the {ext} extension", { agent: a.name, ext: a.mcpVia }) } : a);
-  const skillAgents = () => lib.agents.filter((a) => a.skills);
+  const skillAgents = () => shownAgents().filter((a) => a.skills);
 
   function glyph(d, cls = "lib-glyph") {
     const g = el("span", cls);
@@ -71,6 +74,8 @@
     return b;
   }
   function fileManager() { return /^Mac/.test(navigator.platform) ? "Finder" : /^Win/.test(navigator.platform) ? "Explorer" : t("the file manager"); }
+  // the app's webview opens no new windows: a link goes to the system browser
+  function browse(u) { api("open", { url: u }).catch((e) => status(e.message, "err")); }
   function reveal(p) { api("library/reveal", { path: p }).catch((e) => status(e.message, "err")); }
 
   // A switch: on or off, nothing between.
@@ -92,6 +97,7 @@
     for (const a of all) {
       const has = on.includes(a.id);
       const c = el("button", "lib-ag" + (has ? " on" : ""));
+      c.dataset.agent = a.id;
       c.append(icon(a.icon));
       if (opts.names) c.append(el("span", "n", a.name));
       const problem = opts.problems?.[a.id];
@@ -113,10 +119,50 @@
     return box;
   }
 
+  // A row's chips switched in place: the page isn't drawn again, which
+  // lost the chips' hover (they folded back together and spread again under
+  // the pointer) and blinked their icons (#69). The chip shows the click at
+  // once; what magpie wrote is then painted onto the same buttons, and the
+  // page is drawn again only when more than this row changed.
+  function chipsChange(path, name, list, rowOf) {
+    return async (next, c) => {
+      const box = c.parentElement;
+      c.classList.toggle("on", next.includes(c.dataset.agent));
+      c.classList.remove("via");
+      const before = rest(list);
+      try {
+        const v = await api("library/" + path, { name, agents: next });
+        lib = v;
+        report(v.result);
+      } catch (e) {
+        status(e.message, "err", 6000);
+      }
+      const x = lib[list].find((y) => y.name === name);
+      const fresh = x && rowOf(x).querySelector(":scope > .lib-agents");
+      if (!fresh || rest(list) !== before || !box.isConnected || !morphChips(box, fresh)) render();
+    };
+  }
+  // what the page shows besides a row's chips
+  const rest = (list) => JSON.stringify([lib[list].map((y) => y.name), lib.foundServers, lib.foundSkills, lib.instructions.agents.map((a) => a.on)]);
+  function morphChips(box, fresh) {
+    const was = [...box.children], now = [...fresh.children];
+    if (was.length !== now.length || was.some((c, i) => c.dataset.agent !== now[i].dataset.agent)) return false;
+    was.forEach((c, i) => {
+      const n = now[i];
+      c.className = n.className;
+      c.title = n.title;
+      c.disabled = n.disabled;
+      c.setAttribute("aria-pressed", n.getAttribute("aria-pressed"));
+      c.onclick = n.onclick;
+    });
+    return true;
+  }
+
   // ---------- loading and changing ----------
 
   async function load() {
     if (!lib) renderLoading();
+    rtk = null; // asked again when its tab is drawn: an agent may have been installed since
     try {
       lib = await api("library");
       render();
@@ -179,6 +225,7 @@
       ["instructions", t("Instructions")],
       ["mcp", t("MCP servers") + (counts.mcp ? " · " + counts.mcp : "")],
       ["skills", t("Skills") + (counts.skills ? " · " + counts.skills : "")],
+      ["rtk", "RTK"],
     ], tab, (id) => { tab = id; try { localStorage.setItem("magpie.libTab", id); } catch {} render(); page.scrollTop = 0; });
     tabs.classList.add("lib-tabs");
     head.append(tabs, el("span", "grow"));
@@ -198,6 +245,7 @@
     shown = tab;
     if (tab === "instructions") renderInstructions(body);
     else if (tab === "mcp") renderServers(body);
+    else if (tab === "rtk") renderRTK(body);
     else renderSkills(body);
     page.append(body);
     for (const n of body.querySelectorAll(".row-head .note")) n.title = n.textContent;
@@ -223,6 +271,88 @@
   }
 
   function intro(text) { return el("p", "lib-intro", text); }
+
+  // ---------- RTK ----------
+
+  // RTK (rtk-ai.app) cuts down what the shell commands an agent runs print,
+  // so their output costs fewer tokens. magpie runs rtk's own installer for
+  // each agent switched on, and reads the agents' files for which have it.
+  let rtk = null;          // /api/library/rtk
+  const rtkBusy = new Set(); // agents being switched
+  let rtkLoading = false;
+  async function loadRTK() {
+    if (rtkLoading) return;
+    rtkLoading = true;
+    try {
+      rtk = await api("library/rtk");
+    } catch (e) {
+      status(e.message, "err");
+    }
+    rtkLoading = false;
+    if (tab === "rtk" && rtk) render();
+  }
+  function renderRTK(body) {
+    body.append(intro(t("RTK rewrites the shell commands an agent runs — git status, cargo test, ls… — to print only what the model needs, so they cost fewer tokens. Switch it on for an agent and magpie runs RTK's own installer for it.")));
+    if (!rtk) {
+      body.append(el("div", "row skeleton"));
+      loadRTK();
+      return;
+    }
+    const card = el("div", "list lib-card");
+    const ttl = el("div", "lib-cardhead");
+    ttl.append(glyph(GLYPH.cmd), el("b", "", "RTK"), el("span", "grow"));
+    if (rtk.path) {
+      ttl.append(el("span", "note mono", rtk.version ? "v" + rtk.version : tilde(rtk.path)));
+      card.append(ttl);
+      const g = rtk.gain;
+      card.append(el("p", "lib-rtk-gain", g
+        ? t("{saved} tokens saved over {n} commands — {pct}% on average", { saved: tokens(g.saved), n: g.commands.toLocaleString(), pct: Math.round(g.pct) })
+        : t("Nothing saved yet: the agents' commands go through RTK once it's switched on and the agent is restarted.")));
+    } else {
+      card.append(ttl);
+      const p = el("p", "lib-rtk-gain", t("RTK isn't installed. Install it (brew install rtk, or see its site), then come back here."));
+      card.append(p);
+      const acts = el("div", "lib-acts");
+      acts.append(button(t("Get RTK"), "action", () => browse(rtk.url)), button(t("Check again"), "", () => { rtk = null; render(); }));
+      card.append(acts);
+    }
+    body.append(card);
+    const rh = el("div", "row-head");
+    rh.append(el("span", "label", t("Agents")), el("span", "grow"), el("span", "note", t("restart an agent after switching it")));
+    body.append(rh);
+    const list = el("div", "list lib-list");
+    const rows = rtk.agents.filter((a) => !isHidden(a));
+    for (const a of rows) {
+      const row = el("div", "row lib-row");
+      const who = el("div", "who");
+      who.append(el("div", "name", a.name));
+      row.append(icon(a.icon), who, el("span", "grow"));
+      const sw = toggle(a.on, t("{agent} runs its commands through RTK", { agent: a.name }), (on) => setRTK(a, on));
+      if (!rtk.path || rtkBusy.has(a.id)) sw.disabled = true;
+      row.append(sw);
+      list.append(row);
+    }
+    if (!rows.length) list.append(el("div", "lib-none", t("None of your agents is one RTK has a hook for.")));
+    body.append(list);
+  }
+  async function setRTK(a, on) {
+    rtkBusy.add(a.id);
+    render();
+    try {
+      rtk = await api("library/rtk", { agent: a.id, on });
+      const names = (rtk.restart || [a.id]).map((id) => rtk.agents.find((x) => x.id === id)?.name || id).join(", ");
+      status(on ? t("RTK is on for {agent} — restart it to use it", { agent: names }) : t("RTK is off for {agent} — restart it to see it", { agent: names }), "ok", 6000);
+    } catch (e) {
+      status(e.message, "err", 8000);
+    }
+    rtkBusy.delete(a.id);
+    render();
+  }
+  function tokens(n) {
+    if (n >= 1e6) return (n / 1e6).toFixed(1) + "M";
+    if (n >= 1e3) return (n / 1e3).toFixed(1) + "k";
+    return String(n);
+  }
 
   // ---------- instructions ----------
 
@@ -284,11 +414,12 @@
     rh.append(el("span", "label", t("Agents")), el("span", "grow"), el("span", "note", t("magpie writes its part between two marker lines — the rest of each file stays yours")));
     body.append(rh);
     const list = el("div", "list lib-list");
-    for (const a of iv.agents) list.append(...instructionsRow(a));
-    if (!iv.agents.length) list.append(el("div", "lib-none", t("None of your agents reads a user-wide instructions file magpie knows.")));
+    const rows = iv.agents.filter((a) => !isHidden({ id: a.agent }));
+    for (const a of rows) list.append(...instructionsRow(a));
+    if (!rows.length) list.append(el("div", "lib-none", t("None of your agents reads a user-wide instructions file magpie knows.")));
     body.append(list);
-    const skip = lib.agents.filter((a) => !a.instructions);
-    if (skip.length) body.append(el("p", "lib-aside", t("{agents} keeps no user-wide instructions file.", { agents: skip.map((a) => a.name).join(", ") })));
+    const skip = shownAgents().filter((a) => !a.instructions);
+    if (skip.length) body.append(el("p", "lib-aside", t(skip.length > 1 ? "{agents} keep no user-wide instructions file." : "{agents} keeps no user-wide instructions file.", { agents: skip.map((a) => a.name).join(", ") })));
     body.append(bar);
   }
 
@@ -372,7 +503,15 @@
   }
   function quote(a) { return /^[\w@%+=:,./-]+$/.test(a) ? a : "'" + a.replace(/'/g, `'\\''`) + "'"; }
 
-  function sseBlocked(s) { return (a) => (s.transport === "sse" && a.noSSE ? t("{agent} can't reach a server over SSE — only a command or streamable HTTP", { agent: a.name }) : ""); }
+  function sseBlocked(s) {
+    return (a) => {
+      if (remote(s) && a.noRemote) return t("{agent} runs only a command from its settings — add a remote server in its Connectors instead", { agent: a.name });
+      return s.transport === "sse" && a.noSSE ? t("{agent} can't reach a server over SSE — only a command or streamable HTTP", { agent: a.name }) : "";
+    };
+  }
+  // reaches(s) says whether an agent can be given the server
+  const remote = (s) => s.transport === "http" || s.transport === "sse";
+  const reaches = (s) => (a) => !a || (!(remote(s) && a.noRemote) && !(s.transport === "sse" && a.noSSE));
 
   function renderServers(body) {
     body.append(intro(t("Add a server once and switch it on for the agents that should have it — magpie writes it into each one's config in the shape that agent reads.")));
@@ -388,15 +527,22 @@
       after.append(button(t("＋ Add server"), "", () => editServer(null)));
       body.append(after);
     }
-    if (lib.foundServers.length) {
+    const found = lib.foundServers.filter((f) => !f.own), own = lib.foundServers.filter((f) => f.own);
+    if (found.length) {
       const rh = el("div", "row-head");
       rh.append(el("span", "label", t("In your agents")), el("span", "grow"), el("span", "note", t("not in the library — bring one in to manage it here")));
       body.append(rh);
       const list = el("div", "list lib-list");
-      for (const f of lib.foundServers) list.append(foundServerRow(f));
+      for (const f of found) list.append(foundServerRow(f));
       body.append(list);
     }
-    const skip = lib.agents.filter((a) => !a.mcp);
+    if (own.length) {
+      const by = [...new Set(own.flatMap((f) => f.server.agents))].map(nameOf).join(", ");
+      const p = el("p", "lib-aside", t("{agents} adds these itself, each time it starts, and magpie leaves them as they are: {names}", { agents: by, names: own.map((f) => f.server.name).join(", ") }));
+      p.title = own.map((f) => f.server.name + ": " + serverLine(f.server)).join("\n");
+      body.append(p);
+    }
+    const skip = shownAgents().filter((a) => !a.mcp);
     if (skip.length) body.append(el("p", "lib-aside", t("{agents} has no MCP servers magpie can write.", { agents: skip.map((a) => a.name).join(", ") })));
     body.append(discover("mcp"));
   }
@@ -409,7 +555,7 @@
     sub.title = serverLine(s);
     who.append(sub);
     row.append(mark(s.icon, s.transport === "stdio" ? GLYPH.cmd : GLYPH.web), who,
-      agentChips(all, s.agents, (next) => change("servers/agents", { name: s.name, agents: next }), { problems: s.problems, blocked: sseBlocked(s) }));
+      agentChips(all, s.agents, chipsChange("servers/agents", s.name, "servers", (x) => serverRow(x, all)), { problems: s.problems, blocked: sseBlocked(s) }));
     row.onclick = () => editServer(s);
     row.title = t("Edit {name}", { name: s.name });
     return row;
@@ -650,7 +796,7 @@
       let last = null;
       for (const f of found.filter((x) => pick.has(x.name))) {
         try {
-          last = await api("library/servers/save", { old: "", server: { ...f, agents: f.transport === "sse" ? who.filter((id) => !agentOf(id)?.noSSE) : who } });
+          last = await api("library/servers/save", { old: "", server: { ...f, agents: who.filter((id) => reaches(f)(agentOf(id))) } });
         } catch (e) { err.textContent = f.name + ": " + e.message; go.disabled = false; if (last) { lib = last; render(); } return; }
       }
       lib = last;
@@ -687,7 +833,7 @@
       for (const f of lib.foundSkills) list.append(foundSkillRow(f));
       body.append(list);
     }
-    const skip = lib.agents.filter((a) => !a.skills);
+    const skip = shownAgents().filter((a) => !a.skills);
     if (skip.length) body.append(el("p", "lib-aside", t("{agents} has no skills folder.", { agents: skip.map((a) => a.name).join(", ") })));
     body.append(discover("skills"));
   }
@@ -819,9 +965,7 @@
       if (s.kind === "github") {
         const a = el("a", "lib-srclink", s.source.replace(/^https:\/\/github\.com\//, ""));
         a.href = s.source;
-        a.target = "_blank";
-        a.rel = "noopener";
-        a.onclick = (e) => e.stopPropagation();
+        a.onclick = (e) => { e.preventDefault(); e.stopPropagation(); browse(s.source); };
         src.append(a);
       } else {
         src.append(el("span", "", t("linked from")), pathLink(s.source));
@@ -829,21 +973,21 @@
       who.append(src);
     }
     const acts = el("div", "lib-rowacts");
-    if (s.kind === "github") {
+    if (s.kind === "github" || s.origin) {
       const u = button("", "lib-icon", async (e, b) => {
         b.classList.add("busy");
         await change("skills/update", { name: s.name }, t("{name} is up to date", { name: s.name }));
         b.classList.remove("busy");
       });
       u.append(svg(GLYPH.up, 13, 1.5));
-      u.title = t("Update from GitHub");
+      u.title = s.origin ? t("Update from GitHub ({repo}, as CC Switch installed it)", { repo: s.origin.replace(/^https:\/\/github\.com\//, "") }) : t("Update from GitHub");
       acts.append(u);
     }
     const rm = button("", "lib-icon danger", () => confirmRemoveSkill(s));
     rm.append(svg(GLYPH.trash, 13, 1.4));
     rm.title = t("Remove");
     acts.append(rm);
-    row.append(mark(s.icon, GLYPH.skill), who, acts, agentChips(all, s.agents, (next) => change("skills/agents", { name: s.name, agents: next }), { problems: s.problems, via: viaFor(s) }));
+    row.append(mark(s.icon, GLYPH.skill), who, acts, agentChips(all, s.agents, chipsChange("skills/agents", s.name, "skills", (x) => skillRow(x, all)), { problems: s.problems, via: viaFor(s) }));
     row.onclick = () => viewSkill(s);
     row.title = t("Read {name}'s SKILL.md", { name: s.name });
     return row;
@@ -1107,7 +1251,7 @@
   // A market server up close: what it is, what it needs, and who gets it.
   function serverSheet(x) {
     const all = mcpAgents();
-    let agents = all.filter((a) => !(x.transport === "sse" && a.noSSE)).map((a) => a.id);
+    let agents = all.filter(reaches(x)).map((a) => a.id);
     const values = {};
     const ed = el("div", "editor lib-editor mk-sheet");
     const head = el("div", "mk-sheethead");
@@ -1163,10 +1307,8 @@
   function extLink(href, text) {
     const a = el("a", "mk-ext");
     a.href = href;
-    a.target = "_blank";
-    a.rel = "noopener";
     a.append(el("span", "", text), svg(GLYPH.out, 11, 1.5));
-    a.onclick = (e) => e.stopPropagation();
+    a.onclick = (e) => { e.preventDefault(); e.stopPropagation(); browse(href); };
     return a;
   }
 

@@ -151,3 +151,31 @@ func must(b []byte, err error) []byte {
 	}
 	return b
 }
+
+// OpenCode is handed each model's window, so it compacts when the model
+// needs it; and a sync puts magpie's provider back when a model of
+// magpie's is chosen but the provider is gone from the file.
+func TestOpenCodeModelsCarryContextAndSyncRestores(t *testing.T) {
+	home := syncHome(t)
+	b, _ := json.Marshal(magpieProviderJSON("opencode"))
+	if !strings.Contains(string(b), `"relay/glm-4.6":{`) || !strings.Contains(string(b), `"limit":{"context":204800,"output":0}`) {
+		t.Fatalf("%s", b)
+	}
+	cfg := filepath.Join(home, ".config", "opencode", "opencode.json")
+	writeFile(t, cfg, `{"model":"magpie/relay/glm-4.6","provider":{"mine":{"name":"mine"}}}`)
+	if err := opencode(home, filepath.Join(home, ".config")).Sync(); err != nil {
+		t.Fatal(err)
+	}
+	if s := readFile(cfg); !strings.Contains(s, `"magpie"`) || !strings.Contains(s, `"mine"`) || !strings.Contains(s, `204800`) {
+		t.Fatalf("%s", s)
+	}
+	// one that doesn't use magpie gets nothing
+	body := `{"model":"mine/x","provider":{"mine":{"name":"mine"}}}`
+	writeFile(t, cfg, body)
+	if err := opencode(home, filepath.Join(home, ".config")).Sync(); err != nil {
+		t.Fatal(err)
+	}
+	if s := readFile(cfg); s != body {
+		t.Fatalf("%s", s)
+	}
+}

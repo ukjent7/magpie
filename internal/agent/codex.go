@@ -40,9 +40,9 @@ func codex(home string) *Agent {
 	models := func() []catalog.Model {
 		switch {
 		case asProvider():
-			return magpieModels()
+			return magpieModels("codex")
 		case viaBase():
-			return append(catalog.Codex(), magpieModels()...)
+			return append(catalog.Codex(), magpieModels("codex")...)
 		}
 		return catalog.Codex()
 	}
@@ -77,9 +77,16 @@ func codex(home string) *Agent {
 	}
 	// the model spawned subagents start on, when not the parent's; one of
 	// magpie's goes when magpie steps out, as Codex could no longer find it
-	subagent := func() string { return edit.GetTOMLTable(path, "agents")["default_subagent_model"] }
+	subagent := func() (string, error) {
+		agents, err := edit.GetTOMLTable(path, "agents")
+		return agents["default_subagent_model"], err
+	}
 	dropSubagent := func() error {
-		if !isMagpie(subagent()) {
+		model, err := subagent()
+		if err != nil {
+			return err
+		}
+		if !isMagpie(model) {
 			return nil
 		}
 		return edit.DelTOMLKey(path, "agents", "default_subagent_model")
@@ -151,7 +158,7 @@ func codex(home string) *Agent {
 			); err != nil {
 				return err
 			}
-			if err := edit.WriteAtomic(catalogPath, codexcat.Catalog(magpieModels())); err != nil {
+			if err := edit.WriteAtomic(catalogPath, codexcat.Catalog(magpieModels("codex"))); err != nil {
 				return err
 			}
 			if err := edit.SetTOMLTop(path,
@@ -164,13 +171,13 @@ func codex(home string) *Agent {
 			return settle()
 		}
 		if routed() {
+			if err := dropSubagent(); err != nil {
+				return err
+			}
 			if err := dropBase(); err != nil {
 				return err
 			}
 			if err := dropProvider(); err != nil {
-				return err
-			}
-			if err := dropSubagent(); err != nil {
 				return err
 			}
 			unstash("codex.model")
@@ -202,7 +209,7 @@ func codex(home string) *Agent {
 		Sync: func() error {
 			switch {
 			case asProvider() && get("model_catalog_json") == catalogPath:
-				b := codexcat.Catalog(magpieModels())
+				b := codexcat.Catalog(magpieModels("codex"))
 				if cur, _ := edit.Read(catalogPath); string(cur) != string(b) {
 					if err := edit.WriteAtomic(catalogPath, b); err != nil {
 						return err
@@ -222,6 +229,51 @@ func codex(home string) *Agent {
 			}
 			return nil
 		},
+		Check: func() string {
+			if !isMagpie(get("model")) {
+				return ""
+			}
+			// a profile's settings win over the top level's, magpie's included
+			if p := get("profile"); p != "" {
+				t, err := edit.GetTOMLTable(path, "profiles."+p)
+				if err != nil {
+					return err.Error()
+				}
+				for _, k := range []string{"model", "model_provider", "openai_base_url", "model_catalog_json"} {
+					if v, ok := t[k]; ok && v != get(k) {
+						return "Codex's profile " + p + " sets its own " + k + " (" + v + "), which Codex takes over magpie's"
+					}
+				}
+			}
+			switch {
+			case asProvider():
+				t, err := edit.GetTOMLTable(path, "model_providers."+magpieID)
+				if err != nil {
+					return err.Error()
+				}
+				if t["base_url"] != gatewayV1() || t["experimental_bearer_token"] != gateway.Token || t["wire_api"] != "responses" {
+					return "Codex's [model_providers.magpie] no longer points at magpie's gateway (" + gatewayV1() + ")"
+				}
+				if c := get("model_catalog_json"); c != catalogPath {
+					return "Codex's model_catalog_json is no longer magpie's list"
+				}
+				if _, err := os.Stat(catalogPath); err != nil {
+					return "magpie's model list for Codex (" + catalogPath + ") is gone"
+				}
+			case viaBase():
+				if u := get("openai_base_url"); strings.TrimSuffix(u, "/") != codexGatewayURL() {
+					return "Codex's openai_base_url is " + u + ", not magpie's gateway at " + codexGatewayURL()
+				}
+			default:
+				return "Codex's config no longer sends its model through magpie (no openai_base_url or model_provider of magpie's), so Codex asks OpenAI for a model OpenAI doesn't have"
+			}
+			return ""
+		},
+		// every prompt typed into Codex goes into history.jsonl
+		LastUsed: func() time.Time { return lastJSONLTime(filepath.Join(dir, "history.jsonl"), "ts", "text") },
+		// the Codex app writes no history.jsonl, but it and the TUI log each
+		// model request they open
+		Reached: func(since time.Time) (time.Time, string, bool) { return codexReached(dir, since) },
 		// the app-server behind the Codex app (and every codex TUI) builds
 		// its model list once, at start-up.
 		Notice: func() string {
@@ -271,7 +323,7 @@ func codex(home string) *Agent {
 				// subagent is put on one of magpie's here, where it can't be
 				// by the model unless asked by name
 				Key: "subagent", Label: "subagents", Quiet: true,
-				Get: subagent,
+				Get: func() string { v, _ := subagent(); return v },
 				Set: func(v string) error {
 					if v == "" {
 						return edit.DelTOMLKey(path, "agents", "default_subagent_model")
@@ -379,4 +431,49 @@ func codexSignedIn(dir string) bool {
 		return false
 	}
 	return a.Key != "" || a.Tokens.Access != ""
+}
+
+// codexReached reads Codex's newest model request since a time — the
+// newest day of it at most — from the log database the Codex app and the
+// TUI share: the address it opened, and whether that was refused (nothing
+// listening there). Zero when none is logged.
+func codexReached(dir string, since time.Time) (at time.Time, to string, refused bool) {
+	logs, _ := filepath.Glob(filepath.Join(dir, "logs_*.sqlite"))
+	if len(logs) == 0 {
+		return
+	}
+	slices.Sort(logs)
+	db, err := provider.OpenReadOnly(logs[len(logs)-1])
+	if err != nil {
+		return
+	}
+	defer db.Close()
+	from := max(since.Unix(), time.Now().Add(-24*time.Hour).Unix())
+	rows, err := db.Query(`SELECT ts, feedback_log_body FROM logs
+		WHERE ts > ? AND target = 'codex_api::endpoint::responses_websocket'
+		ORDER BY ts DESC, ts_nanos DESC, id DESC LIMIT 20`, from)
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+	// newest first: a refusal comes before the attempt it answers
+	failedAt := map[string]bool{}
+	for rows.Next() {
+		var ts int64
+		var body string
+		if rows.Scan(&ts, &body) != nil {
+			continue
+		}
+		if _, u, ok := strings.Cut(body, "failed to connect to websocket: "); ok {
+			if _, u, ok := strings.Cut(u, "url: "); ok && (strings.Contains(body, "Connection refused") || strings.Contains(body, "os error 10061")) {
+				failedAt[strings.TrimSpace(u)] = true
+			}
+			continue
+		}
+		if _, u, ok := strings.Cut(body, "connecting to websocket: "); ok {
+			u = strings.TrimSpace(u)
+			return time.Unix(ts, 0), u, failedAt[u]
+		}
+	}
+	return
 }

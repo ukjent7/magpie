@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"context"
 	"encoding/json"
 	"net/http/httptest"
 	"os"
@@ -123,5 +124,34 @@ func TestClaudeRunKeptForTheNextTurn(t *testing.T) {
 	third := ask(`[` + msg("user", "hi") + `,` + msg("assistant", first) + `,` + msg("user", "and?") + `,` + msg("assistant", "edited") + `,` + msg("user", "so?") + `]`)
 	if strings.Contains(third, "pid "+pid) {
 		t.Fatalf("an edited reply: %q", third)
+	}
+}
+
+// An agent's run that fails after it began answering ends the stream with
+// the error alone, not with a stop that reads as a finished reply.
+func TestSubscriptionStreamErrorIsTheEnd(t *testing.T) {
+	s := New()
+	for _, from := range []provider.Protocol{provider.Anthropic, provider.Chat, provider.Responses} {
+		start := func(ctx context.Context, req *Request) (*subscriptionRun, <-chan Event, error) {
+			ch := make(chan Event, 3)
+			ch <- Event{Kind: KStart}
+			ch <- Event{Kind: KText, Text: "half"}
+			ch <- Event{Kind: KError, Text: "it died"}
+			close(ch)
+			return &subscriptionRun{bridge: s.subscription}, ch, nil
+		}
+		body := `{"model":"m","max_tokens":10,"stream":true,"messages":[{"role":"user","content":"hi"}],"input":"hi"}`
+		rec := httptest.NewRecorder()
+		var u Usage
+		code, failed := s.serveSubscription(rec, httptest.NewRequest("POST", "/", strings.NewReader(body)), from, "Agent", "m", []byte(body), &u, start)
+		out := rec.Body.String()
+		if code != 200 || failed != "it died" || !strings.Contains(out, "it died") {
+			t.Fatalf("%s: %d %q\n%s", from, code, failed, out)
+		}
+		for _, end := range []string{"message_stop", "[DONE]", `"stop"`, "response.completed"} {
+			if strings.Contains(out, end) {
+				t.Fatalf("%s: %s after the error:\n%s", from, end, out)
+			}
+		}
 	}
 }

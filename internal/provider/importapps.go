@@ -755,10 +755,21 @@ func readAlma(path string) ([]AppImport, error) {
 	return out, nil
 }
 
+// sqlitePath is a file's path as a SQLite URI wants it: slashed, and on
+// Windows with a slash before the drive (file:///C:/…) — without it the
+// drive letter is read as a host, and the open fails.
+func sqlitePath(path string) string {
+	p := filepath.ToSlash(path)
+	if len(p) >= 2 && p[1] == ':' {
+		p = "/" + p
+	}
+	return p
+}
+
 // openReadOnly opens another app's SQLite database without writing to it,
 // waiting out the app's own writes.
 func openReadOnly(path string) (*sql.DB, error) {
-	u := url.URL{Scheme: "file", Path: filepath.ToSlash(path), RawQuery: "mode=ro&_pragma=busy_timeout(3000)"}
+	u := url.URL{Scheme: "file", Path: sqlitePath(path), RawQuery: "mode=ro&_pragma=busy_timeout(3000)"}
 	db, err := sql.Open("sqlite", u.String())
 	if err != nil {
 		return nil, err
@@ -768,4 +779,40 @@ func openReadOnly(path string) (*sql.DB, error) {
 		return nil, errors.New("can't open " + path + ": " + err.Error())
 	}
 	return db, nil
+}
+
+// OpenReadOnly opens another app's SQLite database without writing to it.
+func OpenReadOnly(path string) (*sql.DB, error) { return openReadOnly(path) }
+
+// CCSwitchSkillsDir is the folder CC Switch keeps the skills it installs in.
+func CCSwitchSkillsDir() string { return filepath.Join(filepath.Dir(ccSwitchPath()), "skills") }
+
+// CCSwitchSkillOrigin is the GitHub repository (owner/name) and branch CC
+// Switch installed the skill in its folder dir from, as its database
+// records it.
+func CCSwitchSkillOrigin(dir string) (repo, branch string, ok bool) {
+	p := ccSwitchPath()
+	if filepath.Ext(p) != ".db" || !fileExists(p) {
+		return "", "", false
+	}
+	db, err := openReadOnly(p)
+	if err != nil {
+		return "", "", false
+	}
+	defer db.Close()
+	rows, err := db.Query(`SELECT directory, COALESCE(repo_owner,''), COALESCE(repo_name,''), COALESCE(repo_branch,'') FROM skills`)
+	if err != nil {
+		return "", "", false
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var d, owner, name, ref string
+		if rows.Scan(&d, &owner, &name, &ref) != nil || owner == "" || name == "" {
+			continue
+		}
+		if d == dir || filepath.Base(filepath.FromSlash(d)) == dir {
+			return owner + "/" + name, ref, true
+		}
+	}
+	return "", "", false
 }

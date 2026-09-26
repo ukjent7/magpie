@@ -33,19 +33,39 @@ func TestBalanceReaders(t *testing.T) {
 }
 
 func TestReadBalancePath(t *testing.T) {
-	body := []byte(`{"code":true,"data":{"total_available":2500000,"name":"x","list":[{"left":"7.5"}]}}`)
+	body := []byte(`{"code":true,"credits":{"monthlyCredits":42},"data":{"total_available":2500000,"name":"x","list":[{"left":"7.5"}]}}`)
 	for path, want := range map[string]string{
 		"data.total_available":            "2500000.00",
 		"$ data.total_available / 500000": "$5.00",
 		"¥data.list.0.left":               "¥7.50",
 		"data.name":                       "x",
 		" data.total_available/1000000 ":  "2.50",
+		"(1-credits.monthlyCredits/70)%":  "40%",
+		"$ (data.total_available - data.list.0.left * 100000) / 500000": "$3.50",
+		"credits.monthlyCredits * 2 + 1":                                "85.00",
+		"-credits.monthlyCredits":                                       "-42.00",
+		"credits.monthlyCredits / 70 %":                                 "60%",
 	} {
 		if got, err := readBalancePath(body, path); err != nil || got != want {
 			t.Errorf("%q: %q %v, want %q", path, got, err, want)
 		}
 	}
-	for _, path := range []string{"", "data.missing", "data.list.3.left", "data.total_available / zero", "data.list"} {
+	cc := []byte(`{"credits":{"monthlyCredits":70.0},"windowLimits":{"fiveHour":{"used":0,"cap":14},"weekly":{"used":1.19,"cap":35}}}`)
+	for path, want := range map[string]string{
+		"5h: windowLimits.fiveHour.used / windowLimits.fiveHour.cap %; week: windowLimits.weekly.used/windowLimits.weekly.cap %; $credits.monthlyCredits": "5h 0% · week 3.4% · $70.00",
+		"credits.monthlyCredits;":         "70.00",
+		" left : $credits.monthlyCredits": "left $70.00",
+	} {
+		if got, err := readBalancePath(cc, path); err != nil || got != want {
+			t.Errorf("%q: %q %v, want %q", path, got, err, want)
+		}
+	}
+	for _, path := range []string{";", "5h: windowLimits.hour.used; $credits.monthlyCredits", "week:"} {
+		if got, err := readBalancePath(cc, path); err == nil {
+			t.Errorf("%q: read %q, want an error", path, got)
+		}
+	}
+	for _, path := range []string{"", "data.missing", "data.list.3.left", "data.total_available / zero", "data.list", "data.name + 1", "(data.total_available", "data.total_available / 0", "data.total_available 2", "%"} {
 		if got, err := readBalancePath(body, path); err == nil {
 			t.Errorf("%q: read %q, want an error", path, got)
 		}
@@ -121,5 +141,35 @@ func TestKeyBalances(t *testing.T) {
 	}
 	if got[0].Windows == nil {
 		t.Fatal("windows is null in the JSON")
+	}
+}
+
+func TestReadAiHubMix(t *testing.T) {
+	if got, err := readAiHubMix([]byte(`{"object":"list","total_usage":12.5}`)); err != nil || got != "$12.50" {
+		t.Fatalf("got %q, %v", got, err)
+	}
+	// a key without a limit: -1 of AiHubMix's units
+	if _, err := readAiHubMix([]byte(`{"object":"list","total_usage":-0.000002}`)); err == nil {
+		t.Fatal("an unlimited key read as a balance")
+	}
+}
+
+func TestAiHubMixAccountBalance(t *testing.T) {
+	if got, err := readAiHubMixAccount([]byte(`{"success":true,"data":{"username":"x","quota":2500000}}`)); err != nil || got != "$5.00" {
+		t.Fatalf("got %q, %v", got, err)
+	}
+	if _, err := readAiHubMixAccount([]byte(`{"success":false,"message":"no such token"}`)); err == nil || err.Error() != "no such token" {
+		t.Fatalf("a refused token: %v", err)
+	}
+	p := Provider{Chat: "https://aihubmix.com/v1", Key: "sk-1"}
+	if !TakesBalanceToken(p) || TakesBalanceToken(Provider{Chat: "https://api.deepseek.com"}) {
+		t.Fatal("TakesBalanceToken")
+	}
+	if src, _ := balanceSourceOf(p); src.token != "" || !strings.HasSuffix(src.url, "/dashboard/billing/remain") {
+		t.Fatalf("without a token: %+v", src)
+	}
+	p.BalanceToken = "tok"
+	if src, _ := balanceSourceOf(p); src.token != "tok" || !strings.HasSuffix(src.url, "/api/user/self") {
+		t.Fatalf("with a token: %+v", src)
 	}
 }

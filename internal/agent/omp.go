@@ -66,6 +66,14 @@ func omp(home string) *Agent {
 			}
 			return ""
 		},
+		Check: func() string {
+			if !usesMagpie(get()) {
+				return ""
+			}
+			models := pick("models")
+			return wiringOff("omp", models, func(k string) (string, bool) { return edit.GetYAML(models, "providers."+magpieID+"."+k) },
+				"baseUrl", gatewayV1())
+		},
 		Fields: []Field{{
 			Key: "model", Label: "model",
 			Get: get,
@@ -88,7 +96,7 @@ func omp(home string) *Agent {
 				return dropMagpie()
 			},
 			Options: func(cur map[string]string) []Option {
-				return append(ownOptions("", cur["model"]), viaMagpie(magpieID+"/")...)
+				return append(ownOptions("", cur["model"]), viaMagpie("omp", magpieID+"/")...)
 			},
 		}},
 	}
@@ -118,7 +126,7 @@ type ompProviderEntry struct {
 // levels omp offers for the model; it sends them as reasoning_effort.
 func ompProvider() ompProviderEntry {
 	ms := []ompModel{}
-	for _, m := range magpieModels() {
+	for _, m := range magpieModels("omp") {
 		e := ompModel{ID: m.ID, Name: m.Name, Context: m.Context}
 		var efforts []string
 		for _, x := range ompEfforts { // in omp's order

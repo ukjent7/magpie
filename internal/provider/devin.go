@@ -307,7 +307,13 @@ func devinExchange(ctx context.Context, code, verifier, redirect string) (savedL
 		return savedLogin{}, err
 	}
 	forgetDevinStatus()
-	user, plan, _ := askDevinIdentity()
+	forgetAccountCaches()
+	user, plan, ok := askDevinIdentity()
+	if !ok {
+		// the account is only ever seen through the CLI: without it
+		// answering, magpie has nothing to show and nothing to run
+		return savedLogin{}, errors.New("signed in, but `devin auth status` doesn't show the account; run it in a terminal to see why")
+	}
 	return savedLogin{Agent: "devin", User: user, Plan: plan}, nil
 }
 

@@ -191,7 +191,8 @@ func codexFetchSaved(ctx context.Context) {
 // but is not that provider's.
 func CodexListed() []catalog.Model {
 	var ms []catalog.Model
-	for _, e := range Catalog() {
+	shown, _ := CatalogFor("codex")
+	for _, e := range shown {
 		if e.Provider.Account != nil && e.Provider.Account.Agent == "codex" {
 			continue
 		}

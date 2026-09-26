@@ -38,7 +38,7 @@ type Windows interface {
 	// OpenURL hands a link to the system browser.
 	OpenURL(url string)
 	// OpenFolder shows a folder in the system file manager.
-	OpenFolder(path string)
+	OpenFolder(path string) error
 	// Copy puts text on the system clipboard, which the page's own
 	// navigator.clipboard can't always reach from inside the app.
 	Copy(text string) bool
@@ -63,6 +63,8 @@ type agentJSON struct {
 	Icon   string      `json:"icon"`
 	Path   string      `json:"path"`
 	Fields []fieldJSON `json:"fields"`
+	// Drift: its config no longer does what magpie set, and how to set it again
+	Drift *agent.Drift `json:"drift,omitempty"`
 }
 
 // clientJSON is an agent, or another client the gateway knows, as a
@@ -114,12 +116,29 @@ func settingsState() settingsJSON {
 	return s
 }
 
+// onDock puts the app in the Mac's Dock or takes it out, when the Settings
+// page changes that; set by the process that has the app.
+var onDock func(bool)
+
 // Handler serves the embedded UI and the JSON API.
-// gw is the gateway this process serves, or nil when another magpie has it.
+// gw is the gateway this process serves, or nil when another magpie has it
+// (for now: see startBackend).
 func Handler(w Windows, gw *gateway.Server) http.Handler {
+	if gw != nil {
+		served.Store(gw)
+	}
 	mux := http.NewServeMux()
 	mux.Handle("/", devPage(http.FileServer(http.FS(staticFS()))))
 	devRoutes(mux)
+	// boot.js hands the page the saved language and theme before it paints:
+	// they came only with the settings, so the tabs showed English first
+	mux.HandleFunc("GET /boot.js", func(rw http.ResponseWriter, r *http.Request) {
+		s := settings.Load()
+		b, _ := json.Marshal(map[string]string{"lang": s.Lang, "theme": s.Theme})
+		rw.Header().Set("Content-Type", "text/javascript; charset=utf-8")
+		rw.Header().Set("Cache-Control", "no-store")
+		rw.Write(append(append([]byte("window.bootPrefs = "), b...), ";\n"...))
+	})
 	mux.HandleFunc("GET /api/state", func(rw http.ResponseWriter, r *http.Request) {
 		writeJSON(rw, state())
 	})
@@ -139,7 +158,45 @@ func Handler(w Windows, gw *gateway.Server) http.Handler {
 			http.Error(rw, "unknown field", http.StatusBadRequest)
 			return
 		}
-		if err := f.Set(strings.TrimSpace(in.Value)); err != nil {
+		if err := a.Apply(f.Key, strings.TrimSpace(in.Value)); err != nil {
+			fail(rw, err)
+			return
+		}
+		s := state()
+		if a.Notice != nil {
+			s.Notice = a.Notice()
+		}
+		writeJSON(rw, s)
+	})
+	// reapply sets again what magpie set on an agent something else
+	// rewrote; keep takes the agent as it is now
+	// what drifted, per agent: cheap enough to ask while the window is up,
+	// so a config rewritten elsewhere shows without a reload
+	mux.HandleFunc("GET /api/drift", func(rw http.ResponseWriter, r *http.Request) {
+		out := map[string]*agent.Drift{}
+		for _, a := range agent.Detected() {
+			if d := a.Drift(); d != nil {
+				out[a.ID] = d
+			}
+		}
+		writeJSON(rw, out)
+	})
+	mux.HandleFunc("POST /api/agents/{action}/{id}", func(rw http.ResponseWriter, r *http.Request) {
+		a, err := agent.Find(r.PathValue("id"))
+		if err != nil {
+			fail(rw, err)
+			return
+		}
+		switch r.PathValue("action") {
+		case "reapply":
+			err = a.Reapply()
+		case "keep":
+			a.Keep()
+		default:
+			http.NotFound(rw, r)
+			return
+		}
+		if err != nil {
 			fail(rw, err)
 			return
 		}
@@ -205,9 +262,10 @@ func Handler(w Windows, gw *gateway.Server) http.Handler {
 		}
 		writeJSON(rw, state())
 	})
-	providerRoutes(mux, w, gw)
+	providerRoutes(mux, w)
 	importRoutes(mux)
 	usageRoutes(mux)
+	backupRoutes(mux, w)
 	libraryRoutes(mux, w)
 	updateRoutes(mux, w)
 	mux.HandleFunc("GET /api/settings", func(rw http.ResponseWriter, r *http.Request) {
@@ -220,12 +278,16 @@ func Handler(w Windows, gw *gateway.Server) http.Handler {
 			return
 		}
 		// the Settings page sends its own choices; how the agents are
-		// arranged is the Agents page's, and stays as it is
+		// arranged is the Agents page's, and the window's size its own; both stay as they are
 		cur := settings.Load()
 		in.AgentOrder, in.AgentsHidden, in.AgentsShown = cur.AgentOrder, cur.AgentsHidden, cur.AgentsShown
+		in.Window = cur.Window // the window's own, as it was last resized
 		if err := settings.Save(in); err != nil {
 			fail(rw, err)
 			return
+		}
+		if in.Dock != cur.Dock && onDock != nil {
+			onDock(in.Dock)
 		}
 		writeJSON(rw, settingsState())
 	})
@@ -246,7 +308,10 @@ func Handler(w Windows, gw *gateway.Server) http.Handler {
 	})
 	// the config folder only: the page names no path, so it can't open others
 	mux.HandleFunc("POST /api/settings/reveal", func(rw http.ResponseWriter, r *http.Request) {
-		w.OpenFolder(settings.Dir())
+		if err := w.OpenFolder(settings.Dir()); err != nil {
+			fail(rw, err)
+			return
+		}
 		rw.WriteHeader(http.StatusNoContent)
 	})
 	mux.HandleFunc("POST /api/window/{action}", func(rw http.ResponseWriter, r *http.Request) {
@@ -288,6 +353,7 @@ func state() stateJSON {
 			}
 			aj.Fields = append(aj.Fields, fieldJSON{Key: f.Key, Label: f.Label, Value: vals[f.Key], Options: opts})
 		}
+		aj.Drift = a.Drift()
 		s.Agents = append(s.Agents, aj)
 	}
 	if ps, err := profile.Load(); err == nil {

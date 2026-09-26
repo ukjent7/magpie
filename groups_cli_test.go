@@ -112,9 +112,15 @@ func TestGroupAddSetRemove(t *testing.T) {
 		t.Fatal("group not in the catalog")
 	}
 
-	// the same name again is another group, as in the Routing view
-	if g2, err := addGroup("Opus anywhere", []string{"models=a/only-a"}); err != nil || g2.ID != "opus-anywhere-2" {
+	// the same name again replaces that group, keeping its id
+	if g2, err := addGroup("opus Anywhere", []string{"models=a/only-a"}); err != nil || g2.ID != "opus-anywhere" || strings.Join(g2.Members, " ") != "a/only-a" {
 		t.Fatalf("second: %+v %v", g2, err)
+	}
+	if gs := storedGroups(t); len(gs) != 1 {
+		t.Fatalf("replaced into two: %v", gs)
+	}
+	if _, err := addGroup("Opus anywhere", []string{"models=a/claude-opus-5-5,gpt-5.5", "routing=order", "stays=turn"}); err != nil {
+		t.Fatal(err)
 	}
 	if _, err := addGroup("x", []string{"models=a/m", "id=opus-anywhere"}); err == nil {
 		t.Fatal("an id taken was taken again")
@@ -130,8 +136,21 @@ func TestGroupAddSetRemove(t *testing.T) {
 		// a/m and b/vendor/m are different ids; "m" is only a's model
 		t.Fatalf("bare: %v", err)
 	}
-	if _, err := addGroup("nested", []string{"models=group/opus-anywhere"}); err == nil {
-		t.Fatal("a group in a group")
+	// a group in a group, but never one it is in itself
+	if _, err := addGroup("nested", []string{"models=group/opus-anywhere,a/only-a"}); err != nil {
+		t.Fatalf("a group in a group: %v", err)
+	}
+	if _, err := setGroup("opus-anywhere", []string{"models+=group/nested"}); err == nil || !strings.Contains(err.Error(), "in itself") {
+		t.Fatalf("a loop: %v", err)
+	}
+	if _, err := removeGroup("opus-anywhere"); err == nil || !strings.Contains(err.Error(), "take it out first") {
+		t.Fatalf("rm while in a group: %v", err)
+	}
+	if _, err := removeGroup("nested"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := addGroup("nowhere", []string{"models=group/nothing"}); err == nil || !strings.Contains(err.Error(), "no group") {
+		t.Fatalf("no such group: %v", err)
 	}
 
 	// set: by name or id, a field at a time
@@ -172,13 +191,16 @@ func TestGroupAddSetRemove(t *testing.T) {
 		t.Fatalf("restore: %+v %v", g, err)
 	}
 
-	if _, err := removeGroup("opus-anywhere-2"); err != nil {
+	if _, err := addGroup("Second", []string{"models=a/only-a"}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := findGroup("opus-anywhere-2"); err == nil {
+	if _, err := removeGroup("second"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := findGroup("second"); err == nil {
 		t.Fatal("removed group still there")
 	}
-	if _, err := removeGroup("opus-anywhere-2"); err == nil {
+	if _, err := removeGroup("second"); err == nil {
 		t.Fatal("removed twice")
 	}
 }
@@ -194,5 +216,33 @@ func TestCloseMatches(t *testing.T) {
 	}
 	if got := closeMatches("zzz", ids, 5); len(got) != 0 {
 		t.Errorf("%v", got)
+	}
+}
+
+// magpie group set <id> id=<new>: a found group loses its auto- prefix and
+// stays removed under the old id.
+func TestGroupSetID(t *testing.T) {
+	groupsHome(t)
+	if _, err := setGroup("auto-m", []string{"id=Not Slug!"}); err == nil {
+		t.Fatal("a bad id taken")
+	}
+	g, err := setGroup("group/auto-m", []string{"id=m", "routing=order"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if g.ID != "m" || g.Auto || g.Routing != "order" || len(g.Members) != 2 {
+		t.Fatalf("%+v", g)
+	}
+	if _, _, ok := provider.Resolve("group/m"); !ok {
+		t.Fatal("group/m not in the catalog")
+	}
+	if _, _, ok := provider.FindGroup("group/auto-m"); ok {
+		t.Fatal("auto-m is back beside m")
+	}
+	if _, err := addGroup("Other", []string{"models=a/only-a"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := setGroup("m", []string{"id=other"}); err == nil {
+		t.Fatal("renamed onto another group")
 	}
 }

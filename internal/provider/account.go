@@ -12,6 +12,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -20,6 +21,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -110,16 +112,20 @@ type Exclusion struct {
 	Agent    string `json:"agent"`
 	Provider string `json:"provider,omitempty"` // set when the user removed it; saving it brings it back
 	Why      string `json:"why"`
+	// SignedOut: the agent has accounts saved in magpie but isn't signed
+	// in where magpie looks, and so none of them is offered.
+	SignedOut bool `json:"signedOut,omitempty"`
 }
 
 // Excluded lists sign-ins magpie detects but leaves out: the accounts the
-// user removed from magpie.
+// user removed from magpie, and the saved accounts of an agent that isn't
+// signed in here (a magpie serve under another HOME, say).
 func Excluded() []Exclusion {
 	var out []Exclusion
 	for _, a := range Hidden() {
 		out = append(out, Exclusion{Agent: a.Account.Agent, Provider: a.ID, Why: "You removed it from magpie."})
 	}
-	return out
+	return append(out, savedButSignedOut()...)
 }
 
 const (
@@ -240,13 +246,19 @@ type claudeCredentialLocation struct {
 	keychain bool
 }
 
-func readClaudeCredential() (claudeCredentials, claudeCredentialLocation, bool) {
+// claudeCredentialsPath is Claude Code's credentials file, where it keeps
+// its sign-in off the Mac's keychain.
+func claudeCredentialsPath() string {
 	dir := os.Getenv("CLAUDE_CONFIG_DIR")
 	if dir == "" {
 		home, _ := os.UserHomeDir()
 		dir = filepath.Join(home, ".claude")
 	}
-	path := filepath.Join(dir, ".credentials.json")
+	return filepath.Join(dir, ".credentials.json")
+}
+
+func readClaudeCredential() (claudeCredentials, claudeCredentialLocation, bool) {
+	path := claudeCredentialsPath()
 	if b, err := os.ReadFile(path); err == nil {
 		if c, ok := parseClaudeCredentials(b); ok {
 			return c, claudeCredentialLocation{path: path}, true
@@ -259,8 +271,47 @@ func readClaudeCredential() (claudeCredentials, claudeCredentialLocation, bool) 
 	if err != nil {
 		return claudeCredentials{}, claudeCredentialLocation{}, false
 	}
-	c, ok := parseClaudeCredentials(bytes.TrimSpace(out))
-	return c, claudeCredentialLocation{keychain: true, account: os.Getenv("USER")}, ok
+	b, wasHex := keychainText(bytes.TrimSpace(out))
+	c, ok := parseClaudeCredentials(b)
+	loc := claudeCredentialLocation{keychain: true, account: claudeKeychainAccount()}
+	if ok && wasHex {
+		// written by magpie before it wrote them on one line: Claude Code
+		// reads that hex as no sign-in, so it is written again as it
+		// writes it
+		saveClaudeCredential(loc, c)
+	}
+	return c, loc, ok
+}
+
+// claudeKeychainAccount is the account Claude Code keeps its sign-in
+// under: $USER, else the login name, and claude-code-user for a name it
+// won't use.
+func claudeKeychainAccount() string {
+	name := os.Getenv("USER")
+	if name == "" {
+		if u, err := user.Current(); err == nil {
+			name = u.Username
+		}
+	}
+	if !keychainAccountRe.MatchString(name) {
+		return "claude-code-user"
+	}
+	return name
+}
+
+var keychainAccountRe = regexp.MustCompile(`^[a-zA-Z0-9._-]+$`)
+
+// keychainText undoes `security find-generic-password -w` printing a
+// password with a character it can't print — a newline — as hex.
+func keychainText(out []byte) ([]byte, bool) {
+	if len(out) == 0 || len(out)%2 != 0 || out[0] == '{' {
+		return out, false
+	}
+	b, err := hex.DecodeString(string(out))
+	if err != nil || !json.Valid(b) {
+		return out, false
+	}
+	return b, true
 }
 
 func claudeCredential() (claudeCredentials, claudeCredentialLocation, bool) {
@@ -291,6 +342,16 @@ func saveClaudeCredential(loc claudeCredentialLocation, c claudeCredentials) err
 	b, err := c.marshal()
 	if err != nil {
 		return err
+	}
+	if loc.keychain {
+		// on one line, as Claude Code writes it: a password with a newline
+		// comes back from `security -w` as hex, which Claude Code takes for
+		// no sign-in at all (#70)
+		var one bytes.Buffer
+		if err := json.Compact(&one, b); err != nil {
+			return err
+		}
+		b = one.Bytes()
 	}
 	if !loc.keychain {
 		if err := os.WriteFile(loc.path, append(b, '\n'), 0o600); err != nil {
@@ -522,10 +583,26 @@ func claudeToken(ctx context.Context) (string, error) {
 	return c.OAuth.AccessToken, nil
 }
 
+// refreshRefused is a refresh the vendor answered and turned down: the
+// sign-in is gone, where a refresh that got no answer may yet go through.
+type refreshRefused string
+
+func (e refreshRefused) Error() string { return string(e) }
+
+// refreshFailed is a refresh that didn't go through: refused when the vendor
+// turned the token down (400 invalid_grant, 401), a hiccup otherwise — a 403
+// is as likely a proxy or bot check in the way as the vendor's answer.
+func refreshFailed(status int, agent, msg string) error {
+	if status == http.StatusBadRequest || status == http.StatusUnauthorized {
+		return refreshRefused(msg)
+	}
+	return fmt.Errorf("%s token refresh failed (HTTP %d)", agent, status)
+}
+
 // claudeRefresh trades a sign-in's refresh token for a new pair.
 func claudeRefresh(ctx context.Context, c *claudeCredentials) error {
 	if c.OAuth.RefreshToken == "" {
-		return errors.New("Claude Code OAuth token expired; run claude auth login")
+		return refreshRefused("Claude Code OAuth token expired; run claude auth login")
 	}
 	body, _ := json.Marshal(map[string]string{"grant_type": "refresh_token", "refresh_token": c.OAuth.RefreshToken,
 		"client_id": claudeClientID})
@@ -546,7 +623,7 @@ func claudeRefresh(ctx context.Context, c *claudeCredentials) error {
 		ExpiresIn    int64  `json:"expires_in"`
 	}
 	if res.StatusCode != http.StatusOK || json.Unmarshal(b, &fresh) != nil || fresh.AccessToken == "" {
-		return errors.New("Claude Code is signed out (token refresh failed); run claude auth login")
+		return refreshFailed(res.StatusCode, "Claude Code", "Claude Code is signed out (token refresh failed); run claude auth login")
 	}
 	c.OAuth.AccessToken = fresh.AccessToken
 	if fresh.RefreshToken != "" {
@@ -583,6 +660,9 @@ func Accounts() []Provider {
 		out = append(out, p)
 	}
 	if p, ok := devinAccount(); ok {
+		out = append(out, p)
+	}
+	if p, ok := zcodeAccount(); ok {
 		out = append(out, p)
 	}
 	for _, agent := range []string{"gemini", "antigravity"} {
@@ -742,7 +822,7 @@ func codexRefresh(ctx context.Context, raw map[string]any) (string, error) {
 		RefreshToken string `json:"refresh_token"`
 	}
 	if res.StatusCode != 200 || json.Unmarshal(b, &fresh) != nil || fresh.AccessToken == "" {
-		return "", errors.New("Codex is signed out (token refresh failed); run codex login")
+		return "", refreshFailed(res.StatusCode, "Codex", "Codex is signed out (token refresh failed); run codex login")
 	}
 	toks["access_token"] = fresh.AccessToken
 	if fresh.IDToken != "" {

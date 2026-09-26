@@ -29,6 +29,8 @@ func SetLoginOn(agent, user string, on bool) error {
 		return setGrokLoginOn(user, on)
 	case "copilot":
 		return setCopilotLoginOn(user, on)
+	case "zcode":
+		return setZCodeLoginOn(user, on)
 	case "gemini", "antigravity":
 		return setGoogleLoginOn(agent, user, on)
 	}
@@ -58,6 +60,9 @@ func (p Provider) AlsoOn() []Provider {
 	}
 	if p.Account != nil && p.Account.Agent == "copilot" {
 		return copilotAlsoOn()
+	}
+	if p.Account != nil && p.Account.Agent == "zcode" {
+		return zcodeAlsoOn()
 	}
 	if p.Account != nil && (p.Account.Agent == "gemini" || p.Account.Agent == "antigravity") {
 		return googleAlsoOn(p.Account.Agent)
@@ -100,6 +105,14 @@ func (a *Account) Token(ctx context.Context) (tok string, ok bool, err error) {
 // savedLoginToken is a usable access token for a saved account, refreshed
 // when it's about to expire and written back to logins.json.
 func savedLoginToken(ctx context.Context, agent, user string) (tok, accountID string, err error) {
+	return renewSavedLogin(ctx, agent, user, false)
+}
+
+// renewSavedLogin is savedLoginToken, with force to refresh the sign-in
+// even while its access token is good (keepalive.go). A refresh the vendor
+// refuses is kept on the account as lapsed, until one goes through or it is
+// signed in again.
+func renewSavedLogin(ctx context.Context, agent, user string, force bool) (tok, accountID string, err error) {
 	savedTokenMu.Lock()
 	defer savedTokenMu.Unlock()
 	loginsMu.Lock()
@@ -121,11 +134,11 @@ func savedLoginToken(ctx context.Context, agent, user string) (tok, accountID st
 		if !ok {
 			return "", "", errors.New("the saved Claude sign-in of " + user + " is unreadable")
 		}
-		if claudeFresh(c) {
+		if !force && claudeFresh(c) {
 			return c.OAuth.AccessToken, "", nil
 		}
 		if err := claudeRefresh(ctx, &c); err != nil {
-			return "", "", fmt.Errorf("%s: %w", user, err)
+			return "", "", savedRefreshFailed(agent, user, err)
 		}
 		tok = c.OAuth.AccessToken
 		if auth, err = c.marshal(); err != nil {
@@ -141,11 +154,11 @@ func savedLoginToken(ctx context.Context, agent, user string) (tok, accountID st
 		if accountID == "" {
 			accountID = claimString(jwtClaims(a.Tokens.IDToken), "https://api.openai.com/auth", "chatgpt_account_id")
 		}
-		if exp, _ := jwtClaims(a.Tokens.AccessToken)["exp"].(float64); exp == 0 || time.Until(time.Unix(int64(exp), 0)) > 5*time.Minute {
+		if exp, _ := jwtClaims(a.Tokens.AccessToken)["exp"].(float64); !force && (exp == 0 || time.Until(time.Unix(int64(exp), 0)) > 5*time.Minute) {
 			return a.Tokens.AccessToken, accountID, nil
 		}
 		if tok, err = codexRefresh(ctx, raw); err != nil {
-			return "", "", fmt.Errorf("%s: %w", user, err)
+			return "", "", savedRefreshFailed(agent, user, err)
 		}
 		if auth, err = json.MarshalIndent(raw, "", "  "); err != nil {
 			return "", "", err
@@ -159,7 +172,31 @@ func savedLoginToken(ctx context.Context, agent, user string) (tok, accountID st
 	for i := range ls {
 		if ls[i].Agent == agent && strings.EqualFold(ls[i].User, user) {
 			ls[i].Auth = auth
+			ls[i].Renewed = time.Now().UTC().Truncate(time.Second)
+			ls[i].Lapsed = ""
 		}
 	}
 	return tok, accountID, writeLogins(ls)
+}
+
+// savedRefreshFailed words a saved account's failed refresh. One the vendor
+// refused is marked lapsed on the account: that sign-in is gone and has to be
+// made again, in magpie; the agent's own login command would sign the agent
+// in, not this account. A refresh that never got an answer marks nothing.
+func savedRefreshFailed(agent, user string, err error) error {
+	var refused refreshRefused
+	if !errors.As(err, &refused) {
+		return fmt.Errorf("%s: %w", user, err)
+	}
+	msg := user + "'s sign-in has expired — add the account again to use it"
+	loginsMu.Lock()
+	defer loginsMu.Unlock()
+	ls := readLogins()
+	for i := range ls {
+		if ls[i].Agent == agent && strings.EqualFold(ls[i].User, user) {
+			ls[i].Lapsed = msg
+		}
+	}
+	_ = writeLogins(ls)
+	return refreshRefused(msg)
 }

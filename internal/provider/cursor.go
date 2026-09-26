@@ -14,6 +14,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -145,9 +147,59 @@ func parseCursorModels(out string) []catalog.Model {
 		}
 		name := strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(m[2]), "(default)"))
 		name = strings.TrimSpace(strings.TrimSuffix(name, "(current)"))
-		ms = append(ms, catalog.Model{ID: m[1], Name: name})
+		ms = append(ms, catalog.Model{ID: m[1], Name: name, Context: cursorContext(m[1], name)})
 	}
 	return ms
+}
+
+// cursorDefaultContext is the context Cursor gives a model it doesn't name
+// as a 1M one.
+const cursorDefaultContext = 200_000
+
+var (
+	cursorMillion = regexp.MustCompile(`\b(\d+)M\b`)
+	cursorVariant = regexp.MustCompile(`-(fast|none|low|medium|high|xhigh|extra-high|max|thinking)$`)
+)
+
+// cursorContext is how much of a conversation Cursor lets a model hold. Its
+// ids ("claude-opus-5-5-high-fast") are its own, so no catalog knows them,
+// and an agent given none took every Cursor model for its own default: a
+// 1M one compacted at a fifth of it, and a 200K one — Cursor's own, where
+// the name doesn't say 1M — was sent more than Cursor keeps. The name says
+// which is which ("Claude Opus 5.5 1M"); under it, a model known to hold
+// less keeps its own.
+func cursorContext(id, name string) int {
+	if m := cursorMillion.FindStringSubmatch(name); m != nil {
+		n, _ := strconv.Atoi(m[1])
+		return n * 1_000_000
+	}
+	base := strings.TrimPrefix(id, "cursor-")
+	for {
+		b := cursorVariant.ReplaceAllString(base, "")
+		if b == base {
+			break
+		}
+		base = b
+	}
+	if base == "auto" { // Cursor's pick, not a model of that name
+		return cursorDefaultContext
+	}
+	if n := catalog.ContextOf(base); n > 0 && n < cursorDefaultContext {
+		return n
+	}
+	return cursorDefaultContext
+}
+
+// withCursorContexts fills in a saved list's contexts, fetched before
+// magpie kept them.
+func withCursorContexts(ms []catalog.Model) []catalog.Model {
+	out := slices.Clone(ms)
+	for i, m := range out {
+		if m.Context == 0 {
+			out[i].Context = cursorContext(m.ID, m.Name)
+		}
+	}
+	return out
 }
 
 var cursorLoginURL = regexp.MustCompile(`https://\S+`)

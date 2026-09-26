@@ -14,7 +14,7 @@ import (
 var grokBase = "https://cli-chat-proxy.grok.com/v1"
 
 func grokSubscriptionUsage(ctx context.Context) SubscriptionQuota {
-	q := SubscriptionQuota{Provider: "grok", Name: "Grok", Icon: "xai", Windows: []QuotaWindow{}}
+	q := SubscriptionQuota{Provider: "grok", Name: "Grok (SuperGrok)", Icon: "xai", Windows: []QuotaWindow{}}
 	if c, ok := readGrokCredential(GrokHome()); ok {
 		q.User = c.Email
 	}

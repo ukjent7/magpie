@@ -12,6 +12,7 @@ import (
 
 	"github.com/yetone/magpie/internal/agent"
 	"github.com/yetone/magpie/internal/catalog"
+	"github.com/yetone/magpie/internal/davsync"
 	"github.com/yetone/magpie/internal/claudebridge"
 	"github.com/yetone/magpie/internal/gateway"
 	"github.com/yetone/magpie/internal/netproxy"
@@ -43,6 +44,8 @@ const usage = `magpie — one place to pick every agent's model
   magpie backup [--no-keys] [file]    providers, keys, settings, profiles and agent models in one file, sealed with a passphrase
   magpie restore [--no-agents] <file> put a backup in on this machine
 
+  magpie library [sync|instructions|mcp|skill]   the instructions, MCP servers and skills written into every agent (magpie library help)
+
   magpie providers                list your providers: host, key, models, who uses them
   magpie presets                  the vendors magpie knows: add one with just a key
   magpie provider add <preset> <key>   e.g. magpie provider add deepseek sk-…
@@ -50,17 +53,21 @@ const usage = `magpie — one place to pick every agent's model
   magpie provider key|models|test|rm <id>
   magpie provider fallback <id> <provider/model>…   use these when it's out of quota or down
   magpie import [-y] <link>       add the provider a magpie://import?… link describes
-  magpie models                   every model agents can pick, as provider/model
+  magpie models [<agent>]         every model agents can pick, as provider/model; an agent's, and why others aren't
+  magpie visible [<agent> <family|provider|group>,… | all]
+                                  which models an agent is shown: families (magpie provider/group set <id> family=…)
   magpie groups                   routing groups: several models agents pick as one, group/<id>
   magpie group add <name> models=<m1>,<m2> [routing=smart|order|rotate|usage] [stays=auto|session|turn|off]
   magpie group <id> | set <id> k=v… | rm <id>   show, change or remove one (magpie group help for more)
   magpie accounts [agent] [--json]  every subscription magpie knows, with each one's allowance used and when it resets
   magpie accounts add <agent>     sign in to one more Claude, ChatGPT or Google (Gemini CLI, Antigravity) subscription
   magpie accounts switch <agent> <email>   sign the agent in to another of them
+  magpie accounts refresh         renew the saved Claude and ChatGPT sign-ins now (the gateway does it daily)
   magpie accounts project <gemini|antigravity> <email> <project>   the Google Cloud project a Google account's requests go to
 
   magpie serve                    run the gateway alone (the app runs it too)
   magpie usage [today|7d|30d|all] tokens and cost per agent and model (30d)
+  magpie quota [<provider>] [--json]  what is left of every subscription, plan and key balance
   magpie sync                     refresh the model catalog and vendor model lists
   magpie agents                   list every supported agent
   magpie update [check]           install the newest release (check: only say if there is one)
@@ -96,6 +103,8 @@ func run(args []string) error {
 	// a provider added, edited or removed, or a list fetched anew, reaches
 	// the model lists agents keep in files of their own
 	catalog.Changed = agent.SyncCatalog
+	// the setup kept the same on every computer, by whichever serves
+	gateway.WhileServing = append(gateway.WhileServing, davsync.Run)
 	if len(args) == 0 {
 		if hasGUI {
 			return runGUI(true, "")
@@ -149,7 +158,9 @@ func run(args []string) error {
 	case "provider":
 		return providerCmd(args)
 	case "models":
-		return models()
+		return models(args[1:])
+	case "visible":
+		return visibleCmd(args[1:])
 	case "groups":
 		return groups()
 	case "group":
@@ -160,8 +171,12 @@ func run(args []string) error {
 		return accountsCmd(args)
 	case "usage":
 		return usageCmd(args)
+	case "quota", "quotas":
+		return quotaCmd(args)
 	case "update":
 		return updateCmd(args)
+	case "library", "lib":
+		return libraryCmd(args)
 	case "backup":
 		return backupCmd(args[1:])
 	case "restore":
@@ -209,7 +224,7 @@ func set(a *agent.Agent, key, value string) error {
 	if err != nil {
 		return err
 	}
-	if err := f.Set(value); err != nil {
+	if err := a.Apply(f.Key, value); err != nil {
 		return err
 	}
 	if value == "" {

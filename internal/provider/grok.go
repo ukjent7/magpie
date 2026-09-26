@@ -111,7 +111,7 @@ func grokAccount() (Provider, bool) {
 		}
 		return ms, catalog.SaveLive("grok", "", ms)
 	}
-	return Provider{ID: "grok", Name: "Grok", Icon: "xai", Website: "https://x.ai/cli", Account: acct}, true
+	return Provider{ID: "grok", Name: "Grok (SuperGrok)", Icon: "xai", Website: "https://x.ai/cli", Account: acct}, true
 }
 
 var grokModelL = regexp.MustCompile(`^[*-]\s+([A-Za-z0-9][\w.:-]*)`)
@@ -121,7 +121,7 @@ var grokModelL = regexp.MustCompile(`^[*-]\s+([A-Za-z0-9][\w.:-]*)`)
 func grokModels(ctx context.Context, home string) ([]catalog.Model, error) {
 	path := GrokExecutable()
 	if path == "" {
-		return nil, errorf("the Grok CLI is not installed")
+		return nil, errorf("Grok Build is not installed")
 	}
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
@@ -213,7 +213,7 @@ func grokOwnEnv(env []string, home string) []string {
 func startGrokSignIn(s *signInFlow) error {
 	path := GrokExecutable()
 	if path == "" {
-		return errorf("install the Grok CLI first: curl -fsSL https://x.ai/cli/install.sh | bash")
+		return errorf("install Grok Build first: curl -fsSL https://x.ai/cli/install.sh | bash")
 	}
 	if _, ok := readGrokCredential(GrokHome()); !ok {
 		return runCLISignIn(s, "grok login", nil, true, nil, func() (string, string, bool) {
@@ -262,7 +262,9 @@ func runCLISignIn(s *signInFlow, what string, env []string, using bool, failed f
 		cancel()
 		return err
 	}
+	s.mu.Lock()
 	s.stop = cancel
+	s.mu.Unlock()
 	got := make(chan string, 1)
 	go func() {
 		sc := bufio.NewScanner(out)

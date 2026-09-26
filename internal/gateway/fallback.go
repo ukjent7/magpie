@@ -49,6 +49,16 @@ func (c candidate) label() string {
 	return c.p.ID + " (" + provider.Mask(c.p.Key) + ")"
 }
 
+// who is the key or account itself, however many the provider has on: a
+// provider's one key rests as the provider, and as itself once another
+// is added, and a conversation it answered stays with it all the same.
+func (c candidate) who() string {
+	if c.p.Account == nil && c.p.Key != "" {
+		return c.p.ID + "#" + provider.KeyID(c.p.Key)
+	}
+	return c.rest
+}
+
 // perKey is a provider once per key it has on, in order — or, for a
 // signed-in agent, once per account it has on, its own first. A key made
 // for one protocol only serves on that one's endpoint, and the keys that
@@ -208,51 +218,83 @@ func (s *Server) plan(p provider.Provider, model string, from provider.Protocol)
 // weighed together as the group's routing says — in order, member by
 // member, each as its own provider's routing orders it; else all as one,
 // so a subscription whose allowance renews soonest goes first whichever
-// provider it is of. A member's fallbacks are not the group's.
+// provider it is of. A group in the group is planned the same way by its
+// own routing, in its place when the group's is in order. A member's
+// fallbacks are not the group's.
 func (s *Server) planGroup(g provider.Group, ms []provider.Member, from provider.Protocol) ([]candidate, planned) {
 	var pl planned
-	var out []candidate
-	of := map[string]provider.Provider{} // candidate → its member's provider
-	var all, asides []candidate
+	var asides []candidate
 	var wAsides []Weighed
-	for _, m := range ms {
-		cs, aside, left := perKeyOf(m.Provider, m.Model, from)
-		asides, wAsides = append(asides, aside...), append(wAsides, asideOf(aside, m.Provider, false, from)...)
-		for _, c := range left {
-			w := weighed(c, m.Provider, weighing{}, false, from)
-			w.Unlisted = true
-			pl.left = append(pl.left, w)
-		}
-		if g.Routing == provider.Ordered {
-			cs, wg := weigh(m.Provider, cs, m.Model, from)
-			for i, c := range cs {
-				w := weighed(c, m.Provider, wg, false, from)
-				w.Turn = i == 0 && m.Provider.Routing == provider.Rotate && len(cs) > 1
-				pl.order = append(pl.order, w)
-			}
-			out = append(out, cs...)
-			continue
-		}
-		for _, c := range cs {
-			of[c.rest+"/"+c.model] = m.Provider
-		}
-		all = append(all, cs...)
-	}
-	if g.Routing != provider.Ordered {
-		cs, wg := weigh(provider.Provider{ID: provider.GroupPrefix + g.ID, Routing: g.Routing}, all, "", from)
-		for i, c := range cs {
-			w := weighed(c, of[c.rest+"/"+c.model], wg, false, from)
-			w.Routing = g.Routing
-			w.Turn = i == 0 && g.Routing == provider.Rotate && len(cs) > 1
-			pl.order = append(pl.order, w)
-		}
-		out = cs
-	}
+	out := planLevel(g, ms, 0, from, &pl, &asides, &wAsides)
 	out, pl.order = append(out, asides...), append(pl.order, wAsides...)
 	if len(out) == 0 {
 		return nil, pl
 	}
 	return restLast(out, pl)
+}
+
+// planLevel orders the models ms of g, a group depth groups down from the
+// one asked for, adding to pl's order as it goes: those set aside and
+// those unlisted it gathers for planGroup to put last.
+func planLevel(g provider.Group, ms []provider.Member, depth int, from provider.Protocol, pl *planned, asides *[]candidate, wAsides *[]Weighed) []candidate {
+	keys := func(m provider.Member) []candidate {
+		cs, aside, left := perKeyOf(m.Provider, m.Model, from)
+		*asides = append(*asides, aside...)
+		for _, w := range asideOf(aside, m.Provider, false, from) {
+			w.Via = m.Groups()
+			*wAsides = append(*wAsides, w)
+		}
+		for _, c := range left {
+			w := weighed(c, m.Provider, weighing{}, false, from)
+			w.Unlisted, w.Via = true, m.Groups()
+			pl.left = append(pl.left, w)
+		}
+		return cs
+	}
+	if g.Routing != provider.Ordered {
+		of := map[string]provider.Member{} // candidate → its model
+		var all []candidate
+		for _, m := range ms {
+			cs := keys(m)
+			for _, c := range cs {
+				of[c.rest+"/"+c.model] = m
+			}
+			all = append(all, cs...)
+		}
+		cs, wg := weigh(provider.Provider{ID: provider.GroupPrefix + g.ID, Routing: g.Routing}, all, "", from)
+		for i, c := range cs {
+			m := of[c.rest+"/"+c.model]
+			w := weighed(c, m.Provider, wg, false, from)
+			w.Routing, w.Via = g.Routing, m.Groups()
+			w.Turn = i == 0 && g.Routing == provider.Rotate && len(cs) > 1
+			pl.order = append(pl.order, w)
+		}
+		return cs
+	}
+	var out []candidate
+	for i := 0; i < len(ms); {
+		m := ms[i]
+		if len(m.Path) > depth+1 {
+			// a group in g: its models, planned by its routing
+			j := i + 1
+			for j < len(ms) && len(ms[j].Path) > depth+1 && ms[j].Path[depth] == m.Path[depth] {
+				j++
+			}
+			out = append(out, planLevel(m.Via[depth], ms[i:j], depth+1, from, pl, asides, wAsides)...)
+			i = j
+			continue
+		}
+		cs, wg := weigh(m.Provider, keys(m), m.Model, from)
+		for k, c := range cs {
+			w := weighed(c, m.Provider, wg, false, from)
+			w.Turn = k == 0 && m.Provider.Routing == provider.Rotate && len(cs) > 1
+			w.Via = m.Groups()
+			pl.order = append(pl.order, w)
+		}
+		out = append(out, cs...)
+		i++
+	}
+	return out
 }
 
 // asideOf is how the trace tells the keys made for another protocol than

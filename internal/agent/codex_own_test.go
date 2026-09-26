@@ -41,7 +41,7 @@ func TestCodexOwnModelsFollowPicks(t *testing.T) {
 	if got := own(); len(got) != 2 || got[0] != "gpt-a" || got[1] != "gpt-c" {
 		t.Fatalf("ticked a and c: %v", got)
 	}
-	for _, o := range viaMagpie("") {
+	for _, o := range viaMagpie("codex", "") {
 		if o.Ref == "" || o.Ref != o.Value {
 			t.Fatalf("magpie option without its catalog ref: %+v", o)
 		}

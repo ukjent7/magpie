@@ -91,6 +91,12 @@ type subscriptionRun struct {
 	// minute); the result is then collected with waitTool, from late.
 	patience time.Duration
 	late     map[string]chan mcpToolResult
+
+	// early holds the results the client sent for calls the agent hasn't
+	// made yet: Claude Code makes its MCP calls one after another, so of a
+	// reply's two tool calls the second is made only once the first has its
+	// result, while the client ran both and sent both results back at once.
+	early map[string]mcpToolResult
 }
 
 // waitTool collects a tool result that took longer than an agent's patience.
@@ -603,42 +609,51 @@ func closeBlocks(blocks []map[string]any, text *strings.Builder) []map[string]an
 	return blocks
 }
 
+// findRun is the run the request's new tool results are for, and those
+// results: the ones sent since the last assistant message. They are the
+// run's when one of them is a call it made; the rest it hasn't made yet.
 func (b *subscriptionBridge) findRun(req *Request) (*subscriptionRun, []Part) {
-	var all []Part
-	for _, m := range req.Messages {
-		for _, p := range m.Parts {
+	var fresh []Part
+	for i := len(req.Messages) - 1; i >= 0 && req.Messages[i].Role != "assistant"; i-- {
+		var parts []Part
+		for _, p := range req.Messages[i].Parts {
 			if p.Kind == ToolResult {
-				all = append(all, p)
+				parts = append(parts, p)
 			}
 		}
+		fresh = append(parts, fresh...)
+	}
+	if len(fresh) == 0 {
+		return nil, nil
 	}
 	// Claude emits message_stop just before its MCP calls are all scheduled.
 	// A very fast client can return a result while the callback is still being
 	// registered; give that tiny race a bounded grace period.
 	for attempt := 0; attempt < 20; attempt++ {
 		var found *subscriptionRun
-		var results []Part
 		b.mu.Lock()
-		for _, p := range all {
+		for _, p := range fresh {
 			run := b.calls[p.CallID]
 			if run == nil {
 				continue
 			}
 			if found != nil && found != run {
-				found, results = nil, nil
+				found = nil
 				break
 			}
-			found, results = run, append(results, p)
+			found = run
 		}
 		b.mu.Unlock()
-		if found != nil || len(all) == 0 || attempt == 19 {
-			return found, results
+		if found != nil {
+			return found, fresh
 		}
 		time.Sleep(25 * time.Millisecond)
 	}
 	return nil, nil
 }
 
+// continueWith hands the agent its tool results: at once for the calls it
+// is waiting on, the others kept until it makes them.
 func (r *subscriptionRun) continueWith(results []Part) (<-chan Event, error) {
 	if r.timer != nil {
 		r.timer.Reset(30 * time.Minute)
@@ -647,26 +662,45 @@ func (r *subscriptionRun) continueWith(results []Part) (<-chan Event, error) {
 	if r.begin != nil {
 		r.emit(r.begin())
 	}
+	delivered := 0
 	for _, p := range results {
+		result := mcpToolResult{Content: []map[string]any{{"type": "text", "text": p.Text}}, IsError: p.IsError}
 		r.mu.Lock()
 		waiter := r.pending[p.CallID]
 		delete(r.pending, p.CallID)
+		if waiter == nil && !r.closed {
+			if r.early == nil {
+				r.early = map[string]mcpToolResult{}
+			}
+			r.early[p.CallID] = result
+		}
 		r.mu.Unlock()
 		if waiter == nil {
-			r.abort()
-			return nil, fmt.Errorf("the agent is not waiting for tool result %s", p.CallID)
+			continue
 		}
+		delivered++
 		r.bridge.mu.Lock()
 		delete(r.bridge.calls, p.CallID)
 		r.bridge.mu.Unlock()
-		content := []map[string]any{{"type": "text", "text": p.Text}}
-		waiter <- mcpToolResult{Content: content, IsError: p.IsError}
+		waiter <- result
 		close(waiter)
+	}
+	if delivered == 0 {
+		r.abort()
+		return nil, fmt.Errorf("the agent is not waiting for tool results %s", callIDs(results))
 	}
 	if r.resume != nil {
 		r.resume()
 	}
 	return ch, nil
+}
+
+func callIDs(parts []Part) string {
+	ids := make([]string, len(parts))
+	for i, p := range parts {
+		ids[i] = p.CallID
+	}
+	return strings.Join(ids, ", ")
 }
 
 func (b *subscriptionBridge) mcpCall(w http.ResponseWriter, r *http.Request) {
@@ -693,6 +727,12 @@ func (b *subscriptionBridge) mcpCall(w http.ResponseWriter, r *http.Request) {
 	}
 	waiter := make(chan mcpToolResult, 1)
 	run.mu.Lock()
+	if result, ok := run.early[call.ToolCallID]; ok {
+		delete(run.early, call.ToolCallID)
+		run.mu.Unlock()
+		writeJSON(w, 200, result)
+		return
+	}
 	run.pending[call.ToolCallID] = waiter
 	run.mu.Unlock()
 	b.mu.Lock()
@@ -786,7 +826,9 @@ func (r *subscriptionRun) finish() {
 	if ch != nil {
 		close(ch)
 	}
-	r.bridge.removeRun(r)
+	if r.bridge != nil { // a run made in a test may have none
+		r.bridge.removeRun(r)
+	}
 }
 
 func (r *subscriptionRun) abort() {
@@ -894,7 +936,10 @@ func (s *Server) serveSubscription(w http.ResponseWriter, r *http.Request, from 
 		}
 		// before the reply's last event, which the agent may answer at once
 		run.ended(req, said, stop, failed == "" && r.Context().Err() == nil)
-		enc.finish()
+		// an error event already ended the reply in the client's protocol
+		if failed == "" {
+			enc.finish()
+		}
 		return 200, failed
 	}
 	var col collector

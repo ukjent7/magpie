@@ -76,3 +76,15 @@ func TestSubscriptionUsageServesStale(t *testing.T) {
 		t.Fatal("a stale copy did not start a refresh")
 	}
 }
+
+func TestChosenWindows(t *testing.T) {
+	ws := []QuotaWindow{{Name: "Gemini 3.8 Flash (High)", Model: "gemini-3.8-flash-high"}, {Name: "Gemini 3 Flash", Model: "gemini-3-flash"}, {Name: "Weekly"}}
+	got := chosenWindows(ws, map[string]bool{"gemini-3.8-flash-high": true})
+	if len(got) != 2 || got[0].Model != "gemini-3.8-flash-high" || got[1].Name != "Weekly" {
+		t.Fatalf("got %+v", got)
+	}
+	// ids the quota names that none of the enabled ones match: keep them all
+	if got := chosenWindows(ws[:2], map[string]bool{"gemini-pro-agent": true}); len(got) != 2 {
+		t.Fatalf("kept %d of 2", len(got))
+	}
+}

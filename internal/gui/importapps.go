@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"net/http"
 
-	"github.com/yetone/magpie/internal/gateway"
 	"github.com/yetone/magpie/internal/provider"
 )
 
@@ -12,7 +11,7 @@ import (
 // the page lists them, keys masked, and posts back the ones the user
 // picked; the keys are read again here, never sent to the page.
 
-func importAppsRoutes(mux *http.ServeMux, gw *gateway.Server) {
+func importAppsRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/importapps", func(rw http.ResponseWriter, r *http.Request) {
 		sources := provider.ImportSources()
 		for i := range sources {
@@ -37,6 +36,6 @@ func importAppsRoutes(mux *http.ServeMux, gw *gateway.Server) {
 		writeJSON(rw, struct {
 			Added []string `json:"added"`
 			State any      `json:"state"`
-		}{added, providersState(gw)})
+		}{added, providersState()})
 	})
 }

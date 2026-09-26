@@ -87,6 +87,8 @@ const (
 	fmtCrush
 	fmtGoose
 	fmtPi
+	fmtDesktop
+	fmtZCode
 )
 
 // mcpFile is the file an agent keeps its user-wide MCP servers in.
@@ -104,17 +106,26 @@ func (f *mcpFile) key() string {
 		return "mcp"
 	case fmtGoose:
 		return "extensions"
+	case fmtZCode:
+		return "mcp.servers"
 	}
 	return "mcpServers"
 }
 
 // supports says why the agent can't reach a server, or nil when it can.
 func (f *mcpFile) supports(s *Server) error {
+	if f.Format == fmtDesktop && s.Remote() {
+		return errNoRemote
+	}
 	if s.Transport == "sse" && (f.Format == fmtCodex || f.Format == fmtGoose) {
 		return errNoSSE
 	}
 	return nil
 }
+
+// errNoRemote is what the page says of an app that reaches only a server
+// it runs itself (Claude Desktop, whose remote ones are its Connectors).
+var errNoRemote = errors.New("no-remote")
 
 // errNoSSE is what the page says of an agent that can't reach a server
 // over SSE (Codex, Goose).
@@ -173,7 +184,7 @@ func (f *mcpFile) encode(s *Server) ordered {
 		}
 	}
 	switch f.Format {
-	case fmtClaude, fmtCrush:
+	case fmtClaude, fmtCrush, fmtZCode:
 		add("type", s.Transport)
 		if s.Remote() {
 			add("url", s.URL)
@@ -207,7 +218,7 @@ func (f *mcpFile) encode(s *Server) ordered {
 			optional("environment", s.Env)
 		}
 		add("enabled", true)
-	case fmtCursor:
+	case fmtCursor, fmtDesktop:
 		if s.Remote() {
 			add("url", s.URL)
 			optional("headers", s.Headers)
@@ -354,7 +365,7 @@ func (f *mcpFile) decode(name string, m map[string]any) (*Server, bool) {
 		} else {
 			local(str(m, "command"), m["args"], m["env"])
 		}
-	default: // Claude Code, Cursor, Copilot, Crush
+	default: // Claude Code, Cursor, Copilot, Crush, ZCode
 		t := str(m, "type")
 		if u := str(m, "url"); u != "" {
 			if t != "sse" {
@@ -393,7 +404,11 @@ func (f *mcpFile) entries() (map[string]map[string]any, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", f.Path, err)
 	}
-	all, _ := doc[f.key()].(map[string]any)
+	// the key can be a path: ZCode keeps them in mcp.servers
+	var all map[string]any = doc
+	for _, k := range strings.Split(f.key(), ".") {
+		all, _ = all[k].(map[string]any)
+	}
 	for name, v := range all {
 		if m, ok := v.(map[string]any); ok {
 			out[name] = m
@@ -426,7 +441,9 @@ var owned = map[mcpFormat][]string{
 	fmtCopilot:  {"type", "url", "headers", "command", "args", "env"},
 	fmtGoose:    {"enabled", "name", "type", "uri", "headers", "cmd", "args", "envs"},
 	fmtCodex:    {"url", "http_headers", "command", "args", "env"},
+	fmtDesktop:  {"url", "headers", "command", "args", "env"},
 	fmtPi:       {"transport", "httpTransport", "url", "headers", "command", "args", "env"},
+	fmtZCode:    {"type", "url", "headers", "command", "args", "env"},
 }
 
 // merged is the entry magpie writes, with what the user added to the old
@@ -481,14 +498,12 @@ func (f *mcpFile) del(name string) error {
 
 // delCodex takes out the server's table and the tables under it ([…env]),
 // or only those under it, which putCodex writes inline instead.
+// Include child array tables (such as env_vars), which would otherwise
+// implicitly recreate the removed server.
 func delCodex(path, name string, self bool) error {
 	table := "mcp_servers." + name
-	for _, t := range edit.TOMLTables(path) {
-		if strings.HasPrefix(t, table+".") {
-			if err := edit.DelTOMLTable(path, t); err != nil {
-				return err
-			}
-		}
+	if err := edit.SetTOMLTables(path, []string{table + "."}, nil); err != nil {
+		return err
 	}
 	if !self {
 		return nil
@@ -592,6 +607,26 @@ type Found struct {
 	Server *Server  `json:"server"`
 	Others []string `json:"others,omitempty"`
 	Icon   string   `json:"icon,omitempty"`
+	// Own: the agent's app puts it there itself, each time it starts
+	// (Codex's node_repl and cua_repl): it isn't one to bring in, and
+	// taking it out doesn't last.
+	Own bool `json:"own,omitempty"`
+}
+
+// appOwned is whether a server runs from inside an app's own install — a
+// Mac app bundle, a Microsoft Store app, the Codex app's runtimes — as the
+// servers an agent's app writes into its config itself do.
+func appOwned(s *Server) bool {
+	if s.Remote() {
+		return false
+	}
+	cmd := strings.ToLower(strings.ReplaceAll(s.Command, `\`, "/"))
+	for _, in := range []string{".app/contents/", "/windowsapps/", "/cua_node/", "/openai/codex/runtimes/"} {
+		if strings.Contains(cmd, in) {
+			return true
+		}
+	}
+	return false
 }
 
 func foundServers(l *Library) []Found {
@@ -614,7 +649,7 @@ func foundServers(l *Library) []Found {
 			switch {
 			case f == nil:
 				s.Agents = []string{t.Agent.ID}
-				byName[name] = &Found{Server: s}
+				byName[name] = &Found{Server: s, Own: appOwned(s)}
 				names = append(names, name)
 			case f.Server.same(s):
 				f.Server.Agents = append(f.Server.Agents, t.Agent.ID)

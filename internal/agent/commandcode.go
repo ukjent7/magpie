@@ -44,6 +44,16 @@ func commandCode(home string) *Agent {
 			}
 			return strings.Join(notes, " ")
 		},
+		Check: func() string {
+			if !usesMagpie(get("model")) {
+				return ""
+			}
+			if p := get("modelProvider"); p != magpieID {
+				return "Command Code's modelProvider (settings.json) is " + orDefault(p) + ", so it no longer asks magpie"
+			}
+			return wiringOff("Command Code", providers, func(k string) (string, bool) { return edit.GetJSON(providers, "provider."+magpieID+"."+k) },
+				"baseURL", gatewayV1())
+		},
 		Fields: []Field{{
 			Key: "model", Label: "model",
 			Get: func() string { return get("model") },
@@ -79,7 +89,7 @@ func commandCode(home string) *Agent {
 				if v := cur["model"]; v != "" && !usesMagpie(v) {
 					out = append(out, Option{Value: v, Icon: modelIcon("", v)})
 				}
-				return append(out, viaMagpie(magpieID+"/")...)
+				return append(out, viaMagpie("commandcode", magpieID+"/")...)
 			},
 		}},
 	}
@@ -89,7 +99,7 @@ func commandCode(home string) *Agent {
 // the gateway takes any, and Command Code refuses one written out.
 func ccProviderJSON() any {
 	ms := map[string]any{}
-	for _, m := range magpieModels() {
+	for _, m := range magpieModels("commandcode") {
 		e := map[string]any{"name": m.Name}
 		var efforts []string
 		for _, x := range m.Efforts {

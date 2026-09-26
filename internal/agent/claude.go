@@ -3,7 +3,9 @@ package agent
 import (
 	"fmt"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"time"
 
 	"github.com/yetone/magpie/internal/catalog"
 	"github.com/yetone/magpie/internal/edit"
@@ -144,7 +146,7 @@ func claude(home string) *Agent {
 			// Only the catalog's models; Claude Code's own short aliases are
 			// not something any API lists, and a compiled-in copy would just
 			// go stale.
-			return append(group(name, own), viaMagpie("")...)
+			return append(group(name, own), claudeViaMagpie()...)
 		},
 	}}
 	for _, tier := range claudeTiers {
@@ -185,7 +187,7 @@ func claude(home string) *Agent {
 				if !routed() {
 					return nil
 				}
-				return viaMagpie("")
+				return claudeViaMagpie()
 			},
 		})
 	}
@@ -195,5 +197,49 @@ func claude(home string) *Agent {
 		UA:  []string{"claude-cli", "claude-code"},
 		Bin: "claude", Dir: filepath.Dir(path), Path: path,
 		Fields: fields,
+		Check: func() string {
+			if !isMagpie(get()) {
+				return ""
+			}
+			// an administrator's settings win over the user's
+			if u, _ := edit.GetJSON(claudeManaged(), "env.ANTHROPIC_BASE_URL"); u != "" && u != gateway.URL() {
+				return "Claude Code's managed settings (" + claudeManaged() + ") set ANTHROPIC_BASE_URL to " + u + ", which wins over magpie's"
+			}
+			return wiringOff("Claude Code", path, func(k string) (string, bool) { return edit.GetJSON(path, "env."+k) },
+				"ANTHROPIC_BASE_URL", gateway.URL(), "ANTHROPIC_AUTH_TOKEN", gateway.Token)
+		},
+		// every prompt typed into Claude Code goes into history.jsonl
+		LastUsed: func() time.Time {
+			return lastJSONLTime(filepath.Join(filepath.Dir(path), "history.jsonl"), "timestamp", "display")
+		},
 	}
+}
+
+// claudeViaMagpie is what magpie serves Claude Code, a model with a window
+// of 1M or more marked [1m]: Claude Code takes any other for 200K, and
+// compacts long before a 1M model needs it. It drops the mark before asking.
+func claudeViaMagpie() []Option {
+	big := map[string]bool{}
+	for _, m := range magpieModels("claude") {
+		big[m.ID] = m.Context >= 1_000_000
+	}
+	opts := viaMagpie("claude", "")
+	for i, o := range opts {
+		if big[o.Ref] {
+			opts[i].Value += "[1m]"
+		}
+	}
+	return opts
+}
+
+// claudeManaged is where an administrator's Claude Code settings live; a var
+// so tests can point it elsewhere.
+var claudeManaged = func() string {
+	switch runtime.GOOS {
+	case "darwin":
+		return "/Library/Application Support/ClaudeCode/managed-settings.json"
+	case "windows":
+		return `C:\ProgramData\ClaudeCode\managed-settings.json`
+	}
+	return "/etc/claude-code/managed-settings.json"
 }

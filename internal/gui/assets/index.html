@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>magpie</title>
+<script src="boot.js"></script>
 <link rel="stylesheet" href="app.css">
 <link rel="stylesheet" href="routing.css">
 <link rel="stylesheet" href="library.css">
@@ -35,6 +36,9 @@
     </button>
     <button class="icon" id="prefs" title="Settings" data-tt>
       <svg viewBox="0 0 24 24" width="14" height="14"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></g></svg>
+    </button>
+    <button class="icon winclose" id="winclose" title="Close" data-tt>
+      <svg viewBox="0 0 16 16" width="10" height="10"><path d="M4 4l8 8M12 4l-8 8" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
     </button>
   </div>
 </header>
@@ -109,11 +113,19 @@
       <div class="who"><div class="name" data-t>Tray icon</div><div class="sub" data-t>What clicking magpie’s icon in the menu bar or tray opens</div></div>
       <div id="traySegs"></div>
     </div>
+    <div class="row pref" id="dockRow" hidden>
+      <div class="who"><div class="name" data-t>Dock</div><div class="sub" data-t>Keep magpie in the Dock too, for a menu bar too full to show its icon</div></div>
+      <div id="dockSegs"></div>
+    </div>
     <div class="row pref">
       <div class="who"><div class="name" data-t>Proxy</div><div class="sub" id="proxySub"></div></div>
       <div id="proxySegs" class="proxy-segs"></div>
     </div>
   </div>
+  <div class="row-head"><span class="label" data-t>Privacy</span></div>
+  <div class="list prefs" id="redactList"></div>
+  <div class="row-head"><span class="label" data-t>Sync and backup</span></div>
+  <div class="list prefs" id="syncList"></div>
   <div class="row-head"><span class="label" data-t>About</span></div>
   <div class="list prefs" id="about"></div>
 </main>

@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/yetone/magpie/internal/catalog"
 	"github.com/yetone/magpie/internal/provider"
 )
 
@@ -164,5 +165,35 @@ func TestDshSettingsEndpoint(t *testing.T) {
 	os.WriteFile(p, []byte("llm-deepseek:\n  baseURL: https://x\nui:\n  apiKey: y\n"), 0o644)
 	if !dshSettingsEndpoint(p) {
 		t.Fatal("baseURL missed")
+	}
+}
+
+// Without them dsh takes every model for a text-only one with a million
+// tokens of context and 256K out.
+func TestDshModelLimits(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("DSH_HOME", "")
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
+	if err := provider.Save(provider.Provider{ID: "v", Name: "V", Chat: "https://example.test/v1", Key: "k", Models: []string{"see", "plain"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := catalog.SaveLive("v", "https://example.test/v1", []catalog.Model{
+		{ID: "see", Name: "see", Images: true, ImageInput: imageInputBool(true), Context: 400000, Output: 128000},
+		{ID: "plain", Name: "plain", ImageInput: imageInputBool(false)},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	s := strings.Join(dshProviderLines(true), "\n")
+	want := `      - id: "v/see"
+        name: "see · V"
+        contextWindow: 400000
+        maxTokens: 128000
+        inputModalities: [text, image]
+      - id: "v/plain"
+        name: "plain · V"`
+	if !strings.Contains(s, want) || strings.Count(s, "contextWindow") != 1 {
+		t.Fatalf("models:\n%s", s)
 	}
 }

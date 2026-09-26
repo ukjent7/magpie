@@ -21,6 +21,9 @@
   --red-soft: #fbe9e9;
   --amber: #b45309;
   --amber-soft: #fbf0df;
+  /* an agent magpie set up that no longer goes through it */
+  --drift: #ce2c31;
+  --drift-soft: #feebec;
   --pop-bg: rgba(255, 255, 255, .94);
   --shadow: 0 16px 44px rgba(20, 22, 30, .16), 0 2px 8px rgba(20, 22, 30, .06), 0 0 0 .5px rgba(20, 22, 30, .1);
   --font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", system-ui, sans-serif;
@@ -51,6 +54,8 @@
     --red-soft: #45272a;
     --amber: #f2b544;
     --amber-soft: #3f3220;
+    --drift: #ff9592;
+    --drift-soft: #3b1219;
     --pop-bg: rgba(38, 38, 43, .96);
     --shadow: 0 16px 44px rgba(0, 0, 0, .55), 0 2px 8px rgba(0, 0, 0, .3), 0 0 0 .5px rgba(255, 255, 255, .1);
     --logo-invert: 1;
@@ -62,6 +67,7 @@
   --line: #333339; --line-2: #2c2c32; --fg: #ededf1; --fg-2: #b9b9c1; --muted: #8b8b94; --faint: #56565f;
   --accent: #a5b4fc; --accent-soft: #2b2c47; --accent-fg: #14142a; --sel: #33345a;
   --green: #6fd99b; --green-soft: #1e3a2b; --red: #f28b82; --red-soft: #45272a; --amber: #f2b544; --amber-soft: #3f3220;
+  --drift: #ff9592; --drift-soft: #3b1219;
   --pop-bg: rgba(38, 38, 43, .96);
   --shadow: 0 16px 44px rgba(0, 0, 0, .55), 0 2px 8px rgba(0, 0, 0, .3), 0 0 0 .5px rgba(255, 255, 255, .1);
   --logo-invert: 1;
@@ -131,7 +137,11 @@ code { font: 11.5px var(--code); }
 body.window.mac .top { padding-left: 96px; height: 50px; padding-top: 2px; } /* the traffic lights centre 25.75pt from the top, not 25 */
 body.window.mac .seg { top: calc(50% + 1px); } /* 50% centres in the padding box; the 2px top padding puts the flex row a pixel lower */
 .brand { display: flex; align-items: center; gap: 6px; font-weight: 600; letter-spacing: .01em; }
-body.window:not(.mac) .brand { display: none; } /* the title bar above already shows the icon and the name */
+body.window:not(.mac):not(.linux) .brand { display: none; } /* Windows' title bar above already shows the icon and the name */
+/* Linux: the header is the title bar, so it closes the window too — round,
+   as GNOME draws its close button, and set a little apart from the icons */
+.icon.winclose { align-self: center; width: 22px; height: 22px; margin-left: 8px; border-radius: 50%; background: var(--pill); color: var(--fg-2); }
+.icon.winclose:hover { background: color-mix(in srgb, var(--fg) 12%, transparent); }
 /* the magpie flaps, flicks its tail and bobs when the window opens and on
    hover. It moves in pieces cut from the logo, and is drawn whole at rest, so
    the cuts never show. */
@@ -169,11 +179,12 @@ body.window:not(.mac) .brand { display: none; } /* the title bar above already s
 .logo { color: var(--fg); display: inline-flex; } /* ink, like the wordmark; the accent blue fought the text in light mode */
 .seg {
   position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
-  display: inline-flex; padding: 2px; border-radius: 8px;
+  display: inline-flex; padding: 2px; border-radius: 9px;
   background: var(--pill);
 }
+.seg > .thumb { border-radius: 7px; }
 body.panel .seg { display: none; }
-.seg button { position: relative; z-index: 1; white-space: nowrap; height: 24px; padding: 0 12px; border-radius: 6px; font-size: 12.5px; color: var(--muted); transition: color .18s var(--ease), transform .14s var(--ease); }
+.seg button { position: relative; z-index: 1; white-space: nowrap; height: 30px; padding: 0 14px; border-radius: 7px; font-size: 13.5px; color: var(--muted); transition: color .18s var(--ease), transform .14s var(--ease); }
 .seg button.on { color: var(--fg); }
 .seg button:hover:not(.on) { color: var(--fg-2); }
 .actions { margin-left: auto; display: flex; gap: 2px; }
@@ -207,7 +218,7 @@ body.panel .seg { display: none; }
 .top.tight .brand > span:not(.logo), .top.tight .update span { display: none; }
 .top.tight .update { width: 22px; padding: 0; justify-content: center; margin-right: 4px; }
 body.window .top.cramped .seg { position: relative; left: auto; top: auto; transform: none; margin: 0 auto; } /* relative still: its thumb sits in it, not over the whole header */
-.top.cramped .seg button { padding: 0 8px; }
+.top.cramped .seg button { padding: 0 10px; }
 @keyframes update-in { from { opacity: 0; transform: translateY(-3px) scale(.94); } }
 @keyframes spin { to { transform: rotate(360deg); } }
 
@@ -216,6 +227,12 @@ body.window .top.cramped .seg { position: relative; left: auto; top: auto; trans
 @keyframes view-in { from { opacity: 0; transform: translateY(5px); } }
 body.window .view { padding: 2px 16px 8px; }
 .view::-webkit-scrollbar { width: 0; }
+/* Windows and Linux draw a classic scrollbar, arrows and all; a thin rounded
+   thumb instead, like the overlay one macOS shows (left as it is there) */
+:where(body:not(.mac)) ::-webkit-scrollbar { width: 10px; height: 10px; background: transparent; }
+:where(body:not(.mac)) ::-webkit-scrollbar-thumb { background: var(--faint); border: 3px solid transparent; border-radius: 10px; background-clip: padding-box; }
+:where(body:not(.mac)) ::-webkit-scrollbar-thumb:hover { background-color: var(--muted); }
+:where(body:not(.mac)) ::-webkit-scrollbar-button, :where(body:not(.mac)) ::-webkit-scrollbar-corner { display: none; background: transparent; }
 .list { background: var(--card); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; flex: none; }
 body.panel .list { border: 0; border-radius: 10px; box-shadow: var(--card-edge); }
 .row { display: flex; align-items: center; gap: 9px; min-height: 40px; padding: 5px 9px 5px 11px; }
@@ -258,8 +275,48 @@ body.window .ag-handle { width: 28px; height: 28px; }
 .agent-fold .ag-handle { cursor: default; }
 #agents > .row .ag-handle:is(:hover, .open, :focus-visible) > .ic, #agents > .row.dragging .ag-handle > .ic { opacity: 0; transform: scale(.8); }
 #agents > .row .ag-handle:is(:hover, .open, :focus-visible) > .grip, #agents > .row.dragging .ag-handle > .grip { opacity: 1; transform: none; }
-/* a hidden one reads as put away */
-.agent-fold .row .ag-handle > .ic, .agent-fold .row .name { opacity: .55; }
+/* one hidden by hand reads as put away, with its way back beside its name */
+.agent-fold .row.put-away .ag-handle > .ic, .agent-fold .row.put-away .name { opacity: .6; }
+.agent-fold .row.put-away .who { display: flex; align-items: center; gap: 8px; }
+/* at the end of the name's column, so it comes up in one place down the rows */
+.agent-fold .row .ag-show { margin-left: auto; }
+.ag-show { display: inline-flex; align-items: center; gap: 4px; flex: none; height: 22px; padding: 0 8px; border: 1px solid var(--line); border-radius: 999px; background: var(--card); color: var(--fg-2); font: inherit; font-size: 11.5px; cursor: pointer; transition: background-color .15s, color .15s, border-color .15s; }
+.ag-show:hover { background: var(--pill); color: var(--fg); }
+/* it comes up with the row under the pointer, or the keyboard on it; the
+   line over the rows already says why they are there */
+@media (hover: hover) {
+  .agent-fold .row .ag-show { opacity: 0; transform: translateX(3px); transition: opacity .15s, transform .2s cubic-bezier(.22, 1, .36, 1), background-color .15s, color .15s; }
+  .agent-fold .row:is(:hover, :focus-within) .ag-show { opacity: 1; transform: none; }
+}
+.ag-show:focus-visible { outline: 1.5px solid var(--fg-2); outline-offset: 1px; }
+.ag-show svg { color: var(--muted); }
+/* an agent whose config was rewritten since magpie set it: a line under
+   its name saying so, and the button that sets it again */
+/* a drifted agent: a coral pill on its name's line — the row keeps its
+   height and the pickers their columns */
+.row.drifted .who { display: flex; align-items: center; gap: 7px; }
+.row.drifted .who .name { flex: 0 1 auto; }
+.ag-fix { display: inline-flex; align-items: center; gap: 4px; flex: none; height: 20px; padding: 0 8px 0 6px; border: 0; border-radius: 999px; background: var(--drift-soft); color: var(--drift); font: inherit; font-size: 11.5px; font-weight: 500; line-height: 1; cursor: pointer; transition: background-color .15s, color .15s, transform .12s; }
+.ag-fix:hover { background: color-mix(in srgb, var(--drift) 16%, var(--drift-soft)); }
+.ag-fix:active { transform: scale(.96); }
+.ag-fix:focus-visible { outline: 1.5px solid var(--drift); outline-offset: 1px; }
+.ag-fix.busy { pointer-events: none; opacity: .7; }
+.ag-fix.busy svg { animation: spin .8s linear infinite; }
+/* the panel's name column has no room for it: there it is a badge on the
+   agent's logo, the name and the columns left as every other row's */
+body.panel .row.drifted { position: relative; }
+body.panel .ag-fix { position: absolute; left: 20px; top: calc(50% + 1px); width: 14px; height: 14px; padding: 0; justify-content: center; background: var(--drift); color: var(--card); box-shadow: 0 0 0 2px var(--card); }
+body.panel .ag-fix:hover { background: var(--drift); filter: brightness(1.08); }
+body.panel .ag-fix svg { width: 9px; height: 9px; }
+body.panel .ag-fix span { display: none; }
+.row.drifted .field[data-key="model"] { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--drift) 38%, transparent); }
+
+/* the line over each kind of folded agent: hidden by hand, or nothing set */
+.agent-fold-cap { padding: 8px 11px 2px; font-size: 11px; font-weight: 500; color: var(--muted); letter-spacing: .02em; border-top: 1px solid var(--line-2); }
+body.window .agent-fold-cap { padding: 10px 14px 3px; }
+.agent-fold-cap + .row { border-top: 0; }
+.agent-fold .agent-fold-cap { opacity: 0; transition: opacity .22s ease; }
+.agent-fold.open .agent-fold-cap { opacity: 1; transition: opacity .42s ease; transition-delay: calc(70ms + var(--i) * 48ms); }
 /* while a row is dragged the others slide out of its way */
 #agents.sorting { user-select: none; -webkit-user-select: none; }
 #agents.sorting > .row { transition: transform .22s cubic-bezier(.22, 1, .36, 1); }
@@ -395,6 +452,11 @@ body.window .field.solo { grid-column: auto; }
 .profiles .label { flex: none; }
 .profiles .chips { flex: 1 1 0; min-width: 0; padding: 0; min-height: 0; }
 .profiles #save { margin-left: auto; flex: none; }
+/* switching profile is what the panel is opened for: a target to hit, not a tag */
+.profiles .chips { gap: 8px; }
+.profiles .chip { height: 30px; padding: 0 6px 0 13px; font-size: 13px; }
+.profiles .chip .x { width: 20px; height: 20px; font-size: 13px; }
+.profiles .chips .hint { line-height: 30px; }
 .row-head { display: flex; align-items: center; height: 26px; }
 .label { font-size: 11px; font-weight: 600; letter-spacing: .05em; text-transform: uppercase; color: var(--muted); }
 .text { font-size: 12px; color: var(--muted); padding: 3px 7px; border-radius: 6px; transition: background .12s, color .12s; white-space: nowrap; }
@@ -453,7 +515,9 @@ body.window .foot { padding-left: 18px; }
 .pop input::placeholder { color: var(--faint); }
 .picker-body { display: flex; min-height: 0; flex: 1 1 auto; }
 #pickerRail[hidden] { display: none; }
-#pickerRail { position: relative; width: 43px; padding: 6px 5px; border-right: 1px solid var(--line-2); display: flex; flex-direction: column; align-items: center; gap: 3px; flex: none; overflow-y: auto; }
+#pickerRail { position: relative; width: 43px; padding: 6px 5px; border-right: 1px solid var(--line-2); display: flex; flex-direction: column; align-items: center; gap: 3px; flex: none; overflow-y: auto; overflow-x: hidden; scrollbar-width: none; }
+/* it draws its own thumb (.rail-thumb) */
+#pickerRail::-webkit-scrollbar { width: 0; height: 0; }
 .rail-thumb { position: absolute; z-index: 0; top: 0; left: 5px; width: 31px; height: 31px; border-radius: 8px; opacity: 0; background: var(--sel); box-shadow: inset 0 0 0 1px var(--line-2), 0 1px 2px rgba(0, 0, 0, .06); pointer-events: none; transition: transform 260ms cubic-bezier(.22, 1, .36, 1), opacity 100ms ease-out; will-change: transform; }
 .rail-item { position: relative; z-index: 1; width: 31px; height: 31px; border-radius: 8px; display: inline-flex; align-items: center; justify-content: center; color: var(--muted); flex: none; transition: color 150ms ease-out, transform 150ms cubic-bezier(.25, 1, .5, 1); }
 .rail-item:hover { color: var(--fg); background: color-mix(in srgb, var(--pill) 68%, transparent); }
@@ -910,9 +974,10 @@ body.window .ag-sk-icon { width: 22px; height: 22px; border-radius: 6px; }
 .row.pref .sub { margin-top: 2px; }
 .row.pref .segs { flex: none; margin-left: auto; }
 .proxy-segs { display: flex; align-items: center; gap: 8px; margin-left: auto; min-width: 0; }
-.proxy-segs input.proxy { width: 180px; min-width: 0; height: 27px; padding: 0 9px; border-radius: 7px; border: 1px solid var(--line); background: var(--card); font-size: 12.5px; outline: none; transition: border-color .12s, box-shadow .12s; }
-.proxy-segs input.proxy:focus { border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent); }
-.proxy-segs input.proxy::placeholder { color: var(--faint); }
+.proxy-segs input.proxy, input.words { width: 180px; min-width: 0; height: 27px; padding: 0 9px; border-radius: 7px; border: 1px solid var(--line); background: var(--card); font-size: 12.5px; outline: none; transition: border-color .12s, box-shadow .12s; }
+.proxy-segs input.proxy:focus, input.words:focus { border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent); }
+.proxy-segs input.proxy::placeholder, input.words::placeholder { color: var(--faint); }
+input.words { width: 240px; max-width: 100%; }
 @media (max-width: 520px) { .proxy-segs { flex-wrap: wrap; justify-content: flex-end; } }
 .prefs .val { display: inline-flex; align-items: center; gap: 2px; margin-left: auto; min-width: 0; max-width: 60%; flex: none; }
 .prefs .val code { font-size: 12px; color: var(--fg-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; user-select: text; -webkit-user-select: text; padding: 0 6px; }
@@ -1020,3 +1085,13 @@ body.panel .modal { padding: 16px 12px; }
 .editor.importapps .approw .segs .opt { white-space: nowrap; flex: none; }
 .editor.importapps .apptag { flex: none; font-size: 11px; color: var(--fg-2); background: var(--pill); border-radius: 5px; padding: 1px 6px; margin-top: 1px; }
 .editor.importapps .bar .note { font-size: 12px; color: var(--muted); }
+
+/* sync and backup, on the Settings page */
+.prefs .sub.bad { color: var(--red); }
+.prefs .sync-note .who .sub + .sub { margin-top: 2px; }
+.editor.sync-form { grid-template-columns: 86px minmax(0, 1fr); }
+.editor label.tick { display: flex; align-items: center; gap: 7px; text-align: left; padding-top: 0; color: var(--fg-2); cursor: pointer; }
+.editor label.tick input { margin: 0; }
+.editor .fname { flex: 1; min-width: 0; font-size: 12.5px; color: var(--fg-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.editor.sync-form .done { grid-column: 1 / -1; font-size: 12.5px; color: var(--fg-2); user-select: text; -webkit-user-select: text; }
+.editor.sync-form .bar { grid-column: 1 / -1; }

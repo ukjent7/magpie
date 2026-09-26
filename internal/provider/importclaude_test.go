@@ -13,6 +13,8 @@ func TestImportClaudeSettings(t *testing.T) {
 	isolate(t)
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)                                  // Windows
+	t.Setenv("APPDATA", filepath.Join(home, "AppData", "Roaming")) // Windows
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
 	settings := filepath.Join(home, ".claude", "settings.json")

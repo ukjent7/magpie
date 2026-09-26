@@ -231,7 +231,7 @@ func ApplyFields(p map[string]string) (int, error) {
 		if f == nil || f.Get() == p[k] {
 			continue
 		}
-		if err := f.Set(p[k]); err != nil {
+		if err := a.Apply(f.Key, p[k]); err != nil {
 			return changed, fmt.Errorf("%s: %w", k, err)
 		}
 		changed++

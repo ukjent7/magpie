@@ -96,11 +96,49 @@ func visibleQuotas(all []SubscriptionQuota) []SubscriptionQuota {
 	for _, p := range load().Providers {
 		hidden[p.ID] = p.Hidden
 	}
+	var chosen map[string]map[string]bool
 	out := []SubscriptionQuota{}
 	for _, q := range all {
-		if !hidden[q.Provider] {
-			out = append(out, q)
+		if hidden[q.Provider] {
+			continue
 		}
+		if q.Provider == "gemini" || q.Provider == "antigravity" {
+			if chosen == nil {
+				chosen = exposedIDs()
+			}
+			q.Windows = chosenWindows(q.Windows, chosen[q.Provider])
+		}
+		out = append(out, q)
+	}
+	return out
+}
+
+// exposedIDs is, for each provider, the models magpie offers from it.
+func exposedIDs() map[string]map[string]bool {
+	out := map[string]map[string]bool{}
+	for _, p := range All() {
+		ids := map[string]bool{}
+		for _, m := range p.Exposed() {
+			ids[m.ID] = true
+		}
+		out[p.ID] = ids
+	}
+	return out
+}
+
+// chosenWindows keeps a Google account's allowances for the models the user
+// enabled: Antigravity reports one for every model it has, a couple of dozen,
+// most of them never used through magpie. When none of them is enabled — the
+// ids a quota names aren't always the ones served — they are all kept.
+func chosenWindows(ws []QuotaWindow, chosen map[string]bool) []QuotaWindow {
+	var out []QuotaWindow
+	for _, w := range ws {
+		if w.Model == "" || chosen[w.Model] {
+			out = append(out, w)
+		}
+	}
+	if len(out) == 0 {
+		return ws
 	}
 	return out
 }
@@ -147,6 +185,9 @@ func fetchSubscriptionUsage() []SubscriptionQuota {
 				fetches = append(fetches, withUser(app.User, func() SubscriptionQuota { return copilotSubscriptionUsage(ctx, app.Token) }))
 			}
 		}
+	}
+	if !hidden["zcode"] {
+		fetches = append(fetches, perLogin(ctx, zcodeLoginList(), "ZCode", "zcode")...)
 	}
 	for _, agent := range []string{"gemini", "antigravity"} {
 		if hidden[agent] {

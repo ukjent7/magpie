@@ -26,7 +26,9 @@ type PresetDef struct {
 	NoKey     bool     `json:"noKey,omitempty"`     // local servers: a key is optional
 	Sponsored bool     `json:"sponsored,omitempty"` // shown first, with a tag
 	Note      string   `json:"note,omitempty"`      // one line under the name
-	Regions   []Region `json:"regions,omitempty"`   // base-URL choices (a relay's regional endpoints)
+	Regions   []Region `json:"regions,omitempty"`   // base-URL choices (a relay's regional endpoints, a vendor's plans)
+	// RegionLabel names what the Regions choose between, "Region" if unset.
+	RegionLabel string `json:"regionLabel,omitempty"`
 	// HeaderHints name optional request headers the vendor documents, which
 	// the editor offers to add; their values are the user's to fill in.
 	HeaderHints []string `json:"headerHints,omitempty"`
@@ -70,10 +72,20 @@ var presets = []PresetDef{
 		Website: "https://platform.moonshot.cn", KeysURL: "https://platform.moonshot.cn/console/api-keys"},
 	{ID: "zhipu", Name: "Zhipu GLM", Icon: "zhipu-color", Kind: KindVendor, Catalog: "zhipuai",
 		Chat: "https://open.bigmodel.cn/api/paas/v4", Anthropic: "https://open.bigmodel.cn/api/anthropic",
-		Website: "https://open.bigmodel.cn", KeysURL: "https://open.bigmodel.cn/usercenter/proj-mgmt/apikeys"},
+		Website: "https://open.bigmodel.cn", KeysURL: "https://open.bigmodel.cn/usercenter/proj-mgmt/apikeys",
+		// a GLM Coding Plan is served at its own OpenAI endpoint: a plan's key
+		// sent to the pay-as-you-go one is told it has no balance
+		RegionLabel: "Plan", Regions: []Region{
+			{ID: "api", Name: "Pay as you go", Chat: "https://open.bigmodel.cn/api/paas/v4", Anthropic: "https://open.bigmodel.cn/api/anthropic"},
+			{ID: "coding", Name: "Coding Plan", Chat: "https://open.bigmodel.cn/api/coding/paas/v4", Anthropic: "https://open.bigmodel.cn/api/anthropic"},
+		}},
 	{ID: "zai", Name: "Z.ai", Icon: "zai", Kind: KindVendor, Catalog: "zhipuai",
 		Chat: "https://api.z.ai/api/paas/v4", Anthropic: "https://api.z.ai/api/anthropic",
-		Website: "https://z.ai", KeysURL: "https://z.ai/manage-apikey/apikey-list"},
+		Website: "https://z.ai", KeysURL: "https://z.ai/manage-apikey/apikey-list",
+		RegionLabel: "Plan", Regions: []Region{
+			{ID: "api", Name: "Pay as you go", Chat: "https://api.z.ai/api/paas/v4", Anthropic: "https://api.z.ai/api/anthropic"},
+			{ID: "coding", Name: "Coding Plan", Chat: "https://api.z.ai/api/coding/paas/v4", Anthropic: "https://api.z.ai/api/anthropic"},
+		}},
 	{ID: "minimax", Name: "MiniMax", Icon: "minimax-color", Kind: KindVendor, Catalog: "minimax",
 		Chat: "https://api.minimax.io/v1", Anthropic: "https://api.minimax.io/anthropic",
 		Website: "https://platform.minimax.io", KeysURL: "https://platform.minimax.io/user-center/basic-information/interface-key"},

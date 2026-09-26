@@ -85,6 +85,9 @@ The terminal UI (`magpie tui`) looks like this:
 | omp (oh-my-pi) | `~/.omp/agent/config.yml` (+ `models.yml`) | model |
 | Devin        | `~/.config/devin/config.json` (`%APPDATA%\devin\config.json` on Windows) | model |
 | Hermes Agent | `~/.hermes/config.yaml` (`$HERMES_HOME`) | model |
+| Grok Build   | `~/.grok/config.toml` (`$GROK_HOME`) | model, effort |
+| ZCode        | `~/.zcode/v2/config.json`         | provider (magpie's models in ZCode's picker) |
+| Alma         | Alma's local API (`localhost:23001`, while Alma runs) | model (Alma's default; magpie's models as a provider) |
 
 Provider-scoped agents (OpenCode, Pi, Goose, Crush, omp, Hermes Agent) take `provider/model`.
 Only agents that are installed or configured are shown.
@@ -207,7 +210,7 @@ Code process; Pi, OpenCode and every other agent use this path automatically.
 The generated harness stays out of Anthropic's system-prompt classifier while
 its instructions remain part of the user context. This requires Claude Code
 to be installed and signed in.
-Cursor, Grok and Devin subscriptions likewise run through their own CLIs —
+Cursor, Grok (SuperGrok, through Grok Build) and Devin subscriptions likewise run through their own CLIs —
 none of them has an endpoint a borrowed key can be sent to — with Devin
 driven over ACP (`devin acp`) in a home of magpie's own that keeps only the
 caller's MCP tools and shares just the sign-in.
@@ -234,6 +237,10 @@ with the app; `magpie serve` runs it alone. It exposes:
 | `/v1/messages/count_tokens` | Anthropic token counting |
 | `/v1beta/models/{model}:generateContent` | Google Gemini (also `:streamGenerateContent`, `:countTokens`) |
 | `/v1/models`, `/v1beta/models` | the catalog            |
+
+Each `/v1/models` entry includes `reasoning` and `supported_reasoning_levels`
+(`[{"effort":"low"}, ...]`). A routing group lists only the levels every
+member supports.
 
 Requests pass straight through when the vendor speaks the agent's API and
 are translated otherwise, streaming, tool calls and reasoning included. The

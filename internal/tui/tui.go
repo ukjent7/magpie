@@ -1,5 +1,7 @@
 // Package tui is magpie in the terminal: one row per agent, arrow keys to pick
-// a field, enter to change it.
+// a field, enter to change it; and pages for providers, routing groups and
+// usage beside it (pages.go), the library (library.go), 1–5 to go between
+// them.
 package tui
 
 import (
@@ -17,8 +19,11 @@ import (
 
 	"github.com/yetone/magpie/internal/agent"
 	"github.com/yetone/magpie/internal/catalog"
+	"github.com/yetone/magpie/internal/library"
 	"github.com/yetone/magpie/internal/profile"
+	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/settings"
+	"github.com/yetone/magpie/internal/usage"
 )
 
 // ---- styling ---------------------------------------------------------------
@@ -58,6 +63,8 @@ const (
 	modePick
 	modeProfiles
 	modeName
+	modeAsk
+	modeGroup
 )
 
 type picker struct {
@@ -69,6 +76,9 @@ type picker struct {
 	custom bool
 	onPick func(string) tea.Cmd
 	onDel  func(string) tea.Cmd
+	// toggle, when set, is what enter does instead of onPick: it changes
+	// the item and the list stays open, with its items anew.
+	toggle func(string) (items []agent.Option, done string, ok bool)
 	empty  string
 }
 
@@ -85,6 +95,26 @@ type model struct {
 	flashOK bool
 	w, h    int
 	syncing bool
+
+	page      page
+	back      mode // where esc goes from a picker or a line to type
+	ask       ask
+	confirm   string // what a second d removes
+	provs     []provider.Provider
+	prow      int
+	bal       map[string]string
+	asked     bool // balances were asked for
+	groups    []provider.Group
+	grow      int
+	gid       string // the group open
+	gsel      int    // its member picked
+	period    usage.Period
+	sum       usage.Summary
+	lib       []libRow
+	lrow      int
+	libView   *library.View
+	libAgents []library.AgentView
+	libErr    string
 }
 
 type flashMsg struct {
@@ -107,7 +137,7 @@ func Run() error {
 func newModel() model {
 	// in the order the app lists them, those hidden there last
 	shown, hidden := settings.Arrange(settings.Load(), agent.Detected(), func(a *agent.Agent) string { return a.ID })
-	m := model{agents: append(shown, hidden...), hidden: len(shown)}
+	m := model{agents: append(shown, hidden...), hidden: len(shown), period: usage.Week}
 	m.reload()
 	return m
 }
@@ -117,6 +147,33 @@ func (m *model) reload() {
 	for i, a := range m.agents {
 		m.values[i] = a.Values()
 	}
+	switch m.page {
+	case pageProviders:
+		m.reloadProviders()
+	case pageGroups:
+		m.reloadGroups()
+		if _, ok := m.group(); !ok && m.mode == modeGroup {
+			m.mode = modeList
+		}
+		if g, ok := m.group(); ok {
+			m.gsel = clamp(m.gsel, len(g.Members))
+		}
+	case pageUsage:
+		m.sum = usage.Summarize(m.period)
+	case pageLibrary:
+		m.reloadLibrary()
+	}
+}
+
+// goTo shows a page, as it is now.
+func (m *model) goTo(p page) tea.Cmd {
+	m.page, m.mode, m.confirm = p, modeList, ""
+	m.reload()
+	if p == pageProviders && !m.asked {
+		m.asked = true
+		return balancesCmd(m.provs)
+	}
+	return nil
 }
 
 func (m model) Init() tea.Cmd {
@@ -144,6 +201,24 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.flash, m.flashOK = msg.text, msg.ok
 		m.reload()
 		return m, nil
+	case balanceMsg:
+		m.bal = msg
+		if m.flash == "asking the vendors for balances…" {
+			m.flash = ""
+		}
+		return m, nil
+	case askMsg:
+		m.openAsk(msg.a)
+		return m, nil
+	case pickMsg:
+		m.openMemberPicker(msg)
+		return m, nil
+	case editedMsg:
+		if msg.err != nil {
+			m.flash, m.flashOK = msg.err.Error(), false
+			return m, nil
+		}
+		return m, saveInstructions(msg.text)
 	case syncedMsg:
 		m.syncing = false
 		if msg.err != nil {
@@ -158,7 +233,40 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		switch m.mode {
 		case modeList:
+			if p, ok := m.pageKey(msg.String()); ok {
+				m.flash = ""
+				return m, m.goTo(p)
+			}
+			switch m.page {
+			case pageProviders, pageGroups, pageUsage, pageLibrary:
+				if s := msg.String(); s == "q" || s == "esc" {
+					return m, tea.Quit
+				}
+				if msg.String() == "r" {
+					m.reload()
+					m.flash, m.flashOK = "reloaded", true
+					return m, nil
+				}
+			}
+			switch m.page {
+			case pageProviders:
+				m.flash = ""
+				return m.updateProviders(msg)
+			case pageGroups:
+				m.flash = ""
+				return m.updateGroups(msg)
+			case pageUsage:
+				return m.updateUsage(msg)
+			case pageLibrary:
+				m.flash = ""
+				return m.updateLibrary(msg)
+			}
 			return m.updateList(msg)
+		case modeAsk:
+			return m.updateAsk(msg)
+		case modeGroup:
+			m.flash = ""
+			return m.updateGroup(msg)
 		case modePick, modeProfiles:
 			return m.updatePicker(msg)
 		case modeName:
@@ -166,6 +274,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	}
 	return m, nil
+}
+
+// pageKey is the page a key goes to: 1–5, or ] and [ for the next and
+// the one before.
+func (m model) pageKey(k string) (page, bool) {
+	n := page(len(pageNames))
+	switch k {
+	case "1", "2", "3", "4", "5":
+		return page(k[0] - '1'), true
+	case "]":
+		return (m.page + 1) % n, true
+	case "[":
+		return (m.page + n - 1) % n, true
+	}
+	return 0, false
 }
 
 func (m model) updateList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -228,6 +351,7 @@ func (m *model) openFieldPicker() {
 	}
 	m.pk.refilter()
 	m.mode = modePick
+	m.back = modeList
 }
 
 func (m *model) openProfiles() {
@@ -273,12 +397,14 @@ func (m *model) openProfiles() {
 	}
 	m.pk.refilter()
 	m.mode = modeProfiles
+	m.back = modeList
 }
 
 func (m model) updatePicker(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc":
-		m.mode = modeList
+		m.mode = m.back
+		m.reload()
 		return m, nil
 	case "down", "ctrl+n":
 		if len(m.pk.match) > 0 {
@@ -302,7 +428,18 @@ func (m model) updatePicker(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if !ok {
 			return m, nil
 		}
-		m.mode = modeList
+		if m.pk.toggle != nil {
+			items, done, ok := m.pk.toggle(v)
+			m.flash, m.flashOK = done, ok
+			if ok {
+				cur := m.pk.cursor
+				m.pk.items = items
+				m.pk.refilter()
+				m.pk.cursor = clamp(cur, len(m.pk.match))
+			}
+			return m, nil
+		}
+		m.mode = m.back
 		return m, m.pk.onPick(v)
 	}
 	var cmd tea.Cmd
@@ -467,15 +604,39 @@ func (m model) View() string {
 	var footer string
 	switch m.mode {
 	case modeList:
-		body = m.viewList()
-		footer = hints("↑↓", "agent", "←→", "field", "↵", "change", "s", "save profile", "p", "profiles", "q", "quit")
+		switch m.page {
+		case pageProviders:
+			body = m.viewProviders()
+			footer = hints("↑↓", "provider", "↵", "models", "e", "key", "a", "add", "f", "family", "u", "list/groups only", "t", "test", "b", "balances", "d", "remove", "1–5", "pages")
+		case pageGroups:
+			body = m.viewGroups()
+			footer = hints("↑↓", "group", "↵", "open", "n", "new", "o", "routing", "d", "remove", "1–5", "pages", "q", "quit")
+		case pageLibrary:
+			body = m.viewLibrary()
+			footer = hints("↑↓", "item", "↵", "agents", "e", "edit instructions", "i", "bring in", "d", "remove", "r", "reload", "1–5", "pages", "q", "quit")
+		case pageUsage:
+			body = m.viewUsage()
+			footer = hints("←→", "period", "t w m A", "today · 7 days · 30 days · all", "r", "reload", "1–5", "pages", "q", "quit")
+		default:
+			body = m.viewList()
+			footer = hints("↑↓", "agent", "←→", "field", "↵", "change", "s", "save profile", "p", "profiles", "1–5", "pages", "q", "quit")
+		}
 	case modePick, modeProfiles:
 		body = m.viewPicker()
-		if m.mode == modeProfiles {
+		switch {
+		case m.mode == modeProfiles:
 			footer = hints("↑↓", "move", "↵", "apply", "ctrl+d", "delete", "esc", "back")
-		} else {
+		case m.pk.toggle != nil:
+			footer = hints("↑↓", "move", "↵", "on / off", "esc", "back")
+		default:
 			footer = hints("↑↓", "move", "↵", "select", "esc", "back")
 		}
+	case modeAsk:
+		body = m.viewAsk()
+		footer = hints("↵", "save", "esc", "cancel")
+	case modeGroup:
+		body = m.viewGroup()
+		footer = hints("↑↓", "model", "J K", "move down / up", "a", "add", "d", "take out", "o", "routing", "f", "family", "esc", "back")
 	case modeName:
 		body = m.viewName()
 		footer = hints("↵", "save", "esc", "cancel")
@@ -501,6 +662,19 @@ func (m model) View() string {
 
 func (m model) header(crumbs ...string) string {
 	s := pad + sTitle.Render("◉ magpie")
+	if len(crumbs) == 0 {
+		// the pages, this one marked
+		s += "  "
+		for i, n := range pageNames {
+			label := fmt.Sprintf("%d %s", i+1, n)
+			if page(i) == m.page {
+				s += sPill.Render(label) + " "
+			} else {
+				s += sMuted.Render(" "+label+" ") + " "
+			}
+		}
+		return strings.TrimRight(s, " ")
+	}
 	for _, c := range crumbs {
 		s += sCrumb.Render(" › ") + sText.Render(c)
 	}

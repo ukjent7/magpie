@@ -266,6 +266,7 @@ footer a:hover { color: var(--ink); }
 .rt-accts .bar { grid-column: 2 / 4; height: 4px; border-radius: 2px; background: var(--bg2); overflow: hidden; }
 .rt-accts .bar i { display: block; height: 100%; width: 0; border-radius: 2px; background: var(--ink3); transition: width .4s; }
 .rt-accts li.nobar .bar { visibility: hidden; }
+.rt-accts.models .bar { display: none; }
 .rt-accts .dot { width: 8px; height: 8px; border-radius: 50%; border: 1.5px solid var(--ink3); }
 .rt-accts li.on { border-color: var(--ink); }
 .rt-accts li.on em { color: var(--ink); }
@@ -405,6 +406,9 @@ footer a:hover { color: var(--ink); }
       <li><img class="bird" src="/icons/omp.svg" alt="">omp</li>
       <li><img class="bird" src="/icons/devin.svg" alt="">Devin</li>
       <li><img class="bird" src="/icons/hermes.svg" alt="">Hermes Agent</li>
+      <li><img class="bird" src="/icons/xai.svg" alt="">Grok Build</li>
+      <li><img src="/icons/zcode.png" alt="">ZCode</li>
+      <li><img src="/icons/alma.png" alt="">Alma</li>
     </ul>
     <p style="margin-top:34px">Every model</p>
     <ul>
@@ -493,12 +497,13 @@ footer a:hover { color: var(--ink); }
 
   <section id="routing">
     <p class="eyebrow">Smart routing</p>
-    <h2>Many accounts. It never runs dry.</h2>
-    <p class="sub">Add every key and subscription you have — several Claude, ChatGPT, Copilot or Grok accounts, several keys for one vendor — and turn them all on. For each request magpie picks the account that should answer, and when one can't, the next answers before your agent ever sees an error.</p>
+    <h2>The right model for each turn. It never runs dry.</h2>
+    <p class="sub">Say what each model is for — "a quick question", "writing or fixing tests" — and as each turn begins a small, fast model tells magpie which it is: the turn goes to that model, and its tool rounds stay there. <a href="/docs/intent">How it works</a>. And add every key and subscription you have — several Claude, ChatGPT, Copilot or Grok accounts, several keys for one vendor — and turn them all on. For each request magpie picks the account that should answer, and when one can't, the next answers before your agent ever sees an error.</p>
     <div class="rt" id="rt">
       <div class="rt-top">
         <div class="rt-tabs" role="tablist" aria-label="Routing">
-          <button role="tab" data-mode="smart" aria-selected="true">Smart</button>
+          <button role="tab" data-mode="intent" aria-selected="true">By intent</button>
+          <button role="tab" data-mode="smart" aria-selected="false">Smart</button>
           <button role="tab" data-mode="order" aria-selected="false">In order</button>
           <button role="tab" data-mode="turn" aria-selected="false">In turn</button>
           <button role="tab" data-mode="least" aria-selected="false">Least used first</button>
@@ -535,8 +540,8 @@ footer a:hover { color: var(--ink); }
     <h2>Paste a key. That’s the setup.</h2>
     <p class="sub">Twenty presets — vendors, relays and local servers. magpie asks each vendor which models it serves, so a model released this morning is in every picker on the next refresh. Keys stay in magpie; agents never see them.</p>
     <div class="wide">
-      <img class="for-light" loading="lazy" src="/img/providers-light.png" width="1040" height="500" alt="magpie's Providers tab: DeepSeek, Kimi, GLM, Qwen, MiniMax, OpenRouter, Anthropic and Gemini, each with the agents using it">
-        <img class="for-dark" loading="lazy" src="/img/providers-dark.png" width="1040" height="500" alt="magpie's Providers tab: DeepSeek, Kimi, GLM, Qwen, MiniMax, OpenRouter, Anthropic and Gemini, each with the agents using it">
+      <img class="for-light" loading="lazy" src="/img/providers-light.png" width="1040" height="507" alt="magpie's Providers tab: DeepSeek, Kimi, GLM, Qwen, MiniMax, OpenRouter, Anthropic and Gemini, each with the agents using it">
+        <img class="for-dark" loading="lazy" src="/img/providers-dark.png" width="1040" height="507" alt="magpie's Providers tab: DeepSeek, Kimi, GLM, Qwen, MiniMax, OpenRouter, Anthropic and Gemini, each with the agents using it">
     </div>
   </section>
 
@@ -679,7 +684,8 @@ magpie tui                             <span class="c"># the whole app, in the t
   const $ = (s) => rt.querySelector(s);
   const stage = $(".rt-stage"), svg = $(".rt-wires"), src = $(".rt-src"), hub = $(".rt-hub"), list = $(".rt-accts");
   const cap = $(".rt-cap"), desc = $(".rt-mode"), chip = hub.querySelector("i");
-  const stat = [...rt.querySelectorAll(".rt-stats b")];
+  const stat = [...rt.querySelectorAll(".rt-stats b")], statName = [...rt.querySelectorAll(".rt-stats span")].map((e) => e.lastChild);
+  const who = src.querySelector("small");
   const tabs = [...rt.querySelectorAll(".rt-tabs button")];
   const still = matchMedia("(prefers-reduced-motion: reduce)").matches;
   const NS = "http://www.w3.org/2000/svg";
@@ -694,7 +700,29 @@ magpie tui                             <span class="c"># the whole app, in the t
     gh: ["octo-dev", "Copilot Business", "githubcopilot", "Copilot", "bird"],
   };
   const A = (v, used, inc, x = {}) => { const [who, plan, icon, name, cls] = V[v]; return { who, plan, icon, name, cls, used, inc, ...x }; };
+  // A group's models, each with the rule that sends a turn to it; the first
+  // takes what no rule matches.
+  const G = (who, plan, icon, cls, rule, short) => ({ who, plan, icon, cls, rule, short, used: 0, inc: 0, key: 1 });
   const MODES = {
+    intent: {
+      name: "By intent", n: 0, stats: ["turns", "asked the classifier", "tool rounds kept on their model"],
+      desc: "By intent: as a turn begins, a small fast model (the group's classifier) is asked once which of your rules' intents the message is. The turn goes to that rule's model; its tool rounds stay there, without asking again.",
+      accts: () => [
+        G("claude-opus-5-5", "Claude Max", "claude-color", "", "first · whatever no rule takes"),
+        G("deepseek-v4-flash", "DeepSeek", "deepseek-color", "", "intent · a quick question", "quick question"),
+        G("glm-5.3", "Zhipu GLM", "zhipu-color", "", "intent · writing or fixing tests", "tests"),
+        G("kimi-k3", "Kimi", "kimi", "bird", "intent · reviewing a diff", "review"),
+      ],
+      turns: [
+        ["Add a --dry-run flag to the deploy command", 0, 2],
+        ["What does ^\\d{3}-\\d{4}$ match?", 1, 0],
+        ["TestRouting fails after my change — fix it", 2, 2],
+        ["Review my staged changes before I commit", 3, 1],
+        ["Why does useEffect run twice in dev?", 1, 0],
+        ["Write table-driven tests for parseTokens", 2, 1],
+        ["Refactor the retry loop into its own function", 0, 1],
+      ],
+    },
     smart: {
       name: "Smart", n: 30,
       desc: "Smart, the default: the account that resets soonest goes first, so no allowance is left to go to waste; any that can't answer are passed over. (Here each request stands for an hour.)",
@@ -776,9 +804,11 @@ magpie tui                             <span class="c"># the whole app, in the t
       a.wire = path(); a.served = 0; a.until = 0;
     });
     layout();
-    desc.textContent = M.desc; chip.textContent = M.name;
+    list.classList.toggle("models", !!M.turns);
+    desc.textContent = M.desc; chip.textContent = M.name; who.textContent = "your agent";
+    (M.stats || ["requests", "rerouted", "errors your agent saw"]).forEach((n, i) => (statName[i].textContent = n));
     tabs.forEach((b) => b.setAttribute("aria-selected", String(b.dataset.mode === m)));
-    show("Claude Code sends every request to magpie; magpie decides which account answers it.");
+    show(M.turns ? "Claude Code sends every turn to one model name — a magpie group. Watch where each message goes." : "Claude Code sends every request to magpie; magpie decides which account answers it.");
     stats(); render();
   }
 
@@ -870,7 +900,75 @@ magpie tui                             <span class="c"># the whole app, in the t
     dot.remove(); done++; errs++; stats();
   }
 
+  // By intent: a turn's first request is classified, once; its tool rounds
+  // follow it to the same model.
+  async function turns(g) {
+    const trip = async (a) => {
+      const dot = document.createElementNS(NS, "circle");
+      dot.setAttribute("r", 4.5); dot.setAttribute("class", "pkt"); dot.setAttribute("cx", -20);
+      svg.appendChild(dot); tick(src);
+      await travel(dot, wSrc, false, 380);
+      if (g !== gen) return dot.remove();
+      tick(hub);
+      if (!a) return dot;
+      await travel(dot, a.wire, false, 420);
+      if (g !== gen) return dot.remove();
+      last = a; a.served++;
+      dot.classList.add("back"); dot.setAttribute("r", 4);
+      await travel(dot, a.wire, true, 360);
+      await travel(dot, wSrc, true, 320);
+      dot.remove();
+    };
+    for (const [msg, n, rounds] of M.turns) {
+      if (g !== gen) return;
+      const a = accts[n];
+      who.textContent = "new turn"; chip.textContent = "new turn";
+      show(`A new turn: “${msg}”`);
+      const dot = await trip(null);
+      if (g !== gen) return;
+      chip.textContent = "classifying…";
+      await wait(900);
+      if (g !== gen) return dot?.remove();
+      rerouted++; stats();
+      chip.textContent = n ? a.short : "no intent";
+      a.li.classList.remove("hit"); void a.li.offsetWidth; a.li.classList.add("tagged");
+      a.tg.textContent = n ? "✓ " + a.short : "✓ the group's first";
+      setTimeout(() => a.li.classList.remove("tagged"), 1600);
+      show(n ? `The classifier says: ${a.rule.replace("intent · ", "")} — so ${a.who} answers it.` : `None of the intents — it goes to the group's first model, ${a.who}.`);
+      await travel(dot, a.wire, false, 420);
+      if (g !== gen) return dot.remove();
+      last = a; a.served++;
+      dot.classList.add("back"); dot.setAttribute("r", 4);
+      await travel(dot, a.wire, true, 360);
+      await travel(dot, wSrc, true, 320);
+      dot.remove(); done++; stats();
+      for (let i = 0; i < rounds; i++) {
+        if (g !== gen) return;
+        who.textContent = "tool result";
+        chip.textContent = "same turn";
+        if (!i) show(`Its tool results come back as more requests — no new question: they stay on ${a.who}.`);
+        await trip(a);
+        errs++; stats();
+      }
+      await wait(rounds ? 700 : 1300);
+    }
+    if (g !== gen) return;
+    who.textContent = "your agent"; chip.textContent = M.name;
+    show(`${done} turns, each on the model its rule names — one question to the classifier per turn, ${errs} tool rounds kept on their model.`);
+    await wait(4600);
+    if (g === gen) reset(mode);
+  }
+
   function render() {
+    if (M.turns) {
+      for (const a of accts) {
+        if (a.st.textContent !== a.rule) a.st.textContent = a.rule;
+        a.li.classList.toggle("on", last === a);
+        a.wire.classList.toggle("live", last === a);
+      }
+      wSrc.classList.toggle("live", !!last);
+      return;
+    }
     for (const a of accts) {
       const rest = resting(a), n = Math.round(a.used), s = Math.ceil((a.until - t) / 1000);
       const label = rest
@@ -891,6 +989,7 @@ magpie tui                             <span class="c"># the whole app, in the t
   }
 
   function step() {
+    if (M.turns && !sent && t >= next) { sent = 1; turns(gen); }
     if (sent < M.n && t >= next) { sent++; request(gen); next = t + (still ? 1400 : 900); }
     const now = trips; trips = [];
     for (const tr of now) {
@@ -908,7 +1007,7 @@ magpie tui                             <span class="c"># the whole app, in the t
       say(`${a.name} is back — ${a.why === "rate" ? "its rate limit is over" : "it gets another chance"}.`, true);
     }
     if (capQ.length && t - capAt > (capLo && !capQ[0].lo ? 700 : 2200)) show(capQ.shift());
-    if (done >= M.n && !endAt) {
+    if (!M.turns && done >= M.n && !endAt) {
       endAt = t + 4200;
       capQ = []; show(`${done} requests answered, ${rerouted} rerouted — and not one error reached Claude Code.`);
     }
@@ -926,7 +1025,7 @@ magpie tui                             <span class="c"># the whole app, in the t
   tabs.forEach((b) => b.addEventListener("click", () => reset(b.dataset.mode)));
   new IntersectionObserver((es) => { vis = es[0].isIntersecting; }).observe(rt);
   new ResizeObserver(() => layout()).observe(stage);
-  reset("smart");
+  reset("intent");
   requestAnimationFrame(frame);
 })();
 </script>

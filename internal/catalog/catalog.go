@@ -40,6 +40,8 @@ type Model struct {
 	// Context is how many tokens a prompt may hold, when known: models.dev's
 	// input limit, else its context window.
 	Context int `json:",omitempty"`
+	// Output is the most tokens a reply may hold, when known.
+	Output int `json:",omitempty"`
 }
 
 func imageInput(modalities []string) *bool {
@@ -89,6 +91,7 @@ type mdModel struct {
 	Limit struct {
 		Context int `json:"context"`
 		Input   int `json:"input"`
+		Output  int `json:"output"`
 	} `json:"limit"`
 }
 
@@ -123,6 +126,8 @@ var (
 	// windows are the models' context windows, by bare id, as most of the
 	// providers serving them give it
 	windows map[string]int
+	// outputs are the most tokens their replies may hold, likewise
+	outputs map[string]int
 	// efforts are the models' reasoning levels, by bare id, as most of the
 	// providers that give any for them give them
 	efforts map[string][]string
@@ -165,7 +170,7 @@ func load() map[string]mdProvider {
 			if json.Unmarshal(b, &m) == nil && len(m) > 0 {
 				mdev = m
 				votes := map[string]int{}
-				sizes := map[string]map[int]int{}
+				sizes, outs := map[string]map[int]int{}, map[string]map[int]int{}
 				levels := map[string]map[string]int{}
 				for _, p := range m {
 					for id, x := range p.Models {
@@ -186,11 +191,21 @@ func load() map[string]mdProvider {
 							}
 							sizes[bareID(id)][w]++
 						}
+						if o := x.Limit.Output; o > 0 {
+							if outs[bareID(id)] == nil {
+								outs[bareID(id)] = map[int]int{}
+							}
+							outs[bareID(id)][o]++
+						}
 					}
 				}
 				windows = map[string]int{}
 				for id, by := range sizes {
 					windows[id] = mostGiven(by)
+				}
+				outputs = map[string]int{}
+				for id, by := range outs {
+					outputs[id] = mostGiven(by)
 				}
 				efforts = map[string][]string{}
 				for id, by := range levels {
@@ -212,7 +227,7 @@ func load() map[string]mdProvider {
 // Reset forgets the loaded catalog so the next call re-reads the cache.
 func Reset() {
 	once = sync.Once{}
-	mdev, images, windows, efforts = nil, nil, nil, nil
+	mdev, images, windows, outputs, efforts = nil, nil, nil, nil, nil
 }
 
 // Sync downloads the models.dev catalog into CachePath. It serializes with
@@ -306,7 +321,7 @@ func Provider(id string) []Model {
 			continue
 		}
 		mm := Model{ID: m.ID, Name: m.Name, Provider: id, Released: m.ReleaseDate, Price: m.Cost, Temperature: m.Temperature,
-			Images: slices.Contains(m.Modalities.Input, "image"), ImageInput: imageInput(m.Modalities.Input), Context: m.window()}
+			Images: slices.Contains(m.Modalities.Input, "image"), ImageInput: imageInput(m.Modalities.Input), Context: m.window(), Output: m.Limit.Output}
 		mm.Efforts = m.efforts()
 		out = append(out, mm)
 	}
@@ -354,6 +369,20 @@ func ContextOf(id string) int {
 	}
 	if i := strings.IndexByte(b, ':'); i > 0 { // ":free", ":batch"
 		return windows[b[:i]]
+	}
+	return 0
+}
+
+// OutputOf is the most tokens a reply from a model of this id may hold, as
+// most of the providers serving it give it, or 0 when not known.
+func OutputOf(id string) int {
+	load()
+	b := bareID(id)
+	if o, ok := outputs[b]; ok {
+		return o
+	}
+	if i := strings.IndexAny(b, "(:"); i > 0 {
+		return outputs[b[:i]]
 	}
 	return 0
 }

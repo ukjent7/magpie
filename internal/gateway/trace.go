@@ -10,6 +10,7 @@ package gateway
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"time"
 
@@ -25,18 +26,22 @@ type Route struct {
 	ID       int64     `json:"id"`
 	Time     time.Time `json:"time"`
 	Agent    string    `json:"agent"`
-	Model    string    `json:"model"`              // as the agent asked
-	Provider string    `json:"provider"`           // the provider the model resolved to
-	Group    *GroupRef `json:"group,omitempty"`    // the routing group the agent asked for
-	Affinity *Affinity `json:"affinity,omitempty"` // its conversation, and whether it stayed put
-	Order    []Weighed `json:"order"`              // who was to try it, first first
-	Left     []Weighed `json:"left,omitempty"`
-	Tries    []Try     `json:"tries"`
-	Done     bool      `json:"done"`
-	Status   int       `json:"status,omitempty"`
-	Error    string    `json:"error,omitempty"`
-	Millis   int64     `json:"ms,omitempty"`
-	Tokens   int       `json:"tokens,omitempty"`
+	Model    string    `json:"model"`           // as the agent asked
+	Provider string    `json:"provider"`        // the provider the model resolved to
+	Group    *GroupRef `json:"group,omitempty"` // the routing group the agent asked for
+	Rule     *RuleHit  `json:"rule,omitempty"`  // the group's rules for it, when it has any
+	// Nested: the rules of the groups in the group, down the way to the
+	// one that went first, each as it decided
+	Nested   []NestedRule `json:"nested,omitempty"`
+	Affinity *Affinity    `json:"affinity,omitempty"` // its conversation, and whether it stayed put
+	Order    []Weighed    `json:"order"`              // who was to try it, first first
+	Left     []Weighed    `json:"left,omitempty"`
+	Tries    []Try        `json:"tries"`
+	Done     bool         `json:"done"`
+	Status   int          `json:"status,omitempty"`
+	Error    string       `json:"error,omitempty"`
+	Millis   int64        `json:"ms,omitempty"`
+	Tokens   int          `json:"tokens,omitempty"`
 }
 
 // GroupRef is the routing group a request asked for.
@@ -47,6 +52,49 @@ type GroupRef struct {
 	Affinity string   `json:"affinity"`
 	Auto     bool     `json:"auto,omitempty"`
 	Members  []string `json:"members"` // those ready, as provider/model
+	// Subs: the groups in the group, at any depth, outermost first
+	Subs []SubGroup `json:"subs,omitempty"`
+	// Via: for each of Members, the groups in the group it is of, as
+	// "fast>cheap" ("" for the group's own), when it has groups in it
+	Via []string `json:"via,omitempty"`
+}
+
+// SubGroup is a routing group in the group a request asked for.
+type SubGroup struct {
+	ID      string `json:"id"`
+	Name    string `json:"name"`
+	Routing string `json:"routing"`
+	In      string `json:"in"`              // the group it is in
+	Rules   int    `json:"rules,omitempty"` // how many rules it has
+}
+
+// NestedRule is a group in the group's rules, as they decided.
+type NestedRule struct {
+	Group string   `json:"group"`
+	Name  string   `json:"name"`
+	Rule  *RuleHit `json:"rule"`
+}
+
+// groupRef is the trace's g, with its models ms.
+func groupRef(g provider.Group, ms []provider.Member) *GroupRef {
+	ref := &GroupRef{ID: g.ID, Name: g.Name, Routing: g.Routing, Affinity: g.Affinity, Auto: g.Auto}
+	seen := map[string]bool{}
+	for _, m := range ms {
+		ref.Members = append(ref.Members, m.Provider.ID+"/"+m.Model)
+		ref.Via = append(ref.Via, strings.Join(m.Groups(), ">"))
+		in := g.ID
+		for _, v := range m.Via {
+			if !seen[v.ID] {
+				seen[v.ID] = true
+				ref.Subs = append(ref.Subs, SubGroup{ID: v.ID, Name: v.Name, Routing: v.Routing, In: in, Rules: len(v.Rules)})
+			}
+			in = v.ID
+		}
+	}
+	if len(ref.Subs) == 0 {
+		ref.Via = nil
+	}
+	return ref
 }
 
 // Weighed is one account or key as routing weighed it.
@@ -76,11 +124,15 @@ type Weighed struct {
 	// Aside: a key made for another protocol than the keys routed over,
 	// tried only after them
 	Aside bool `json:"aside,omitempty"`
+	// Via: the groups in the group it is of, outermost first, when it is
+	// of a group in the group asked for
+	Via []string `json:"via,omitempty"`
 }
 
 // Try is one candidate trying the request.
 type Try struct {
 	ID     string    `json:"id"`
+	Model  string    `json:"model,omitempty"` // the model it was asked for: a group's members may share a provider's keys
 	Start  time.Time `json:"start"`
 	Done   bool      `json:"done"`
 	Status int       `json:"status,omitempty"`

@@ -39,7 +39,7 @@ import (
 func (b *subscriptionBridge) startGrok(ctx context.Context, req *Request, model, userHome string) (*subscriptionRun, <-chan Event, error) {
 	binary := provider.GrokExecutable()
 	if binary == "" {
-		return nil, nil, errors.New("the Grok CLI is not installed; install it with `curl -fsSL https://x.ai/cli/install.sh | bash` and run `grok login`")
+		return nil, nil, errors.New("Grok Build is not installed; install it with `curl -fsSL https://x.ai/cli/install.sh | bash` and run `grok login`")
 	}
 	exe, err := os.Executable()
 	if err != nil {

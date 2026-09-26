@@ -3,6 +3,8 @@ package gateway
 import (
 	"encoding/json"
 	"fmt"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -123,19 +125,72 @@ func parseAnthropic(body []byte) (*Request, error) {
 			r.Parallel = &f
 		}
 	}
+	// output_config's effort sets how hard the model thinks only when it
+	// was asked to think: Claude Code's title requests carry effort but no
+	// thinking, and reasoning_effort would turn it on upstream
 	if th := a.Thinking; th != nil && (th.Type == "enabled" || th.Type == "adaptive") {
 		r.Thinking = true
 		r.Effort = effortOfBudget(th.BudgetTokens)
-	}
-	if oc := a.OutputConfig; oc != nil {
-		if e := effortOf(oc.Effort); e != "" {
-			r.Effort = e
+		if oc := a.OutputConfig; oc != nil {
+			if e := effortOf(oc.Effort); e != "" {
+				r.Effort = e
+			}
 		}
 	}
 	return r, nil
 }
 
+// thinkingOffUnlessAsked says thinking is off when the request doesn't
+// mention it. That is what Anthropic's API assumes, but DeepSeek and other
+// vendors' Anthropic endpoints think by default, so Claude Code's requests
+// for a session title, sent without thinking, spent their tokens thinking.
+func thinkingOffUnlessAsked(body []byte) []byte {
+	var v struct {
+		Thinking json.RawMessage `json:"thinking"`
+	}
+	if json.Unmarshal(body, &v) != nil || v.Thinking != nil {
+		return body
+	}
+	return withFields(body, map[string]any{"thinking": map[string]any{"type": "disabled"}})
+}
+
+// alwaysThinks is a vendor refusing to turn a model's thinking off: Z.ai's
+// GLM-5.3 answers 1210, "…always engages in thinking…".
+var alwaysThinks = regexp.MustCompile(`(?i)always engages in thinking|thinking (?:can ?not|can't) be (?:disabled|turned off)`)
+
+// withoutThinkingOff is body with its thinking left to the model, when it
+// says thinking is off; false when it doesn't.
+func withoutThinkingOff(body []byte) ([]byte, bool) {
+	var q map[string]json.RawMessage
+	var th struct {
+		Type string `json:"type"`
+	}
+	if json.Unmarshal(body, &q) != nil || json.Unmarshal(q["thinking"], &th) != nil || th.Type != "disabled" {
+		return nil, false
+	}
+	delete(q, "thinking")
+	out, err := json.Marshal(q)
+	return out, err == nil
+}
+
 // buildAnthropic renders a request for an Anthropic-style upstream.
+// claudeVersion finds the family's version in a Claude model id however a
+// relay spells it: claude-opus-4-6, claude-opus-5, anthropic.claude-sonnet-4.6-v1.
+var claudeVersion = regexp.MustCompile(`claude-(?:opus|sonnet|haiku)-(\d+)(?:[-.](\d{1,2}))?(?:[^0-9]|$)`)
+
+// adaptiveOnly is a Claude model from 4.6 on, which thinks adaptively:
+// claude-opus-5-5 refuses thinking.type=enabled with a budget ("requires
+// adaptive thinking"), so how hard it thinks goes in output_config.effort.
+func adaptiveOnly(model string) bool {
+	m := claudeVersion.FindStringSubmatch(strings.ToLower(model))
+	if m == nil {
+		return false
+	}
+	major, _ := strconv.Atoi(m[1])
+	minor, _ := strconv.Atoi(m[2])
+	return major > 4 || major == 4 && minor >= 6
+}
+
 func buildAnthropic(r *Request, model string) []byte {
 	type msg struct {
 		Role    string   `json:"role"`
@@ -200,7 +255,15 @@ func buildAnthropic(r *Request, model string) []byte {
 	if maxTokens <= 0 {
 		maxTokens = 16384
 	}
-	if r.Thinking || r.Effort != "" {
+	if (r.Thinking || r.Effort != "") && adaptiveOnly(model) {
+		out["thinking"] = map[string]any{"type": "adaptive"}
+		if e := r.Effort; e != "" {
+			if e == "xhigh" {
+				e = "max"
+			}
+			out["output_config"] = map[string]any{"effort": e}
+		}
+	} else if r.Thinking || r.Effort != "" {
 		budget := budgetOf(r.Effort)
 		if maxTokens < budget+4096 {
 			maxTokens = budget + 4096
@@ -333,7 +396,9 @@ func (u Usage) anthropic() aUsage {
 
 func stopFromAnthropic(s string) string {
 	switch s {
-	case "max_tokens":
+	case "max_tokens", "model_context_window_exceeded":
+		// the second is Claude 4.5+ running into its context window
+		// before max_tokens: the reply is cut short all the same
 		return "length"
 	case "tool_use":
 		return "tool"

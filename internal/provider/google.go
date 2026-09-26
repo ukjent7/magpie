@@ -613,7 +613,16 @@ func (g googleAccount) antigravityProject(ctx context.Context) (googleProject, e
 		return googleProject{}, err
 	}
 	if id == "" {
-		return googleProject{}, errors.New("Antigravity gave this account no project; sign in to Antigravity once, then try again")
+		// Google's reason, when it gave one: an account it won't serve
+		// Antigravity to (its region, its age) says so in ineligibleTiers
+		msg := "Antigravity hasn't set this Google account up (it gave no project); sign in to the Antigravity app with it once, then try again"
+		for _, t := range load.IneligibleTiers {
+			if t.ReasonMessage != "" {
+				msg = "Antigravity won't serve this Google account: " + t.ReasonMessage
+				break
+			}
+		}
+		return googleProject{}, errors.New(msg)
 	}
 	return googleProject{id, tier.Name}, nil
 }

@@ -78,6 +78,165 @@ func TestCodexOwnModelPassesThrough(t *testing.T) {
 	}
 }
 
+// A turn on one of Codex's own models shows in the Routing view's live
+// trace, as those on magpie's do.
+func TestCodexOwnModelTraced(t *testing.T) {
+	setup(t, provider.Chat, &fake{t: t})
+	chatgpt(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		io.WriteString(w, sse(`data: {"type":"response.completed","response":{"id":"r1","usage":{"input_tokens":9,"output_tokens":2}}}`))
+	})
+	s := New()
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", CodexPath+"/responses", strings.NewReader(`{"model":"gpt-5.5","stream":true,"input":"hi"}`))
+	req.Header.Set("Authorization", "Bearer chatgpt-token")
+	s.Handler().ServeHTTP(rec, req)
+	st := s.Trace(t.Context(), 0, 0)
+	if len(st.Routes) != 1 {
+		t.Fatalf("routes %+v", st.Routes)
+	}
+	r := st.Routes[0]
+	if !r.Done || r.Status != 200 || r.Model != "gpt-5.5" || r.Tokens != 11 ||
+		len(r.Order) != 1 || r.Order[0].Who != "Codex's own sign-in" || len(r.Tries) != 1 || !r.Tries[0].Done || r.Tries[0].Status != 200 {
+		t.Errorf("route %+v", r)
+	}
+	if st.Totals.Requests != 1 {
+		t.Errorf("totals %+v", st.Totals)
+	}
+}
+
+func TestCodexOwnModelOmitsNonemptyReasoning(t *testing.T) {
+	setup(t, provider.Chat, &fake{t: t})
+	var got []byte
+	chatgpt(t, func(w http.ResponseWriter, r *http.Request) {
+		got, _ = io.ReadAll(r.Body)
+		io.WriteString(w, sse(`data: {"type":"response.completed","response":{"id":"r1"}}`))
+	})
+	code, body := codexPost(t, `{"model":"gpt-5.5","stream":true,"input":[
+	  {"type":"reasoning","content":[{"type":"reasoning_text","text":"foreign thought"}],"encrypted_content":"foreign-token"},
+	  {"type":"reasoning","content":[],"encrypted_content":"openai-own"},
+	  {"type":"reasoning","encrypted_content":"openai-own-without-content"},
+	  {"type":"function_call_output","call_id":"call_1","output":"result"},
+	  {"type":"message","role":"user","content":[{"type":"input_text","text":"continue"}]}]}`)
+	if code != 200 || !strings.Contains(body, `response.completed`) {
+		t.Fatalf("%d %s", code, body)
+	}
+	var q struct {
+		Input []map[string]any `json:"input"`
+	}
+	if err := json.Unmarshal(got, &q); err != nil {
+		t.Fatal(err)
+	}
+	if len(q.Input) != 4 || q.Input[0]["encrypted_content"] != "openai-own" ||
+		q.Input[1]["encrypted_content"] != "openai-own-without-content" ||
+		q.Input[2]["type"] != "function_call_output" || q.Input[3]["role"] != "user" ||
+		strings.Contains(string(got), "foreign-token") {
+		t.Errorf("upstream input: %s", got)
+	}
+}
+
+// Back on one of Codex's own models after another vendor's: its reasoning,
+// an id with nothing sealed in it, would be looked up by OpenAI and not
+// found, so it doesn't go. An item OpenAI still refuses is taken out and
+// the rest asked again.
+func TestCodexOwnModelAfterAnotherVendor(t *testing.T) {
+	setup(t, provider.Chat, &fake{t: t})
+	var got [][]byte
+	chatgpt(t, func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		got = append(got, b)
+		if bytes.Contains(b, []byte(`cmp_0217`)) {
+			w.WriteHeader(400)
+			io.WriteString(w, `{"error":{"message":"The encrypted content for item cmp_0217abc could not be verified. Reason: Encrypted content could not be decrypted or parsed.","code":"invalid_encrypted_content"}}`)
+			return
+		}
+		if bytes.Contains(b, []byte(`rs_other`)) {
+			w.WriteHeader(404)
+			io.WriteString(w, `{"error":{"message":"Item with id 'rs_other' not found. Items are not persisted when `+"`store`"+` is set to false."}}`)
+			return
+		}
+		io.WriteString(w, sse(`data: {"type":"response.completed","response":{"id":"r1"}}`))
+	})
+	code, body := codexPost(t, `{"model":"gpt-6-luna","stream":true,"store":false,"input":[
+	  {"type":"reasoning","id":"rs_0217903544582750000","summary":[{"type":"summary_text","text":"volc thought"}],"encrypted_content":null},
+	  {"type":"reasoning","id":"rs_other","summary":[],"encrypted_content":"sealed-elsewhere"},
+	  {"type":"compaction","id":"cmp_0217abc","encrypted_content":"not-openai"},
+	  {"type":"reasoning","id":"rs_own","summary":[],"encrypted_content":"openai-own"},
+	  {"type":"message","role":"user","content":[{"type":"input_text","text":"go on"}]}]}`)
+	if code != 200 || !strings.Contains(body, `response.completed`) {
+		t.Fatalf("%d %s", code, body)
+	}
+	if len(got) != 3 || bytes.Contains(got[0], []byte("volc thought")) {
+		t.Fatalf("%d asks, first: %s", len(got), got[0])
+	}
+	last := string(got[2])
+	if strings.Contains(last, "cmp_0217abc") || strings.Contains(last, "rs_other") ||
+		!strings.Contains(last, "openai-own") || !strings.Contains(last, "go on") {
+		t.Errorf("last ask: %s", last)
+	}
+}
+
+// A refusal that names nothing magpie can take out goes to Codex as it came.
+func TestCodexOwnModelRefusalPassesThrough(t *testing.T) {
+	setup(t, provider.Chat, &fake{t: t})
+	asks := 0
+	chatgpt(t, func(w http.ResponseWriter, r *http.Request) {
+		asks++
+		w.WriteHeader(404)
+		io.WriteString(w, `{"error":{"message":"The model 'gpt-x' does not exist"}}`)
+	})
+	code, body := codexPost(t, `{"model":"gpt-x","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}]}`)
+	if code != 404 || asks != 1 || !strings.Contains(body, "does not exist") {
+		t.Errorf("%d asks=%d %s", code, asks, body)
+	}
+}
+
+func TestCodexMagpieModelKeepsReasoningInput(t *testing.T) {
+	body := `{"model":"fake/m1","input":[{"type":"reasoning","content":[{"type":"reasoning_text","text":"thought"}],"encrypted_content":"foreign-token"}]}`
+	got, compact := codexInput([]byte(body), true)
+	if compact || string(got) != body {
+		t.Errorf("magpie input: %s, compact: %t", got, compact)
+	}
+}
+
+func TestCodexOwnModelCompactionPassesThrough(t *testing.T) {
+	setup(t, provider.Chat, &fake{t: t})
+	var got [][]byte
+	chatgpt(t, func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		got = append(got, b)
+		if !streamOf(b) {
+			http.Error(w, `{"detail":"Stream must be set to true"}`, http.StatusBadRequest)
+			return
+		}
+		w.Header()["Content-Type"] = nil
+		io.WriteString(w, sse(
+			`data: {"type":"response.output_item.done","output_index":0,"item":{"type":"compaction","id":"cmp_openai","encrypted_content":"openai-own"}}`,
+			`data: {"type":"response.completed","response":{"id":"resp_openai","status":"completed","output":[{"type":"compaction","id":"cmp_openai","encrypted_content":"openai-own"}]}}`))
+	})
+	original := `{"model":"gpt-6-sol","stream":true,"tools":[{"type":"function","name":"shell"}],"input":[{"type":"message","role":"user","content":"remember this"},{"type":"compaction_trigger"}]}`
+	code, body := codexPost(t, original)
+	if code != 200 || !strings.Contains(body, `"id":"cmp_openai"`) || len(got) != 1 || string(got[0]) != original {
+		t.Fatalf("own compact: %d %s; upstream %q", code, body, got)
+	}
+
+	sum := magpieCompaction + base64.StdEncoding.EncodeToString([]byte("prior summary"))
+	code, body = codexPost(t, `{"model":"gpt-6-sol","stream":true,"tools":[{"type":"function","name":"shell"}],"input":[{"type":"compaction","encrypted_content":"`+sum+`"},{"type":"compaction_trigger"}]}`)
+	if code != 200 || len(got) != 2 {
+		t.Fatalf("mixed compact: %d %s; %d upstream requests", code, body, len(got))
+	}
+	var q struct {
+		Stream bool             `json:"stream"`
+		Tools  []map[string]any `json:"tools"`
+		Input  []map[string]any `json:"input"`
+	}
+	if err := json.Unmarshal(got[1], &q); err != nil || !q.Stream || len(q.Tools) != 1 || len(q.Input) != 2 ||
+		q.Input[0]["type"] != "message" || q.Input[1]["type"] != "compaction_trigger" ||
+		!strings.Contains(string(got[1]), "prior summary") || strings.Contains(string(got[1]), codexCompactPrompt) {
+		t.Errorf("mixed compact upstream: %s (%v)", got[1], err)
+	}
+}
+
 // A magpie model is served by magpie, whatever sign-in Codex sent.
 func TestCodexMagpieModelServed(t *testing.T) {
 	f := &fake{t: t, reply: sse(
@@ -147,6 +306,10 @@ func TestCodexCompactsMagpieModel(t *testing.T) {
 	b, _ := base64.StdEncoding.DecodeString(strings.TrimPrefix(enc, magpieCompaction))
 	if item["type"] != "compaction" || !strings.HasPrefix(enc, magpieCompaction) || string(b) != "SUMMARY" || !completed {
 		t.Errorf("events: %s", body)
+	}
+	code, _ = codexPost(t, `{"model":"fake/m1","stream":true,"input":[{"type":"compaction","encrypted_content":"`+enc+`"},{"type":"message","role":"user","content":"continue"}]}`)
+	if code != 200 || !strings.Contains(string(f.got), "SUMMARY") || !strings.Contains(string(f.got), codexSummaryPrefix) || strings.Contains(string(f.got), magpieCompaction) {
+		t.Errorf("compacted conversation was not restored: %d %s", code, f.got)
 	}
 }
 
@@ -247,5 +410,34 @@ func TestCodexModelsNameGroups(t *testing.T) {
 	}
 	if names["group/g"] != "G · routing group" || !strings.HasSuffix(names["fake/m1"], " · Fake") {
 		t.Fatalf("%v", names)
+	}
+}
+
+func TestCodexOwnModelKeepsReasoningWithNullContent(t *testing.T) {
+	body := `{"model":"gpt-5.5","input":[{"type":"reasoning","content":null,"encrypted_content":"openai-own"}]}`
+	if got, _ := codexInput([]byte(body), false); string(got) != body {
+		t.Errorf("input: %s", got)
+	}
+}
+
+// Codex signed in with an API key OpenAI refuses, asked for one of its own
+// models: the refusal says what happened and what to do.
+func TestCodexOwnModelKeyRefused(t *testing.T) {
+	setup(t, provider.Chat, &fake{t: t})
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(401)
+		io.WriteString(w, `{"error":{"message":"Incorrect API key provided: sk-A2sz0****owqK.","code":"invalid_api_key"}}`)
+	}))
+	t.Cleanup(up.Close)
+	was := codexAPIBase
+	codexAPIBase = up.URL
+	t.Cleanup(func() { codexAPIBase = was })
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", CodexPath+"/responses", strings.NewReader(`{"model":"gpt-6-astra","input":"hi","stream":true}`))
+	req.Header.Set("Authorization", "Bearer sk-relay-key")
+	New().Handler().ServeHTTP(rec, req)
+	body := rec.Body.String()
+	if rec.Code != 401 || !strings.Contains(body, "Incorrect API key provided") || !strings.Contains(body, "pick one of magpie's models") {
+		t.Fatalf("%d %s", rec.Code, body)
 	}
 }

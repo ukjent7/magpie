@@ -42,6 +42,7 @@
   <div class="links">
     <a href="/">Home</a>
     <a href="/docs/start">Get started</a>
+    <a href="/docs/intent">Intent routing</a>
     <a href="/docs/import">Add to magpie</a>
     <a href="https://github.com/yetone/magpie-releases/releases">Releases</a>
   </div>
@@ -87,8 +88,14 @@
     <h2 id="providers"><a class="anchor" href="#providers">1 · Add your providers</a></h2>
     <p>Open the <span class="ui">Providers</span> tab and press <span class="ui">＋ Add provider</span>. Pick a tile, or type a vendor’s name to find it.</p>
 
+    <figure class="figure">
+      <img class="for-light" src="/img/add-light.png" width="2080" height="1250" loading="lazy" alt="The Add provider sheet: subscriptions, vendors, relays, what’s on this machine, and custom URLs">
+      <img class="for-dark" src="/img/add-dark.png" width="2080" height="1250" loading="lazy" alt="The Add provider sheet: subscriptions, vendors, relays, what’s on this machine, and custom URLs">
+      <figcaption>Add provider: sign in to a subscription, pick a vendor, or point at any compatible URL.</figcaption>
+    </figure>
+
     <h3>Subscriptions · sign in, no key</h3>
-    <p>Claude (Pro, Max, Team), ChatGPT (Plus, Pro, Business), Cursor, Grok, Copilot and Devin. Click the tile and magpie opens the vendor’s own sign-in page in your browser; the account shows up as soon as you finish (Copilot gives you a code to enter on GitHub’s page). Subscriptions are added here, in magpie, not by logging in inside another agent.</p>
+    <p>Claude (Pro, Max, Team), ChatGPT (Plus, Pro, Business), Cursor, Grok (SuperGrok), Copilot and Devin. Click the tile and magpie opens the vendor’s own sign-in page in your browser; the account shows up as soon as you finish (Copilot gives you a code to enter on GitHub’s page). Subscriptions are added here, in magpie, not by logging in inside another agent.</p>
     <ul>
       <li><b>More than one account.</b> Click the Claude or ChatGPT tile again to add another; each is listed under the provider, one click from being the one in use.</li>
       <li><b>Already signed in?</b> An agent you are signed in to on this machine shows up as a provider too, <em>signed in as …</em>.</li>
@@ -108,7 +115,13 @@
     <p>Keys live in <code>~/.config/magpie/providers.json</code>, readable by you alone. magpie never reads keys from your shell environment: what you add is what it uses.</p>
 
     <h2 id="agents"><a class="anchor" href="#agents">2 · Pick a model for each agent</a></h2>
-    <p>The <span class="ui">Agents</span> tab has a row for each agent installed or configured on this machine. magpie knows Claude Code, Codex, Gemini CLI, OpenCode, Pi, Goose, Cursor, Copilot CLI, Crush, DeepSeek Harness, Command Code, omp, Devin and Hermes Agent.</p>
+    <p>The <span class="ui">Agents</span> tab has a row for each agent installed or configured on this machine. magpie knows Claude Code, Codex, Gemini CLI, OpenCode, Pi, Goose, Cursor, Copilot CLI, Crush, DeepSeek Harness, Command Code, omp, Devin, Hermes Agent, Grok Build, ZCode and Alma.</p>
+
+    <figure class="figure">
+      <img class="for-light" src="/img/agents-light.png" width="2080" height="1058" loading="lazy" alt="The Agents tab: one row per agent with the model it uses, and saved profiles at the bottom">
+      <img class="for-dark" src="/img/agents-dark.png" width="2080" height="1058" loading="lazy" alt="The Agents tab: one row per agent with the model it uses, and saved profiles at the bottom">
+      <figcaption>One row per agent. Pick a model from any provider; profiles switch everything at once.</figcaption>
+    </figure>
     <ul>
       <li><b>Click the model</b> to open the picker. Models are grouped: the agent’s own, your routing groups, then each provider you added. Type to filter, or type any model id that is not listed.</li>
       <li><b>Reasoning effort</b>, where the agent has it (Codex’s <em>effort</em>, Pi’s <em>thinking</em>), is a slider under the list.</li>
@@ -127,6 +140,12 @@
 
     <h2 id="routing"><a class="anchor" href="#routing">3 · Optional: routing groups</a></h2>
     <p>With one account per provider you can skip this. It matters once you have several: two ChatGPT accounts, or the same model from a subscription and from a key.</p>
+
+    <figure class="figure">
+      <img class="for-light" src="/img/routing-light.png" width="2080" height="1914" loading="lazy" alt="The Routing tab: four agents sending at once through three routing groups, with a rate-limited provider sitting out">
+      <img class="for-dark" src="/img/routing-dark.png" width="2080" height="1996" loading="lazy" alt="The Routing tab: four agents sending at once through three routing groups, with a rate-limited provider sitting out">
+      <figcaption>Routing groups: several models or accounts behind one name, with smart or ordered fallback.</figcaption>
+    </figure>
 
     <h3>Several accounts or keys in one provider</h3>
     <p>Open the provider’s row and tick every account or key to use. <span class="ui">Routing</span> says how requests spread over them: <span class="ui">Smart</span> (the default), <span class="ui">In order</span>, <span class="ui">In turn</span> or <span class="ui">Least used first</span>. <span class="ui">Fallback</span> lists models to use instead when the provider is out of quota, rate limited or down.</p>
@@ -148,6 +167,27 @@
       <tr><td>Within a turn <code>turn</code></td><td>While the agent sends tool results back; when you speak again, routing decides afresh.</td></tr>
       <tr><td>Off <code>off</code></td><td>Every request is routed afresh.</td></tr>
     </table></div>
+    <h3 id="rules">Rules · a turn to a chosen model</h3>
+    <p>A group’s <span class="ui">Rules</span> send a turn to one of its models when the turn is of a kind you name: long (<code>tokens ≥ N</code>), carrying an image, asking for reasoning (on, or at least a level), from certain agents, or asking for something you describe (an <em>intent</em>). They are looked at top first when you send a message; the first that matches puts its model first, with the group’s others behind it if it fails. A turn no rule matches is routed as the group always routes, and keeps to where it was.</p>
+    <ul>
+      <li>A rule decides as a turn begins, and the turn stays on that model while the agent sends tool results back, so what the vendor cached isn’t lost halfway. The one exception: a turn that grows past its model’s context moves to a member that takes it.</li>
+      <li>Tokens are estimated from the request’s size, or what the vendor counted for the conversation’s last request, whichever is more. Leave some margin: a rule at 150k for a 200k model, not 199k.</li>
+      <li>A subagent is a conversation of its own, so a rule can send it elsewhere while its agent keeps where it is.</li>
+      <li>An intent is a few words for what the user asks for — “writing or fixing tests”, “a quick question”. As a turn begins, the group’s classifier — any model magpie has; a small, fast one without reasoning is best — is asked once which of the intents that could match the user’s message is. Only the message is sent, not the conversation. If it fails, is slow (8 s) or can’t say, no intent matches and the turn goes by the other rules. It isn’t asked when a rule without an intent would decide anyway, and the same message isn’t asked about twice. Its calls show in Usage as magpie’s own. Exactly what it is asked, how its answer is used and what happens when it fails: <a href="/docs/intent">Intent routing</a>.</li>
+      <li>The Routing tab says which rule sent each turn where, and what the classifier said.</li>
+    </ul>
+    <h3 id="nested">Groups in groups</h3>
+    <p>A group’s models can include another group: pick it under <em>Routing groups</em> in <span class="ui">Add a model</span>, or <code>models+=group/&lt;id&gt;</code> from a terminal. The group in it takes its place in the order and routes among its own models by its own routing and rules. So Coder can be <code>deepseek-v4-pro</code> then <em>Fast</em>, and Fast its own order of cheap models. A Coder rule can send a turn to <code>group/fast</code>, and Fast’s own rules then pick which of its models goes first.</p>
+    <ul>
+      <li><b>No loops.</b> A group can’t be in itself, directly or through the groups in it. Saving Fast with Coder in it, while Coder has Fast, is refused, and the picker doesn’t offer such a group. Groups go at most 8 deep. A group can’t be removed while another has it: take it out there first.</li>
+      <li><b>Failover goes through.</b> If every model in the inner group fails, the outer group’s next member answers, as with any member.</li>
+      <li>A model that appears twice (on its own and in a group in it) is asked once, at its first place.</li>
+    </ul>
+    <figure class="figure">
+      <img class="for-light" src="/img/nested-routing-light.png" width="2080" height="1330" loading="lazy" alt="The Routing tab with a group in a group: Coder has deepseek-v4-pro and the group Fast, whose deepseek-v4-flash and kimi-k2.5 sit under it; Kimi answered">
+      <img class="for-dark" src="/img/nested-routing-dark.png" width="2080" height="1330" loading="lazy" alt="The Routing tab with a group in a group: Coder has deepseek-v4-pro and the group Fast, whose deepseek-v4-flash and kimi-k2.5 sit under it; Kimi answered">
+      <figcaption>Coder’s rule sent a quick question to the group Fast; Fast’s own rule put Kimi first there. The trace says what each group’s rules and classifier decided.</figcaption>
+    </figure>
     <p>The <span class="ui">Routing</span> tab shows the gateway’s decisions live: who answered each request, and why. The same groups from a terminal:</p>
     <div class="code">
       <span class="lang">Terminal</span>
@@ -155,12 +195,22 @@
       <pre id="ex-group">magpie groups                        <span class="c"># yours, then those magpie found</span>
 magpie group add <span class="s">"Opus anywhere"</span> models=claude/claude-opus-5-5,copilot/claude-opus-5.5 routing=order stays=session
 magpie group set opus-anywhere models+=openrouter/anthropic/claude-opus-5.5
+magpie group rule add opus-anywhere use=openrouter/anthropic/claude-opus-5.5 tokens=150k  <span class="c"># long turns to it first</span>
+magpie group rule add opus-anywhere use=copilot/claude-opus-5.5 intent=<span class="s">"a quick question"</span> classifier=groq/llama-3.1-8b-instant
+magpie group set coder models+=group/opus-anywhere  <span class="c"># a group in a group</span>
+magpie group rule opus-anywhere      <span class="c"># its rules; rule rm|mv &lt;n&gt;, rule classifier &lt;group&gt; &lt;model&gt;</span>
 magpie group rm opus-anywhere        <span class="c"># one magpie found is hidden; magpie group restore &lt;id&gt;</span>
 magpie claude group/opus-anywhere    <span class="c"># use it</span></pre>
     </div>
 
     <h2 id="usage"><a class="anchor" href="#usage">Usage and profiles</a></h2>
     <p><b>Usage.</b> The <span class="ui">Usage</span> tab counts tokens, cache hits and cost for each agent and model, from every call through the gateway, for <span class="ui">Today</span>, <span class="ui">7 days</span>, <span class="ui">30 days</span> or <span class="ui">All</span>; your subscriptions’ allowance used, and when it resets, sits on top. Calls an agent makes to its own vendor directly don’t pass through magpie and aren’t counted.</p>
+
+    <figure class="figure">
+      <img class="for-light" src="/img/usage-light.png" width="2080" height="842" loading="lazy" alt="The Usage tab: remaining balances, token and cost totals, and a 30-day chart">
+      <img class="for-dark" src="/img/usage-dark.png" width="2080" height="842" loading="lazy" alt="The Usage tab: remaining balances, token and cost totals, and a 30-day chart">
+      <figcaption>Balances, tokens, cache hits and cost for every call through the gateway.</figcaption>
+    </figure>
     <p><b>Profiles.</b> At the bottom of the <span class="ui">Agents</span> tab, <span class="ui">＋ Save current</span> snapshots every agent’s settings under a name; click the chip to switch everything back in one move.</p>
 
     <h2 id="cli"><a class="anchor" href="#cli">From the terminal</a></h2>
@@ -201,6 +251,7 @@ magpie claude group/opus-anywhere    <span class="c"># use it</span></pre>
   <span>© 2026 magpie · MIT</span>
   <div class="links">
     <a href="/">Home</a>
+    <a href="/docs/intent">Intent routing</a>
     <a href="/docs/import">Add to magpie</a>
     <a href="https://github.com/yetone/magpie">GitHub</a>
     <a href="https://discord.gg/vGSnD3ZKQF">Discord</a>

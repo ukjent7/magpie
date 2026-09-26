@@ -25,11 +25,13 @@ const providerUsage = `usage:
   magpie provider <id>                    show one provider and its models
   magpie provider add <preset> <key>      add a preset vendor   e.g. magpie provider add deepseek sk-…
                                           again, it adds another (deepseek-2); k=v pairs too: id, name, header.X-Foo
-  magpie provider add <name> k=v…         add a custom vendor   k: url, anthropic, responses, key, models, catalog, icon, header.X-Foo, balance, balance.path
+  magpie provider add <name> k=v…         add a custom vendor   k: url, anthropic, responses, key, models, catalog, icon, header.X-Foo, balance, balance.path, models.url
+  magpie provider set <id> k=v…           change a provider's settings, with the same k=v pairs as add
   magpie provider key <id> <key>          change the API key
   magpie provider icon <id> <file|name>   give a custom provider a picture (PNG, JPEG, SVG…) or a built-in icon
   magpie provider fallback <id> <provider/model>…   where requests go when it's out of quota or down (none clears)
   magpie provider models <id> [ids…]      fetch the vendor's model list, or choose which models to expose
+  magpie provider listed <id> yes|no      no: its models serve only through routing groups, not in the list
   magpie provider test <id>               send a tiny request through each endpoint
   magpie provider rm <id>                 remove a provider
 
@@ -37,7 +39,17 @@ const providerUsage = `usage:
        magpie provider add "Own Claude" anthropic=https://gw.example.com key=sk-… catalog=anthropic
        magpie provider add "My Relay" url=https://relay.example.com/v1 key=sk-… header.X-Org-Id=acme
        magpie provider add anthropic sk-… id=anthropic-ws2 name="Anthropic WS2" header.anthropic-workspace-id=wrkspc_…
-       magpie provider add "My Relay" url=https://relay.example.com/v1 key=sk-… balance=https://relay.example.com/api/usage/token balance.path='$data.total_available / 500000'`
+       magpie provider set my-relay models.url=https://relay.example.com/api/models catalog=
+       magpie provider add "My Relay" url=https://relay.example.com/v1 key=sk-… balance=https://relay.example.com/api/usage/token balance.path='$data.total_available / 500000'
+       magpie provider set my-relay balance.path='(1 - credits.monthlyCredits / 70) %'
+                                   (balance.path: where the amount is in the reply, or a sum of those with + - * / and
+                                    brackets; $ or ¥ in front adds the sign, % after it shows a percent of 1;
+                                    several go apart by ; each with a label: '5h: a.used / a.cap %; $credits.left')
+       magpie provider set my-relay context=272k context.gpt-6=1m
+                                   (context: how long a request agents are told the models take, over what the
+                                    vendor or models.dev says; context.<model> for one of them; empty clears)
+       magpie provider set opencode-go family=ocgo
+                                   (family: a tag for which agents are shown its models, see magpie visible)`
 
 // providers: `magpie providers`
 func providers() error {
@@ -91,6 +103,10 @@ func providers() error {
 			name = a.Name
 		}
 		fmt.Println()
+		if x.SignedOut {
+			fmt.Println(" ", amber.Render("!"), name+"'s saved accounts are not offered: "+x.Why)
+			continue
+		}
 		back := ""
 		if x.Provider != "" {
 			back = " · magpie provider add " + x.Provider + " brings it back"
@@ -147,10 +163,26 @@ func presets() error {
 	return nil
 }
 
-// models: `magpie models` — the catalog every agent sees
-func models() error {
+// models: `magpie models [<agent>]` — the catalog every agent sees, or the
+// one agent is shown and what is kept from it
+func models(args []string) error {
 	entries := provider.Catalog()
-	if len(entries) == 0 {
+	var hidden []provider.Entry
+	agentID := ""
+	if len(args) > 0 {
+		agentID = strings.ToLower(strings.TrimPrefix(args[0], "--agent="))
+		if agentID == "--agent" && len(args) > 1 {
+			agentID = strings.ToLower(args[1])
+		}
+		if agentID = agentOf(agentID); !knownAgent(agentID) {
+			return fmt.Errorf("no agent %q (%s)", agentID, strings.Join(agentIDs(), ", "))
+		}
+		entries, hidden = provider.CatalogFor(agentID)
+	}
+	if len(entries) == 0 && agentID != "" {
+		names, _ := provider.VisibleTo(agentID)
+		fmt.Println(amber.Render("!"), agentID, "is shown none of them: nothing is in", strings.Join(names, ", "), muted.Render("· magpie visible "+agentID+" all shows it every model"))
+	} else if len(entries) == 0 {
 		fmt.Println(muted.Render("no models yet · add a provider first:"), "magpie provider add deepseek sk-…")
 		return nil
 	}
@@ -177,6 +209,9 @@ func models() error {
 		}
 		fmt.Println(line)
 	}
+	if agentID != "" {
+		explainHidden(agentID, hidden)
+	}
 	fmt.Println(faint.Render("  " + gateway.URL() + "/v1"))
 	return nil
 }
@@ -190,6 +225,28 @@ func providerCmd(args []string) error {
 	switch verb {
 	case "add":
 		return addProvider(rest)
+	case "set":
+		// the same k=v pairs as add, on a provider already here
+		if len(rest) < 2 {
+			return fmt.Errorf("magpie provider set <id> k=v…\n\n%s", providerUsage)
+		}
+		p, err := provider.Find(rest[0])
+		if err != nil {
+			return err
+		}
+		for _, kv := range rest[1:] {
+			if k, _, _ := strings.Cut(kv, "="); strings.EqualFold(k, "id") {
+				return fmt.Errorf("a provider's id can't change; groups and agents name it by it")
+			}
+		}
+		if err := applyPairs(p, rest[1:]); err != nil {
+			return err
+		}
+		if err := provider.Save(*p); err != nil {
+			return err
+		}
+		fmt.Println(green.Render("✓"), "saved", p.Name, muted.Render("("+p.ID+")"))
+		return nil
 	case "key":
 		if len(rest) != 2 {
 			return fmt.Errorf("magpie provider key <id> <key>")
@@ -301,6 +358,26 @@ func providerCmd(args []string) error {
 			os.Exit(1)
 		}
 		return nil
+	case "listed":
+		// no: the provider's models leave the list agents see and serve
+		// only through the routing groups they are in
+		if len(rest) != 2 || (rest[1] != "yes" && rest[1] != "no") {
+			return fmt.Errorf("magpie provider listed <id> yes|no")
+		}
+		p, err := provider.Find(rest[0])
+		if err != nil {
+			return err
+		}
+		p.Unlisted = rest[1] == "no"
+		if err := provider.Save(*p); err != nil {
+			return err
+		}
+		if p.Unlisted {
+			fmt.Println(green.Render("✓"), p.Name, muted.Render("serves only through routing groups"))
+		} else {
+			fmt.Println(green.Render("✓"), p.Name, muted.Render("its models are listed"))
+		}
+		return nil
 	case "models":
 		if len(rest) < 1 {
 			return fmt.Errorf("magpie provider models <id> [model ids to expose…]")
@@ -340,6 +417,13 @@ func providerCmd(args []string) error {
 func addProvider(rest []string) error {
 	if len(rest) == 0 {
 		return fmt.Errorf("magpie provider add <preset> <key>   or   magpie provider add <name> k=v…\n\n%s", providerUsage)
+	}
+	if len(rest) == 1 && slices.ContainsFunc(provider.Excluded(), func(x provider.Exclusion) bool { return x.Provider == strings.ToLower(rest[0]) }) {
+		// a signed-in account the user removed comes back with its picks
+		if err := provider.ShowAccount(strings.ToLower(rest[0])); err != nil {
+			return err
+		}
+		return announce(strings.ToLower(rest[0]))
 	}
 	var p provider.Provider
 	if pr, err := provider.FromPreset(strings.ToLower(rest[0])); err == nil {
@@ -501,6 +585,14 @@ func applyPairs(p *provider.Provider, pairs []string) error {
 			p.BalanceURL = v
 		case "balance.path":
 			p.BalancePath = v
+		case "models.url":
+			p.ModelsURL = v
+		case "context":
+			if err := setContext(p, "*", v); err != nil {
+				return err
+			}
+		case "family", "tag":
+			p.Family = strings.TrimSpace(v)
 		case "icon":
 			// a picture on disk is kept by magpie; anything else is one of
 			// the built-in icons' names
@@ -532,9 +624,36 @@ func applyPairs(p *provider.Provider, pairs []string) error {
 				p.Headers[name] = v
 				continue
 			}
+			if len(k) > len("context.") && strings.EqualFold(k[:len("context.")], "context.") {
+				if err := setContext(p, k[len("context."):], v); err != nil {
+					return err
+				}
+				continue
+			}
 			return fmt.Errorf("unknown field %q\n\n%s", k, providerUsage)
 		}
 	}
+	return nil
+}
+
+// setContext sets the context agents are told model takes ("*" for all
+// the provider's); empty or 0 leaves it to the vendor and models.dev again.
+func setContext(p *provider.Provider, model, v string) error {
+	n := 0
+	if strings.TrimSpace(v) != "" {
+		var err error
+		if n, err = parseTokens(v); err != nil {
+			return fmt.Errorf("context: %w", err)
+		}
+	}
+	if n == 0 {
+		delete(p.Contexts, model)
+		return nil
+	}
+	if p.Contexts == nil {
+		p.Contexts = map[string]int{}
+	}
+	p.Contexts[model] = n
 	return nil
 }
 
@@ -584,6 +703,11 @@ func serve() error {
 		fmt.Println(amber.Render("!"), "no models yet ·", "magpie provider add deepseek sk-…")
 	} else {
 		fmt.Printf("  %d models · %s\n", n, muted.Render("magpie models"))
+	}
+	for _, x := range provider.Excluded() {
+		if x.SignedOut {
+			fmt.Println(amber.Render("!"), x.Agent+":", x.Why)
+		}
 	}
 	return s.ListenAndServe(context.Background())
 }

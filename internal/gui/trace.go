@@ -18,8 +18,9 @@ type traceJSON struct {
 // traceRoutes serves the routing trace for the Gateway view to play: it
 // waits up to 25 s for something to change after the seq it is given, so
 // the page hears of a request as it happens.
-func traceRoutes(mux *http.ServeMux, gw *gateway.Server) {
+func traceRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/gateway/trace", func(rw http.ResponseWriter, r *http.Request) {
+		gw := served.Load()
 		out := traceJSON{TraceState: gateway.TraceState{Routes: []gateway.Route{}}, Mine: gw != nil}
 		if gw != nil {
 			after, _ := strconv.ParseInt(r.URL.Query().Get("after"), 10, 64)

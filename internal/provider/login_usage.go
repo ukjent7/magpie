@@ -35,6 +35,8 @@ func LoginUsage(ctx context.Context, agent string) map[string]SubscriptionQuota 
 		logins = Logins(agent)
 	case "copilot":
 		logins = copilotLoginList()
+	case "zcode":
+		logins = zcodeLoginList()
 	case "gemini", "antigravity":
 		logins = googleLoginList(agent)
 	case "cursor": // one account, the one cursor-agent is signed in to
@@ -84,6 +86,9 @@ func loginQuota(ctx context.Context, l Login) SubscriptionQuota {
 	}
 	if l.Agent == "gemini" || l.Agent == "antigravity" {
 		return googleLoginQuota(ctx, l)
+	}
+	if l.Agent == "zcode" {
+		return zcodeLoginQuota(ctx, l)
 	}
 	if l.Agent == "copilot" {
 		for _, c := range copilotLogins(copilotConfigDir()) {

@@ -157,11 +157,16 @@ func (c remoteWindows) post(op string, form url.Values) string {
 	return string(b)
 }
 
-func (c remoteWindows) HidePanel()             { c.do("hide", "") }
-func (c remoteWindows) ShowMain(view string)   { c.do("main", view) }
-func (c remoteWindows) Quit()                  { c.do("quit", "") }
-func (c remoteWindows) OpenURL(u string)       { c.do("open", u) }
-func (c remoteWindows) OpenFolder(path string) { c.do("reveal", path) }
+func (c remoteWindows) HidePanel()           { c.do("hide", "") }
+func (c remoteWindows) ShowMain(view string) { c.do("main", view) }
+func (c remoteWindows) Quit()                { c.do("quit", "") }
+func (c remoteWindows) OpenURL(u string)     { c.do("open", u) }
+func (c remoteWindows) OpenFolder(path string) error {
+	if s := c.post("reveal", url.Values{"arg": {path}}); s != "ok" {
+		return fmt.Errorf("%s", s)
+	}
+	return nil
+}
 func (c remoteWindows) Copy(text string) bool {
 	return c.post("copy", url.Values{"arg": {text}}) == "ok"
 }
@@ -215,7 +220,12 @@ func devShell(h *host) http.Handler {
 		case "open":
 			h.OpenURL(arg)
 		case "reveal":
-			h.OpenFolder(arg)
+			if err := h.OpenFolder(arg); err != nil {
+				rw.Write([]byte(err.Error()))
+				return
+			}
+			rw.Write([]byte("ok"))
+			return
 		case "copy":
 			if h.Copy(arg) {
 				rw.Write([]byte("ok"))

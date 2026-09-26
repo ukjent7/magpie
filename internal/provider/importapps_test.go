@@ -48,6 +48,8 @@ func TestImportCCSwitch(t *testing.T) {
 	isolate(t)
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)                                  // Windows
+	t.Setenv("APPDATA", filepath.Join(home, "AppData", "Roaming")) // Windows: never the real Alma
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
 	sqliteFixture(t, filepath.Join(home, ".cc-switch", "cc-switch.db"),
@@ -109,6 +111,8 @@ func TestImportAlma(t *testing.T) {
 	isolate(t)
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)                                  // Windows
+	t.Setenv("APPDATA", filepath.Join(home, "AppData", "Roaming")) // Windows: never the real Alma
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 	cfg, _ := os.UserConfigDir()
 	sqliteFixture(t, filepath.Join(cfg, "alma", "chat_threads.db"),
@@ -134,6 +138,8 @@ func TestImportCodexConfig(t *testing.T) {
 	isolate(t)
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)                                  // Windows
+	t.Setenv("APPDATA", filepath.Join(home, "AppData", "Roaming")) // Windows: never the real Alma
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
 	t.Setenv("CODEX_HOME", filepath.Join(home, ".codex"))
@@ -250,6 +256,8 @@ func TestImportPresetOtherHeaders(t *testing.T) {
 	isolate(t)
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)                                  // Windows
+	t.Setenv("APPDATA", filepath.Join(home, "AppData", "Roaming")) // Windows: never the real Alma
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
 	first, _ := FromPreset("anthropic")
@@ -305,6 +313,8 @@ func TestImportHeadersDistinguishExistingProvider(t *testing.T) {
 func TestCodexImportModelsSameBasename(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)                                  // Windows
+	t.Setenv("APPDATA", filepath.Join(home, "AppData", "Roaming")) // Windows: never the real Alma
 	config := filepath.Join(home, "other", "config.toml")
 	models := []byte(`{"models":[{"slug":"custom-model","visibility":"list"}]}`)
 	for _, path := range []string{
@@ -330,6 +340,8 @@ func TestClaudeConfigDirImport(t *testing.T) {
 	isolate(t)
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)                                  // Windows
+	t.Setenv("APPDATA", filepath.Join(home, "AppData", "Roaming")) // Windows: never the real Alma
 	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(home, "custom-claude"))
 	path := claudeSettingsPath()
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
@@ -366,6 +378,8 @@ func TestImportAppsByName(t *testing.T) {
 func TestImportSourcesNeverNull(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)                                  // Windows
+	t.Setenv("APPDATA", filepath.Join(home, "AppData", "Roaming")) // Windows: never the real Alma
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
 	os.MkdirAll(filepath.Join(home, ".claude"), 0o755)
@@ -374,6 +388,17 @@ func TestImportSourcesNeverNull(t *testing.T) {
 		b, _ := json.Marshal(s)
 		if s.Items == nil || strings.Contains(string(b), `"items":null`) {
 			t.Fatalf("%s: items is null: %s", s.ID, b)
+		}
+	}
+}
+
+func TestSqlitePath(t *testing.T) {
+	for in, want := range map[string]string{
+		`C:/Users/me/.cc-switch/cc-switch.db`: "/C:/Users/me/.cc-switch/cc-switch.db",
+		"/Users/me/.cc-switch/cc-switch.db":   "/Users/me/.cc-switch/cc-switch.db",
+	} {
+		if got := sqlitePath(in); got != want {
+			t.Errorf("sqlitePath(%q) = %q, want %q", in, got, want)
 		}
 	}
 }

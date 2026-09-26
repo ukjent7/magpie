@@ -43,6 +43,12 @@ func fresh(t *testing.T) {
 	sticks.Lock()
 	sticks.m = map[string]stick{}
 	sticks.Unlock()
+	turnRules.Lock()
+	turnRules.m = map[string]turnRule{}
+	turnRules.Unlock()
+	classified.Lock()
+	classified.m, classified.failed = map[string]classifiedAs{}, map[string]classifyFailure{}
+	classified.Unlock()
 }
 
 func serveOn(t *testing.T, id, key string, models []string, v http.Handler, keys ...string) {
@@ -84,7 +90,7 @@ func TestRoutingGroups(t *testing.T) {
 			ids = append(ids, e.ID)
 		}
 	}
-	if got := strings.Join(ids, " "); got != "a/m a/only-a b/vendor/m group/auto-m" {
+	if got := strings.Join(ids, " "); got != "group/auto-m a/m a/only-a b/vendor/m" {
 		t.Fatalf("catalog: %s", got)
 	}
 	if err := provider.SaveGroup(provider.Group{Name: "Mine", Members: []string{"b/vendor/m", "a/only-a"}, Routing: provider.Ordered}); err != nil {
@@ -114,6 +120,27 @@ func TestRoutingGroups(t *testing.T) {
 	provider.ShowGroup("auto-m")
 	if _, _, ok := provider.Resolve("group/auto-m"); !ok {
 		t.Fatal("shown group not served")
+	}
+
+	// one serving only through its groups leaves the list, not the groups
+	pb, err := provider.Find("b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pb.Unlisted = true
+	if err := provider.Save(*pb); err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range provider.Catalog() {
+		if e.Provider.ID == "b" && !strings.HasPrefix(e.ID, provider.GroupPrefix) {
+			t.Fatalf("unlisted b listed as %s", e.ID)
+		}
+	}
+	if p, m, ok := provider.Resolve("group/mine"); !ok || p.ID != "b" || m != "vendor/m" {
+		t.Fatalf("unlisted member: %v %s %s", ok, p.ID, m)
+	}
+	if _, _, ok := provider.Resolve("b/vendor/m"); !ok {
+		t.Fatal("unlisted b not served by its id")
 	}
 }
 

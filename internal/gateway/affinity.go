@@ -15,7 +15,9 @@ package gateway
 // and not yet gone cold.
 
 import (
+	"encoding/json"
 	"net/http"
+	"regexp"
 	"sync"
 	"time"
 
@@ -53,6 +55,7 @@ type Affinity struct {
 
 type stick struct {
 	rest      string
+	who       string // the key or account, however many were on
 	turn      int
 	at        time.Time
 	cacheRead int
@@ -70,7 +73,14 @@ func turnOf(from provider.Protocol, body []byte) (turn int, within bool) {
 	if err != nil {
 		return 0, false
 	}
-	for i, m := range req.Messages {
+	return turnIn(req)
+}
+
+// turnIn is turnOf for a request already parsed. The last of the user's
+// messages tells whether the turn goes on: an agent may put its own notes
+// after it (Claude Code a system message after the tool results).
+func turnIn(req *Request) (turn int, within bool) {
+	for _, m := range req.Messages {
 		if m.Role != "user" {
 			continue
 		}
@@ -86,9 +96,7 @@ func turnOf(from provider.Protocol, body []byte) (turn int, within bool) {
 		if text && !result {
 			turn++
 		}
-		if i == len(req.Messages)-1 {
-			within = result
-		}
+		within = result
 	}
 	return turn, within
 }
@@ -110,8 +118,8 @@ func affine(scope, mode string, rotate bool, in http.Header, from provider.Proto
 	}
 	at := -1
 	for i, c := range cs {
-		if had && c.rest == st.rest {
-			at = i
+		if had && c.who() == st.who {
+			at, a.Last = i, c.rest // as it goes by now
 			break
 		}
 	}
@@ -180,11 +188,11 @@ func after(cs []candidate, pl planned, at int) ([]candidate, planned) {
 
 // answered remembers who answered a conversation, and what it read from
 // the vendor's cache doing so.
-func answered(key, rest string, turn, cacheRead int) {
+func answered(key string, c candidate, turn, cacheRead int) {
 	now := time.Now()
 	sticks.Lock()
 	defer sticks.Unlock()
-	sticks.m[key] = stick{rest: rest, turn: turn, at: now, cacheRead: cacheRead}
+	sticks.m[key] = stick{rest: c.rest, who: c.who(), turn: turn, at: now, cacheRead: cacheRead}
 	if len(sticks.m) > 4096 {
 		for k, st := range sticks.m {
 			if now.Sub(st.at) > stickKeep {
@@ -192,4 +200,39 @@ func answered(key, rest string, turn, cacheRead int) {
 			}
 		}
 	}
+}
+
+// foreignReasoning is how OpenAI refuses reasoning another account (or
+// organization) sealed: "The encrypted content for item rs_… could not be
+// verified", invalid_encrypted_content.
+var foreignReasoning = regexp.MustCompile(`(?i)invalid_encrypted_content|encrypted content.{0,80}could not be (verified|decrypted)`)
+
+// withoutReasoning takes the sealed reasoning out of a Responses request's
+// input — what another account wrote and this one can't read. What was
+// said and done stays; only the model's private notes to itself go.
+func withoutReasoning(body []byte) ([]byte, bool) {
+	var q map[string]json.RawMessage
+	if json.Unmarshal(body, &q) != nil {
+		return nil, false
+	}
+	var items []json.RawMessage
+	if json.Unmarshal(q["input"], &items) != nil {
+		return nil, false
+	}
+	kept := items[:0:0]
+	for _, it := range items {
+		var t struct {
+			Type string `json:"type"`
+		}
+		if json.Unmarshal(it, &t) == nil && t.Type == "reasoning" {
+			continue
+		}
+		kept = append(kept, it)
+	}
+	if len(kept) == len(items) {
+		return nil, false
+	}
+	q["input"], _ = json.Marshal(kept)
+	b, err := json.Marshal(q)
+	return b, err == nil
 }

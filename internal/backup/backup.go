@@ -50,6 +50,7 @@ type Bundle struct {
 	Keys      bool                       `json:"keys"`          // whether the providers carry their keys
 	Providers []provider.Provider        `json:"providers"`
 	Icons     map[string][]byte          `json:"icons,omitempty"` // pictures picked for providers, by file name
+	Groups    []provider.Group           `json:"groups,omitempty"` // the user's model groups
 	Settings  *settings.Settings         `json:"settings,omitempty"`
 	Profiles  map[string]profile.Profile `json:"profiles,omitempty"`
 	Agents    map[string]string          `json:"agents,omitempty"` // every agent's fields as they are now
@@ -88,6 +89,7 @@ func Collect(keys bool, app string) (Bundle, error) {
 			}
 		}
 	}
+	b.Groups = provider.StoredGroups()
 	if _, err := os.Stat(settings.Path()); err == nil {
 		s := settings.Load()
 		b.Settings = &s
@@ -223,6 +225,9 @@ func Restore(b Bundle, parts Parts) (Result, error) {
 		if r.Added, r.Replaced, err = provider.Restore(b.Providers); err != nil {
 			return r, err
 		}
+		if err := provider.RestoreGroups(b.Groups); err != nil {
+			return r, err
+		}
 		for _, p := range provider.Stored() {
 			if !p.Ready() && slices.ContainsFunc(b.Providers, func(q provider.Provider) bool { return q.ID == p.ID }) {
 				r.NeedKey = append(r.NeedKey, p.Name)
@@ -230,7 +235,10 @@ func Restore(b Bundle, parts Parts) (Result, error) {
 		}
 	}
 	if parts.Settings && b.Settings != nil {
-		if err := settings.Save(*b.Settings); err != nil {
+		// the window's size and the proxy are this machine's own
+		s, cur := *b.Settings, settings.Load()
+		s.Window, s.Proxy, s.Dock = cur.Window, cur.Proxy, cur.Dock
+		if err := settings.Save(s); err != nil {
 			return r, err
 		}
 		r.Settings = true

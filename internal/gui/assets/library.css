@@ -273,3 +273,5 @@ body.window .lib-head { top: -2px; margin: -2px -16px 0; padding: 8px 16px 4px; 
 .mk-sheet .mk-hint .mk-ext { padding: 0; font-family: var(--code); font-size: 11.5px; }
 .mk-sheet .mk-hint .mk-ext:hover { background: none; text-decoration: underline; text-underline-offset: 2px; }
 .mk-sheet .bar .mk-id { margin-left: 2px; }
+.lib-rtk-gain { margin: 6px 12px 10px; font-size: 12px; line-height: 1.5; color: var(--muted); }
+.lib-card > .lib-acts { padding: 0 12px 12px; }

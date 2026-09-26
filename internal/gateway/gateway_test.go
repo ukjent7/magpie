@@ -29,11 +29,23 @@ type fake struct {
 	reply string // SSE body
 	ctype string // "" means text/event-stream; "none" sends no header at all
 	code  int
+	// refuse, when set, answers a request it gives a code for with it
+	refuse func(body []byte) (code int, reply string)
+	calls  int
 }
 
 func (f *fake) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	f.got, _ = io.ReadAll(r.Body)
 	f.path, f.head = r.URL.Path, r.Header
+	f.calls++
+	if f.refuse != nil {
+		if code, reply := f.refuse(f.got); code != 0 {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(code)
+			io.WriteString(w, reply)
+			return
+		}
+	}
 	ct := f.ctype
 	if ct == "" {
 		ct = "text/event-stream"
@@ -460,6 +472,67 @@ func TestChatPassthroughSendsDeveloperAsSystem(t *testing.T) {
 	}
 }
 
+// Claude Code asks for a session title without thinking; DeepSeek's
+// Anthropic endpoint thinks unless told not to
+func TestAnthropicPassthroughTurnsThinkingOffUnlessAsked(t *testing.T) {
+	f := &fake{t: t, ctype: "application/json", reply: `{"id":"msg","type":"message","content":[]}`}
+	setup(t, provider.Anthropic, f)
+	for _, c := range []struct{ req, want string }{
+		{`{"model":"m1","max_tokens":5,"messages":[],"output_config":{"effort":"high"}}`, `"thinking":{"type":"disabled"}`},
+		{`{"model":"m1","max_tokens":5,"messages":[],"thinking":{"type":"adaptive"}}`, `"thinking":{"type":"adaptive"}`},
+		{`{"model":"m1","max_tokens":5,"messages":[],"thinking":{"type":"enabled","budget_tokens":2048}}`, `"thinking":{"budget_tokens":2048,"type":"enabled"}`},
+	} {
+		if code, body := post(t, "/v1/messages", c.req); code != 200 {
+			t.Fatalf("%d %s", code, body)
+		}
+		if !bytes.Contains(f.got, []byte(c.want)) {
+			t.Errorf("%s forwarded as %s", c.req, f.got)
+		}
+	}
+}
+
+// GLM-5.3 always thinks and refuses thinking turned off (Z.ai's 1210):
+// the request magpie turned it off for is asked again with it left to the
+// model, once
+func TestAnthropicPassthroughModelThatAlwaysThinks(t *testing.T) {
+	f := &fake{t: t, ctype: "application/json", reply: `{"id":"msg","type":"message","content":[]}`}
+	f.refuse = func(b []byte) (int, string) {
+		if bytes.Contains(b, []byte(`"disabled"`)) {
+			return 400, `{"type":"error","error":{"type":"1210","message":"GLM-5.3 always engages in thinking; use low, high, or max"}}`
+		}
+		return 0, ""
+	}
+	setup(t, provider.Anthropic, f)
+	code, body := post(t, "/v1/messages", `{"model":"m1","max_tokens":5,"messages":[{"role":"user","content":"title?"}]}`)
+	if code != 200 || f.calls != 2 || bytes.Contains(f.got, []byte("thinking")) || !bytes.Contains(f.got, []byte(`"title?"`)) {
+		t.Fatalf("%d %s after %d calls, last sent %s", code, body, f.calls, f.got)
+	}
+	// another 400 is the agent's to see, not asked again
+	f.calls = 0
+	f.refuse = func([]byte) (int, string) { return 400, `{"type":"error","error":{"message":"bad request"}}` }
+	if code, _ := post(t, "/v1/messages", `{"model":"m1","max_tokens":5,"messages":[]}`); code != 400 || f.calls != 1 {
+		t.Errorf("%d after %d calls", code, f.calls)
+	}
+}
+
+// effort without thinking asks for no reasoning on a Chat upstream
+func TestAnthropicEffortWithoutThinking(t *testing.T) {
+	f := &fake{t: t, reply: sse(`data: {"id":"c1","choices":[{"delta":{"content":"T"},"finish_reason":"stop"}]}`, `data: [DONE]`)}
+	setup(t, provider.Chat, f)
+	if code, body := post(t, "/v1/messages", `{"model":"m1","max_tokens":5,"stream":true,"messages":[{"role":"user","content":"title?"}],"output_config":{"effort":"high"}}`); code != 200 {
+		t.Fatalf("%d %s", code, body)
+	}
+	if bytes.Contains(f.got, []byte("reasoning_effort")) {
+		t.Errorf("upstream asked to reason: %s", f.got)
+	}
+	if code, body := post(t, "/v1/messages", `{"model":"m1","max_tokens":5,"stream":true,"messages":[{"role":"user","content":"hi"}],"thinking":{"type":"adaptive"},"output_config":{"effort":"high"}}`); code != 200 {
+		t.Fatalf("%d %s", code, body)
+	}
+	if !bytes.Contains(f.got, []byte(`"reasoning_effort":"high"`)) {
+		t.Errorf("adaptive thinking lost its effort: %s", f.got)
+	}
+}
+
 func TestErrorsAndUnknownModel(t *testing.T) {
 	f := &fake{t: t, ctype: "application/json", code: 402, reply: `{"error":{"message":"Insufficient Balance","type":"x"}}`}
 	setup(t, provider.Chat, f)
@@ -479,6 +552,92 @@ func TestModelsList(t *testing.T) {
 	New().Handler().ServeHTTP(rec, httptest.NewRequest("GET", "/v1/models", nil))
 	if !strings.Contains(rec.Body.String(), `"id":"fake/m1"`) || !strings.Contains(rec.Body.String(), `"display_name"`) {
 		t.Errorf("%s", rec.Body.String())
+	}
+}
+
+// a group's context reaches /v1/models, for clients that read the window
+// there
+func TestModelsListContext(t *testing.T) {
+	setup(t, provider.Chat, &fake{t: t})
+	if err := provider.SaveGroup(provider.Group{ID: "big", Name: "Big", Members: []string{"fake/m1"}, Context: 1000000}); err != nil {
+		t.Fatal(err)
+	}
+	rec := httptest.NewRecorder()
+	New().Handler().ServeHTTP(rec, httptest.NewRequest("GET", "/v1/models", nil))
+	var out struct {
+		Data []map[string]any `json:"data"`
+	}
+	json.Unmarshal(rec.Body.Bytes(), &out)
+	for _, m := range out.Data {
+		if m["id"] == "group/big" {
+			if m["context_window"] != float64(1000000) || m["context_length"] != float64(1000000) {
+				t.Fatalf("%v", m)
+			}
+			return
+		}
+	}
+	t.Fatalf("no group/big: %s", rec.Body.String())
+}
+
+func TestModelsListReasoning(t *testing.T) {
+	fresh(t)
+	if err := os.MkdirAll(filepath.Dir(catalog.CachePath()), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	data := `{"a":{"models":{
+		"sol":{"id":"sol","reasoning_options":[{"type":"effort","values":["low","medium","high","max"]}]},
+		"mixed":{"id":"mixed","reasoning_options":[{"type":"effort","values":["low","high"]}]},
+		"plain":{"id":"plain"}}},
+		"b":{"models":{
+		"sol":{"id":"sol","reasoning_options":[{"type":"effort","values":["medium","high"]}]},
+		"mixed":{"id":"mixed"}}}}`
+	if err := os.WriteFile(catalog.CachePath(), []byte(data), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	catalog.Reset()
+	t.Cleanup(catalog.Reset)
+	for _, id := range []string{"a", "b"} {
+		if err := provider.Save(provider.Provider{ID: id, Name: id, Catalog: id, Key: "k", Chat: "http://127.0.0.1:1/v1"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rec := httptest.NewRecorder()
+	New().Handler().ServeHTTP(rec, httptest.NewRequest("GET", "/v1/models", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
+	}
+	var response struct {
+		Data []struct {
+			ID        string `json:"id"`
+			Reasoning *bool  `json:"reasoning"`
+			Levels    []struct {
+				Effort string `json:"effort"`
+			} `json:"supported_reasoning_levels"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{
+		"a/sol": "low,medium,high,max", "b/sol": "medium,high", "group/auto-sol": "medium,high",
+		"a/mixed": "low,high", "b/mixed": "", "group/auto-mixed": "", "a/plain": "",
+	}
+	for _, m := range response.Data {
+		expected, ok := want[m.ID]
+		if !ok {
+			continue
+		}
+		delete(want, m.ID)
+		var levels []string
+		for _, level := range m.Levels {
+			levels = append(levels, level.Effort)
+		}
+		if m.Reasoning == nil || *m.Reasoning != (expected != "") || strings.Join(levels, ",") != expected {
+			t.Errorf("%s: reasoning %v, levels %v; want %q", m.ID, m.Reasoning, levels, expected)
+		}
+	}
+	if len(want) > 0 {
+		t.Errorf("missing models: %v", want)
 	}
 }
 

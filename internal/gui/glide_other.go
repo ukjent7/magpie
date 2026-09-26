@@ -2,6 +2,12 @@
 
 package gui
 
+import "github.com/wailsapp/wails/v3/pkg/application"
+
+// The Dock is the Mac's; elsewhere magpie stays in the tray.
+func dockPolicy(bool) application.ActivationPolicy { return application.ActivationPolicyAccessory }
+func setDock(bool)                                 {}
+
 // glidePanel steps the shown panel to height a frame at a time, keeping it
 // by the tray icon as it goes.
 func (h *host) glidePanel(height int, g Glide) bool {

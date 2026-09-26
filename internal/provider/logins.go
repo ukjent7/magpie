@@ -29,6 +29,9 @@ type Login struct {
 	Seen   time.Time `json:"seen"`
 	Active bool      `json:"active"` // the agent is signed in to this one now
 	On     bool      `json:"on"`     // in use: the active one, or next in line
+	// Lapsed says the vendor refused to refresh a saved account's sign-in:
+	// it has to be signed in again before it can be used.
+	Lapsed string `json:"lapsed,omitempty"`
 }
 
 type savedLogin struct {
@@ -53,6 +56,10 @@ type savedLogin struct {
 	// Project is the Google Cloud project a Gemini CLI or Antigravity
 	// account's requests go to, when the user named one (google.go).
 	Project string `json:"project,omitempty"`
+	// Renewed is when magpie last refreshed a saved account's sign-in, and
+	// Lapsed why the vendor last refused to (logins_on.go, keepalive.go).
+	Renewed time.Time `json:"renewed,omitzero"`
+	Lapsed  string    `json:"lapsed,omitempty"`
 }
 
 var (
@@ -230,6 +237,37 @@ func readClaudeProfile() (map[string]any, error) {
 	return m, nil
 }
 
+// savedButSignedOut is, for each agent with accounts saved in magpie that
+// isn't signed in where magpie looks, why none of them is offered: they
+// are served beside the account the agent is signed in to, and there is
+// none.
+func savedButSignedOut() []Exclusion {
+	saved := map[string]int{}
+	for _, l := range readLogins() {
+		saved[l.Agent]++
+	}
+	var out []Exclusion
+	for _, a := range loginAgents {
+		if saved[a] == 0 {
+			continue
+		}
+		if _, ok := liveLogin(a); ok {
+			continue
+		}
+		where, signIn := codexAuthPath(), "codex login"
+		if a == "claude" {
+			where, signIn = claudeCredentialsPath(), "claude, then /login"
+		}
+		n := "1 account is"
+		if saved[a] > 1 {
+			n = fmt.Sprintf("%d accounts are", saved[a])
+		}
+		out = append(out, Exclusion{Agent: a, SignedOut: true,
+			Why: fmt.Sprintf("%s saved in magpie, but it isn't signed in here (nothing at %s), and they are only offered beside the account it is signed in to. Sign in (%s) with this HOME.", n, where, signIn)})
+	}
+	return out
+}
+
 // liveLogin reads the account an agent is signed in to now.
 func liveLogin(agent string) (savedLogin, bool) {
 	switch agent {
@@ -321,10 +359,13 @@ func Logins(agent string) []Login {
 		return grokLoginList()
 	case "copilot":
 		return copilotLoginList()
+	case "zcode":
+		return zcodeLoginList()
 	case "gemini", "antigravity":
 		return googleLoginList(agent)
 	case "":
 		side = append(grokLoginList(), copilotLoginList()...)
+		side = append(side, zcodeLoginList()...)
 		side = append(side, googleLoginList("gemini")...)
 		side = append(side, googleLoginList("antigravity")...)
 	}
@@ -343,8 +384,11 @@ func Logins(agent string) []Login {
 			continue
 		}
 		using := strings.EqualFold(active[l.Agent], l.User)
-		out = append(out, Login{Agent: l.Agent, User: l.User, Plan: l.Plan, Seen: l.Seen,
-			Active: using, On: using || l.On})
+		lg := Login{Agent: l.Agent, User: l.User, Plan: l.Plan, Seen: l.Seen, Active: using, On: using || l.On}
+		if !using {
+			lg.Lapsed = l.Lapsed
+		}
+		out = append(out, lg)
 	}
 	return append(out, side...)
 }
@@ -358,9 +402,15 @@ func SwitchLogin(agent, user string) error {
 		return switchGrokLogin(user)
 	case "copilot":
 		return switchCopilotLogin(user)
+	case "zcode":
+		return switchZCodeLogin(user)
 	case "gemini", "antigravity":
 		return switchGoogleLogin(agent, user)
 	}
+	// not while a saved account is being refreshed: the agent would be
+	// given the refresh token that refresh is spending
+	savedTokenMu.Lock()
+	defer savedTokenMu.Unlock()
 	loginsMu.Lock()
 	defer loginsMu.Unlock()
 	ls := readLogins()
@@ -423,7 +473,7 @@ func putClaudeLogin(l savedLogin) error {
 		}
 		loc = claudeCredentialLocation{path: filepath.Join(dir, ".credentials.json")}
 		if claudeKeychain {
-			loc = claudeCredentialLocation{keychain: true, account: os.Getenv("USER")}
+			loc = claudeCredentialLocation{keychain: true, account: claudeKeychainAccount()}
 		}
 	}
 	if err := saveClaudeCredential(loc, c); err != nil {
@@ -461,6 +511,8 @@ func ForgetLogin(agent, user string) error {
 		return forgetGrokLogin(user)
 	case "copilot":
 		return forgetCopilotLogin(user)
+	case "zcode":
+		return forgetZCodeLogin(user)
 	case "gemini", "antigravity":
 		return forgetGoogleLogin(agent, user)
 	}

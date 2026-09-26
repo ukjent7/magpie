@@ -351,10 +351,13 @@ func StageBinary(ctx context.Context, rel *Release) (string, error) {
 func InstallBinary(staged, exe string) error {
 	if runtime.GOOS == "windows" {
 		// A running .exe cannot be overwritten, but it can be moved aside.
-		os.Remove(exe + ".old")
-		if err := os.Rename(exe, exe+".old"); err != nil {
-			os.Remove(staged)
-			return err
+		// What the last update moved aside may still be running too (a
+		// `magpie serve` started before it), and can't be removed or
+		// replaced then: this one goes beside it, under a name of its own.
+		// The download is kept, for another try.
+		RemoveOld(exe)
+		if err := os.Rename(exe, oldName(exe)); err != nil {
+			return fmt.Errorf("couldn't move %s aside to put the new version in: %w", filepath.Base(exe), err)
 		}
 	}
 	if err := os.Rename(staged, exe); err != nil {
@@ -364,6 +367,63 @@ func InstallBinary(staged, exe string) error {
 		return err
 	}
 	return nil
+}
+
+// oldName is where a running exe is moved aside to: exe.old, or when
+// that is still there (in use), exe.old-2, exe.old-3…
+func oldName(exe string) string {
+	name := exe + ".old"
+	for n := 2; ; n++ {
+		if _, err := os.Lstat(name); os.IsNotExist(err) {
+			return name
+		}
+		name = fmt.Sprintf("%s.old-%d", exe, n)
+	}
+}
+
+// RemoveOld removes what earlier updates moved aside of exe, those no
+// longer running.
+func RemoveOld(exe string) {
+	os.Remove(exe + ".old")
+	olds, _ := filepath.Glob(exe + ".old-*")
+	for _, o := range olds {
+		os.Remove(o)
+	}
+}
+
+// Replaced reports whether exe is no longer the binary that was there when
+// this process looked (started, from os.Stat): another magpie installed an
+// update over it, and this one runs from where it was moved aside.
+func Replaced(exe string, started os.FileInfo) bool {
+	now, err := os.Stat(exe)
+	return err == nil && started != nil && (now.Size() != started.Size() || !now.ModTime().Equal(started.ModTime()))
+}
+
+// RemoveStaleNew removes exe.new when it is exe over again: the update a
+// magpie left running from before it downloaded once more.
+func RemoveStaleNew(exe string) {
+	staged := exe + ".new"
+	a, err1 := os.Stat(exe)
+	b, err2 := os.Stat(staged)
+	if err1 != nil || err2 != nil || a.Size() != b.Size() {
+		return
+	}
+	if ha, hb := fileHash(exe), fileHash(staged); ha != "" && ha == hb {
+		os.Remove(staged)
+	}
+}
+
+func fileHash(path string) string {
+	f, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return ""
+	}
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 // InstallBinaryAsAdmin is InstallBinary with the administrator's password.

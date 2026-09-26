@@ -158,7 +158,7 @@ func grokLoginUsage(ctx context.Context) map[string]SubscriptionQuota {
 
 // grokUsageAt is the allowance of the account signed in in home.
 func grokUsageAt(ctx context.Context, home string) SubscriptionQuota {
-	q := SubscriptionQuota{Provider: "grok", Name: "Grok", Icon: "xai", Windows: []QuotaWindow{}}
+	q := SubscriptionQuota{Provider: "grok", Name: "Grok (SuperGrok)", Icon: "xai", Windows: []QuotaWindow{}}
 	c, err := grokAccessToken(home, GrokExecutable(), false)
 	if err == nil {
 		q.Windows, err = grokWindows(ctx, c.Key)

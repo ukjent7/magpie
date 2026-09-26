@@ -3,6 +3,7 @@ package provider
 import (
 	"context"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -66,16 +67,20 @@ func signIn(t *testing.T) string {
 func isolate(t *testing.T) {
 	t.Helper()
 	oldKeychain, oldURL, oldBase, oldExe := claudeKeychain, claudeTokenURL, claudeBase, claudeExecutable
-	oldCursor := cursorKeychain
+	oldCursor, oldDevin := cursorKeychain, DevinExecutable
 	claudeKeychain, cursorKeychain = false, false
 	claudeExecutable = func() string { return "" }
+	// the machine's own devin, if it has one, is no test's
+	DevinExecutable = func() string { return "" }
 	forgetClaudeCredential()
 	forgetClaudeStatus()
+	forgetDevinStatus()
 	t.Cleanup(func() {
 		claudeKeychain, claudeTokenURL, claudeBase, claudeExecutable = oldKeychain, oldURL, oldBase, oldExe
-		cursorKeychain = oldCursor
+		cursorKeychain, DevinExecutable = oldCursor, oldDevin
 		forgetClaudeCredential()
 		forgetClaudeStatus()
+		forgetDevinStatus()
 	})
 }
 
@@ -128,12 +133,34 @@ func TestAccountsAreProviders(t *testing.T) {
 	if x := Excluded(); len(x) != 1 || x[0].Provider != "codex" || x[0].Agent != "codex" {
 		t.Fatalf("excluded: %+v", x)
 	}
+	// saving its picks again (anything that saves it) keeps it removed
 	if err := Save(Provider{ID: "codex", Models: []string{"gpt-5.5"}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := find(All(), "codex"); ok || len(Excluded()) != 1 {
+		t.Fatal("a save brought a removed codex back")
+	}
+	if err := ShowAccount("codex"); err != nil {
 		t.Fatal(err)
 	}
 	if codex, ok = find(All(), "codex"); !ok || len(codex.Models) != 1 || codex.Account == nil || len(Excluded()) != 0 {
 		t.Fatalf("after add back: %+v", codex)
 	}
+	// only through routing groups holds for an account too
+	codex.Unlisted = true
+	if err := Save(codex); err != nil {
+		t.Fatal(err)
+	}
+	if codex, _ = find(All(), "codex"); !codex.Unlisted {
+		t.Fatal("unlisted lost on an account")
+	}
+	for _, e := range Catalog() {
+		if e.Provider.ID == "codex" {
+			t.Fatalf("unlisted account in the catalog: %s", e.ID)
+		}
+	}
+	codex.Unlisted = false
+	Save(codex)
 
 	// signed out: gone, and a stale picks entry is not a provider
 	Save(Provider{ID: "copilot", Models: []string{"gpt-5.5"}})
@@ -539,5 +566,26 @@ func TestCopilotAPIs(t *testing.T) {
 	}
 	if copilotAPIs(nil) != nil {
 		t.Error("no endpoints should be not known")
+	}
+}
+
+// A sign-in magpie wrote on several lines comes back from `security -w` as
+// hex; it is read, and written on one line so Claude Code can read it (#70).
+func TestKeychainText(t *testing.T) {
+	c := claudeCredentials{OAuth: claudeAuth{AccessToken: "a", RefreshToken: "r", Scopes: []string{"user:inference"}}}
+	indented, _ := c.marshal()
+	b, wasHex := keychainText([]byte(hex.EncodeToString(indented)))
+	if !wasHex {
+		t.Fatal("hex not recognised")
+	}
+	if got, ok := parseClaudeCredentials(b); !ok || got.OAuth.AccessToken != "a" {
+		t.Fatalf("parsed %+v %v", got, ok)
+	}
+	plain := []byte(`{"claudeAiOauth":{"accessToken":"a"}}`)
+	if b, wasHex := keychainText(plain); wasHex || string(b) != string(plain) {
+		t.Fatal("plain JSON changed")
+	}
+	if _, wasHex := keychainText([]byte("abcd")); wasHex {
+		t.Fatal("hex that isn't JSON taken")
 	}
 }

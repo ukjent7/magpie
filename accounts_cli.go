@@ -22,7 +22,7 @@ import (
 // — the subscriptions magpie remembers, how much of each one's allowance is
 // used, and switching the agent between them.
 func accountsCmd(args []string) error {
-	const usage = "usage: magpie accounts [claude|codex|grok|copilot|gemini|antigravity] [--json] | magpie accounts add <claude|codex|gemini|antigravity> | magpie accounts switch|forget <claude|codex|gemini|antigravity> <email> | magpie accounts project <gemini|antigravity> <email> <gcp-project-id>"
+	const usage = "usage: magpie accounts [claude|codex|grok|copilot|gemini|antigravity] [--json] | magpie accounts add <claude|codex|gemini|antigravity> | magpie accounts refresh [--json] | magpie accounts switch|forget <claude|codex|gemini|antigravity> <email> | magpie accounts project <gemini|antigravity> <email> <gcp-project-id>"
 	agentID := func(s string) (string, error) {
 		switch strings.ToLower(s) {
 		case "claude", "cc":
@@ -53,6 +53,9 @@ func accountsCmd(args []string) error {
 			fmt.Println(green.Render("✓"), args[3], "now uses Google Cloud project", args[4])
 		}
 		return nil
+	}
+	if len(args) > 1 && args[1] == "refresh" {
+		return refreshAccounts(len(args) > 2 && args[2] == "--json")
 	}
 	if len(args) > 1 && args[1] == "add" {
 		if len(args) != 3 {
@@ -135,7 +138,9 @@ func accountsCmd(args []string) error {
 		for _, w := range r.Windows {
 			line += "  " + quotaCell(w)
 		}
-		if r.Error != "" {
+		if r.Lapsed != "" {
+			line += "  " + muted.Render(r.Lapsed)
+		} else if r.Error != "" {
 			line += "  " + muted.Render(r.Error)
 		}
 		fmt.Println(line)
@@ -153,15 +158,10 @@ type accountRow struct {
 	On      bool        `json:"on"`     // in use: the active one, or next in line
 	Windows []quotaSpan `json:"windows"`
 	Error   string      `json:"error,omitempty"`
+	Lapsed  string      `json:"lapsed,omitempty"` // its sign-in has to be made again
 }
 
-type quotaSpan struct {
-	Name      string     `json:"name"`
-	Used      float64    `json:"used"`      // percent
-	Remaining float64    `json:"remaining"` // percent
-	ResetsAt  *time.Time `json:"resetsAt,omitempty"`
-	Display   string     `json:"display,omitempty"`
-}
+type quotaSpan = provider.QuotaSpan
 
 // accountRows asks each agent's accounts for their allowance at once; what
 // was asked less than a minute ago comes from magpie's cache.
@@ -188,7 +188,7 @@ func accountRows(ls []provider.Login, now time.Time) []accountRow {
 	wg.Wait()
 	rows := []accountRow{}
 	for _, l := range ls {
-		r := accountRow{Agent: l.Agent, User: l.User, Plan: l.Plan, Active: l.Active, On: l.On, Windows: []quotaSpan{}}
+		r := accountRow{Agent: l.Agent, User: l.User, Plan: l.Plan, Active: l.Active, On: l.On, Windows: []quotaSpan{}, Lapsed: l.Lapsed}
 		for user, q := range usage[l.Agent] {
 			if !strings.EqualFold(user, l.User) {
 				continue
@@ -253,6 +253,16 @@ func addAccount(agentID string) error {
 	if err != nil {
 		return err
 	}
+	if st.State == "installing" {
+		fmt.Printf("Installing %s, which %s is used through…\n", st.Installing, agentID)
+		for st.State == "installing" {
+			time.Sleep(500 * time.Millisecond)
+			st, _ = provider.SignInStatus(st.ID)
+		}
+		if st.State != "waiting" {
+			return fmt.Errorf("sign-in didn't finish: %s", st.Error)
+		}
+	}
 	fmt.Println("Finish signing in in your browser. If it didn't open, go to:")
 	fmt.Println(faint.Render(st.URL))
 	openInBrowser(st.URL)
@@ -287,4 +297,40 @@ func openInBrowser(url string) {
 		cmd = proc.Command("xdg-open", url)
 	}
 	_ = cmd.Start()
+}
+
+// refreshAccounts: `magpie accounts refresh` renews the sign-in of every
+// saved Claude and ChatGPT account the agent isn't signed in to now — what
+// the gateway does once a day, for a magpie that isn't left running (cron,
+// launchd). A sign-in the vendor refuses is marked as needing a new one.
+func refreshAccounts(asJSON bool) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	rs := provider.RenewLogins(ctx, 0)
+	if asJSON {
+		b, _ := json.MarshalIndent(rs, "", "  ")
+		fmt.Println(string(b))
+	}
+	failed := 0
+	for _, r := range rs {
+		if r.Err != "" {
+			failed++
+		}
+		if asJSON {
+			continue
+		}
+		switch {
+		case r.Renewed:
+			fmt.Println(green.Render("✓"), r.Agent, r.User, muted.Render("renewed"))
+		default:
+			fmt.Println(muted.Render("✗"), r.Agent, r.User, muted.Render(r.Err))
+		}
+	}
+	if !asJSON && len(rs) == 0 {
+		fmt.Println(muted.Render("no saved Claude or ChatGPT accounts besides the ones the agents are signed in to"))
+	}
+	if failed > 0 {
+		return fmt.Errorf("%d of %d accounts couldn't be renewed", failed, len(rs))
+	}
+	return nil
 }

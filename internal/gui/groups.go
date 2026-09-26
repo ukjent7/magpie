@@ -2,7 +2,10 @@ package gui
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"slices"
+	"strings"
 
 	"github.com/yetone/magpie/internal/provider"
 )
@@ -20,6 +23,9 @@ type groupJSON struct {
 	provider.Group
 	Ready bool         `json:"ready"` // a member is: agents can pick it
 	Info  []memberJSON `json:"memberInfo"`
+	// Holds: the groups in it, at any depth — none of which can have it in
+	// turn
+	Holds []string `json:"holds"`
 }
 
 type memberJSON struct {
@@ -30,6 +36,10 @@ type memberJSON struct {
 	Icon     string `json:"icon,omitempty"`
 	Model    string `json:"model,omitempty"` // what the vendor is asked for
 	On       int    `json:"on"`              // its keys or accounts on
+	Group    bool   `json:"group,omitempty"` // a routing group in the group; Name is its
+	// what a rule may send it: the tokens it takes, when known, and images
+	Context int  `json:"context,omitempty"`
+	Images  bool `json:"images,omitempty"`
 }
 
 type modelRef struct {
@@ -99,18 +109,52 @@ func keyPools(p provider.Provider) []poolJSON {
 
 func groupsState() groupsJSON {
 	out := groupsJSON{Groups: []groupJSON{}, Models: []modelRef{}, Pools: []poolJSON{}}
-	for _, e := range provider.Catalog() {
+	served := provider.Served()
+	for _, e := range served {
 		if e.Group == "" {
 			out.Models = append(out.Models, modelRef{ID: e.ID, Name: e.Name, Provider: e.Provider.ID, PName: e.Provider.Name, Icon: e.Provider.Icon})
 		}
 	}
 	for _, g := range provider.Groups() {
-		gj := groupJSON{Group: g, Info: []memberJSON{}}
+		gj := groupJSON{Group: g, Info: []memberJSON{}, Holds: []string{}}
+		if _, ms, ok := provider.FindGroup(provider.GroupPrefix + g.ID); ok {
+			for _, m := range ms {
+				for _, v := range m.Groups() {
+					if !slices.Contains(gj.Holds, v) {
+						gj.Holds = append(gj.Holds, v)
+					}
+				}
+			}
+		}
 		for _, id := range g.Members {
 			m := memberJSON{ID: id}
+			if gid, ok := strings.CutPrefix(id, provider.GroupPrefix); ok {
+				// a group in the group: what agents see of it
+				m.Group = true
+				for _, e := range served {
+					if e.ID == id {
+						_, ms, _ := provider.FindGroup(id)
+						m.Ready, m.Name, m.Icon, m.On = true, e.Name, e.Provider.Icon, len(ms)
+						m.Context, m.Images = e.Context, e.Images && (e.ImageInput == nil || *e.ImageInput)
+						gj.Ready = true
+						break
+					}
+				}
+				if m.Name == "" {
+					m.Name = gid
+				}
+				gj.Info = append(gj.Info, m)
+				continue
+			}
 			if p, model, ok := provider.Resolve(id); ok {
 				_, who := onOf(p)
 				m.Ready, m.Provider, m.Name, m.Icon, m.Model, m.On = true, p.ID, p.Name, p.Icon, model, max(len(who), 1)
+				for _, e := range served {
+					if e.Group == "" && e.Provider.ID == p.ID && e.Model == model {
+						m.Context, m.Images = e.Context, e.Images && (e.ImageInput == nil || *e.ImageInput)
+						break
+					}
+				}
 				gj.Ready = true
 			}
 			gj.Info = append(gj.Info, m)
@@ -144,15 +188,31 @@ func groupRoutes(mux *http.ServeMux) {
 		writeJSON(rw, groupsState())
 	})
 	mux.HandleFunc("POST /api/groups/{action}", func(rw http.ResponseWriter, r *http.Request) {
-		var in provider.Group
-		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+		var body struct {
+			provider.Group
+			From string `json:"from"` // the id the group had: another is a rename
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			fail(rw, err)
 			return
 		}
+		in := body.Group
 		var err error
 		switch r.PathValue("action") {
 		case "save":
-			err = provider.SaveGroup(in)
+			to := strings.ToLower(strings.TrimSpace(in.ID))
+			if body.From == "" || body.From == to {
+				err = provider.SaveGroup(in)
+				break
+			}
+			if to == "" || to != provider.Slug(to) {
+				err = fmt.Errorf("a group's id must be lowercase letters, digits and dashes, not %q", in.ID)
+				break
+			}
+			in.ID = body.From
+			if err = provider.SaveGroup(in); err == nil {
+				err = provider.RenameGroup(body.From, to)
+			}
 		case "delete":
 			err = provider.DeleteGroup(in.ID)
 		case "show":

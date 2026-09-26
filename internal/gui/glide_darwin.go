@@ -76,8 +76,20 @@ static int tintPanel(void *w, int r, int g, int b, int a, int ms) {
 	});
 	return ok;
 }
+
+// A Dock icon is the Regular activation policy, none is Accessory. Leaving
+// the Dock deactivates the app, so it is brought back to the front after,
+// with the window the Settings page is in.
+static void setDock(int on) {
+	dispatch_async(dispatch_get_main_queue(), ^{
+		[NSApp setActivationPolicy:on ? NSApplicationActivationPolicyRegular : NSApplicationActivationPolicyAccessory];
+		if (!on) [NSApp activateIgnoringOtherApps:YES];
+	});
+}
 */
 import "C"
+
+import "github.com/wailsapp/wails/v3/pkg/application"
 
 // glidePanel moves the shown panel to height, its top edge held under the
 // menu bar. It says false when it can't, for the caller to size it plainly.
@@ -98,4 +110,21 @@ func (h *host) TintPanel(c [4]uint8, ms int) bool {
 		return false
 	}
 	return C.tintPanel(w, C.int(c[0]), C.int(c[1]), C.int(c[2]), C.int(c[3]), C.int(ms)) == 1
+}
+
+func dockPolicy(on bool) application.ActivationPolicy {
+	if on {
+		return application.ActivationPolicyRegular
+	}
+	return application.ActivationPolicyAccessory
+}
+
+// setDock shows magpie in the Dock or takes it out, at once.
+func setDock(on bool) { C.setDock(C.int(boolInt(on))) }
+
+func boolInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
 }

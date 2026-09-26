@@ -20,11 +20,13 @@ const magpieID = "magpie"
 // RoutingGroups is the picker's group of routing groups.
 const RoutingGroups = "Routing groups"
 
-// viaMagpie lists the catalog for a picker: the routing groups first, in
-// one group of their own, then one group per provider.
-func viaMagpie(prefix string) []Option {
+// viaMagpie lists the catalog as agent is shown it, for a picker: the
+// routing groups first, in one group of their own, then one group per
+// provider.
+func viaMagpie(agent, prefix string) []Option {
 	var out, groups []Option
-	for _, e := range provider.Catalog() {
+	shown, _ := provider.CatalogFor(agent)
+	for _, e := range shown {
 		if e.Group != "" {
 			groups = append(groups, Option{Value: prefix + e.ID, Label: e.Name, Note: "routing group · via magpie",
 				Icon: e.Provider.Icon, Icons: e.Icons, Group: RoutingGroups, Ref: e.ID})
@@ -44,7 +46,7 @@ func viaMagpie(prefix string) []Option {
 // through magpie to its own ChatGPT login would only add a hop.
 func viaMagpieFor(agentID, prefix string) []Option {
 	var out []Option
-	for _, o := range viaMagpie(prefix) {
+	for _, o := range viaMagpie(agentID, prefix) {
 		if !strings.HasPrefix(o.Value, prefix+agentID+"/") {
 			out = append(out, o)
 		}
@@ -65,16 +67,17 @@ func firstOf(xs []string) string {
 	return ""
 }
 
-// magpieModels is the catalog as catalog.Models, for agents that keep their
-// own model files.
-func magpieModels() []catalog.Model {
+// magpieModels is the catalog as agent is shown it, as catalog.Models, for
+// agents that keep their own model files.
+func magpieModels(agent string) []catalog.Model {
 	var out []catalog.Model
-	for _, e := range provider.Catalog() {
+	shown, _ := provider.CatalogFor(agent)
+	for _, e := range shown {
 		by := e.Provider.Name
 		if e.Group != "" {
 			by = "routing group"
 		}
-		out = append(out, catalog.Model{ID: e.ID, Name: e.Name + " · " + by, Provider: firstOf(e.Provider.Catalogs()), Efforts: e.Efforts, Images: e.Images, Context: e.Context})
+		out = append(out, catalog.Model{ID: e.ID, Name: e.Name + " · " + by, Provider: firstOf(e.Provider.Catalogs()), Efforts: e.Efforts, Images: e.Images, Context: e.Context, Output: e.Output})
 	}
 	return out
 }

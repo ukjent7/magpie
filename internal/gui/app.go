@@ -19,6 +19,7 @@ import (
 	"github.com/yetone/magpie/internal/agent"
 	"github.com/yetone/magpie/internal/catalog"
 	"github.com/yetone/magpie/internal/gateway"
+	"github.com/yetone/magpie/internal/library"
 	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/settings"
 	"github.com/yetone/magpie/internal/update"
@@ -28,7 +29,14 @@ import (
 var trayIcon []byte // black glyph, tinted by the macOS menu bar
 
 //go:embed icon.png
-var appIcon []byte // coloured, for other trays and the about box
+var appIcon []byte // coloured, for other trays
+
+// The app's own icon: the Mac's Dock (which it replaces the bundle's .icns
+// in, at up to 512pt), window icons and the about box. At 64px it was
+// scaled up there and blurred.
+//
+//go:embed icon-1024.png
+var appIconLarge []byte
 
 type host struct {
 	app   *application.App
@@ -72,10 +80,10 @@ func (h *host) Import(link string) {
 		h.main.Focus()
 	})
 }
-func (h *host) Quit()                  { h.app.Quit() }
-func (h *host) OpenURL(url string)     { _ = h.app.Browser.OpenURL(url) }
-func (h *host) OpenFolder(path string) { _ = h.app.Env.OpenFileManager(path, false) }
-func (h *host) Copy(text string) bool  { return h.app.Clipboard.SetText(text) }
+func (h *host) Quit()                        { h.app.Quit() }
+func (h *host) OpenURL(url string)           { _ = h.app.Browser.OpenURL(url) }
+func (h *host) OpenFolder(path string) error { return openFolder(h.app, path) }
+func (h *host) Copy(text string) bool        { return h.app.Clipboard.SetText(text) }
 
 const panelWidth, panelMin, panelMax = 440, 220, 720
 
@@ -133,15 +141,23 @@ func Run(version string, showMain bool, link string) error {
 		SingleInstance: singleInstance(h),
 		Name:           "magpie",
 		Description:    "one place to pick every agent's model",
-		Icon:           appIcon,
+		Icon:           appIconLarge,
 		Assets:         application.AssetOptions{Handler: handler},
-		Mac:            application.MacOptions{ActivationPolicy: application.ActivationPolicyAccessory},
+		Mac:            application.MacOptions{ActivationPolicy: dockPolicy(settings.Load().Dock)},
 		Windows:        application.WindowsOptions{DisableQuitOnLastWindowClosed: true},
 		// A version downloaded but not restarted into is installed on the
 		// way out, so the next launch is the new one.
 		OnShutdown: func() { updates.install(false) },
 		// Wails exits on some webview errors; say why before it does.
 		ErrorHandler: func(err error) { log.Println("magpie:", err) },
+	})
+
+	onDock = setDock
+	// The Dock icon opens the window. Wails would show every hidden window
+	// on it, the panel too, so the hook answers first and stops it.
+	h.app.Event.RegisterApplicationEventHook(events.Mac.ApplicationShouldHandleReopen, func(e *application.ApplicationEvent) {
+		h.ShowMain("")
+		e.Cancel()
 	})
 
 	h.panel = h.app.Window.NewWithOptions(application.WebviewWindowOptions{
@@ -164,12 +180,17 @@ func Run(version string, showMain bool, link string) error {
 		Windows: application.WindowsWindow{HiddenOnTaskbar: true},
 	})
 
+	// the window opens at the size it was last given
+	width, height := 660, 600
+	if s := settings.Load().Window; len(s) == 2 && s[0] >= 560 && s[1] >= 420 {
+		width, height = s[0], s[1]
+	}
 	h.main = h.app.Window.NewWithOptions(application.WebviewWindowOptions{
 		Name:      "main",
 		Title:     "magpie",
 		URL:       "/?" + theme,
-		Width:     660,
-		Height:    600,
+		Width:     width,
+		Height:    height,
 		MinWidth:  560,
 		MinHeight: 420,
 		Hidden:    true,
@@ -178,6 +199,32 @@ func Run(version string, showMain bool, link string) error {
 			// it, tabs included; the header marks what drags instead
 			TitleBar: application.MacTitleBarHiddenInset,
 		},
+	})
+	// A resize is kept once it settles; a maximised or full-screen window
+	// is the screen's size, not one the user gave it.
+	var resized *time.Timer
+	h.main.OnWindowEvent(events.Common.WindowDidResize, func(*application.WindowEvent) {
+		if resized != nil {
+			resized.Stop()
+		}
+		resized = time.AfterFunc(500*time.Millisecond, func() {
+			if h.main.IsMaximised() || h.main.IsFullscreen() || h.main.IsMinimised() {
+				return
+			}
+			w, ht := h.main.Size()
+			if w < 560 || ht < 420 {
+				return
+			}
+			// macOS reports a window a pixel short of the size it was
+			// opened at; kept as it is, the window would shrink a pixel at
+			// every start
+			s := settings.Load()
+			if len(s.Window) == 2 && abs(s.Window[0]-w) <= 2 && abs(s.Window[1]-ht) <= 2 {
+				return
+			}
+			s.Window = []int{w, ht}
+			settings.Save(s)
+		})
 	})
 	// Closing the window keeps the tray alive; quitting is a menu action.
 	h.main.RegisterHook(events.Common.WindowClosing, func(e *application.WindowEvent) {
@@ -203,6 +250,17 @@ func Run(version string, showMain bool, link string) error {
 		})
 	}
 	updates.start()
+	// the library written into the agents again, once: one installed or
+	// updated since (or an edit by hand) gets it without a visit to the page
+	go func() {
+		if res, err := library.Sync(); err != nil {
+			log.Println("library sync:", err)
+		} else {
+			for _, p := range res.Problems {
+				log.Println("library sync:", p.Agent, p.What, p.Error)
+			}
+		}
+	}()
 
 	h.tray = h.app.SystemTray.New()
 	h.tray.SetTooltip("magpie")
@@ -230,7 +288,10 @@ func Run(version string, showMain bool, link string) error {
 	if runtime.GOOS == "windows" {
 		h.main.OnWindowEvent(events.Windows.WebViewNavigationCompleted, func(*application.WindowEvent) { markReady() })
 	} else {
-		h.app.Event.OnApplicationEvent(events.Common.ApplicationStarted, func(*application.ApplicationEvent) { markReady() })
+		h.app.Event.OnApplicationEvent(events.Common.ApplicationStarted, func(*application.ApplicationEvent) {
+			plainTitlebar(h.main) // Linux: the page's header is the title bar
+			markReady()
+		})
 	}
 	if showMain {
 		h.whenReady(func() { h.ShowMain("") })
@@ -253,18 +314,18 @@ func Run(version string, showMain bool, link string) error {
 	return h.app.Run()
 }
 
+// served is the gateway this process serves, nil while another magpie
+// has it.
+var served atomic.Pointer[gateway.Server]
+
 // startBackend starts what serves the page and the agents: the gateway,
 // unless another magpie has it (then that one serves and this one only
-// shows its status, and gw is nil), and the model lists kept warm.
+// shows its status, and gw is nil — until that one is gone: a magpie left
+// running from before an update, a magpie serve in a terminal), and the
+// model lists kept warm.
 func startBackend() (gw *gateway.Server) {
-	if !gateway.Running() {
-		gw = gateway.New()
-		go func() {
-			if err := gw.ListenAndServe(context.Background()); err != nil {
-				log.Println("gateway:", err)
-			}
-		}()
-	}
+	gw = serveGateway()
+	go watchGateway()
 	// Model lists are fetched, never compiled in: whatever the agents can see
 	// comes from the models.dev catalog plus each vendor's own /models answer.
 	// Keep both halves warm without making the user click anything.
@@ -298,6 +359,35 @@ func startBackend() (gw *gateway.Server) {
 	return gw
 }
 
+var gatewayWatch = 15 * time.Second
+
+// watchGateway takes the gateway up once the magpie that had it is gone.
+func watchGateway() {
+	for {
+		time.Sleep(gatewayWatch)
+		if served.Load() == nil && !gateway.Running() {
+			serveGateway()
+		}
+	}
+}
+
+// serveGateway starts the gateway here when no magpie has it: the one
+// started, or nil.
+func serveGateway() *gateway.Server {
+	if gateway.Running() {
+		return nil
+	}
+	gw := gateway.New()
+	served.Store(gw)
+	go func() {
+		if err := gw.ListenAndServe(context.Background()); err != nil {
+			log.Println("gateway:", err)
+			served.CompareAndSwap(gw, nil) // another took the port first
+		}
+	}()
+	return gw
+}
+
 // singleInstance makes a second launch hand over to this one, off the Mac.
 // The id covers the executable and the config dir, so a build elsewhere or
 // a sandboxed HOME runs on its own.
@@ -323,4 +413,11 @@ func singleInstance(h *host) *application.SingleInstanceOptions {
 			}
 		},
 	}
+}
+
+func abs(n int) int {
+	if n < 0 {
+		return -n
+	}
+	return n
 }

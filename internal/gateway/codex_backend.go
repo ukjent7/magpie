@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 
@@ -66,7 +67,7 @@ func (s *Server) codexBackend(w http.ResponseWriter, r *http.Request) {
 		return
 	case r.Method == http.MethodPost && rest == "/responses":
 		if model := modelOf(body); isCatalogID(model) {
-			body, compact := codexInput(body)
+			body, compact := codexInput(body, true)
 			if compact {
 				s.codexCompact(w, r, body)
 				return
@@ -74,7 +75,7 @@ func (s *Server) codexBackend(w http.ResponseWriter, r *http.Request) {
 			s.serve(w, r, provider.Responses, body)
 			return
 		}
-		body, _ = codexInput(body)
+		body, _ = codexInput(body, false)
 	}
 	s.codexUpstream(w, r, rest, body)
 }
@@ -111,7 +112,7 @@ func isCatalogID(model string) bool {
 	if !strings.Contains(model, "/") {
 		return false
 	}
-	for _, e := range provider.Catalog() {
+	for _, e := range provider.Served() {
 		if e.ID == model {
 			return true
 		}
@@ -123,6 +124,12 @@ func isCatalogID(model string) bool {
 // Codex would have sent it.
 func (s *Server) codexUpstream(w http.ResponseWriter, r *http.Request, rest string, body []byte) {
 	start := time.Now()
+	usage.Saw(usage.AgentOf(r.Header.Get("User-Agent")))
+	if r.Method == http.MethodPost {
+		var unmask func()
+		w, body, unmask = redacted(w, body)
+		defer unmask()
+	}
 	base := provider.CodexBase
 	if apiKey(r.Header) && rest != "/models" {
 		base = codexAPIBase
@@ -131,20 +138,72 @@ func (s *Server) codexUpstream(w http.ResponseWriter, r *http.Request, rest stri
 	if r.URL.RawQuery != "" {
 		u += "?" + r.URL.RawQuery
 	}
-	req, err := http.NewRequestWithContext(r.Context(), r.Method, u, bytes.NewReader(body))
-	if err != nil {
-		writeError(w, provider.Responses, 502, err.Error())
-		return
+	// a turn goes in the Routing view's live trace as the others do, to
+	// the one it can go to: Codex's own sign-in, or its key
+	var tr *Route
+	end := func(status int, msg string, tokens int) {}
+	if rest == "/responses" {
+		who := "Codex's own sign-in"
+		if base == codexAPIBase {
+			who = "Codex's API key"
+		}
+		model := modelOf(body)
+		seat := Weighed{ID: "codex", Provider: "openai", Name: "OpenAI", Icon: "openai", Who: who, Kind: "account", Agent: "codex", Model: model}
+		tr = s.trace.begin(Route{Time: start, Agent: usage.AgentOf(r.Header.Get("User-Agent")), Model: model, Provider: "openai",
+			Order: []Weighed{seat}, Tries: []Try{{ID: seat.ID, Model: model, Start: start}}})
+		end = func(status int, msg string, tokens int) {
+			ms := time.Since(start).Milliseconds()
+			s.trace.update(tr, func(t *Route) {
+				t.Tries[0].Done, t.Tries[0].Status, t.Tries[0].Millis, t.Tries[0].Error = true, status, ms, msg
+				t.Done, t.Status, t.Error, t.Millis, t.Tokens = true, status, msg, ms, tokens
+			})
+		}
 	}
-	copyHeaders(req.Header, r.Header)
-	// left to the transport, the reply comes back plain for the usage in it
-	req.Header.Del("Accept-Encoding")
-	res, err := s.client.Do(req)
-	if err != nil {
-		writeError(w, provider.Responses, 502, "OpenAI: "+err.Error())
-		return
+	var res *http.Response
+	for tries := 0; ; tries++ {
+		req, err := http.NewRequestWithContext(r.Context(), r.Method, u, bytes.NewReader(body))
+		if err != nil {
+			writeError(w, provider.Responses, 502, err.Error())
+			end(502, err.Error(), 0)
+			return
+		}
+		copyHeaders(req.Header, r.Header)
+		// left to the transport, the reply comes back plain for the usage in it
+		req.Header.Del("Accept-Encoding")
+		if res, err = s.client.Do(req); err != nil {
+			writeError(w, provider.Responses, 502, "OpenAI: "+err.Error())
+			end(502, "OpenAI: "+err.Error(), 0)
+			return
+		}
+		if rest != "/responses" || tries >= 3 || (res.StatusCode != 400 && res.StatusCode != 404) {
+			break
+		}
+		// an item OpenAI can't take — sealed by another account, or
+		// another vendor's that it looks up and doesn't have — is taken
+		// out and the rest asked again, rather than the conversation
+		// stuck on it for good
+		msg, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
+		res.Body.Close()
+		res.Body = io.NopCloser(bytes.NewReader(msg))
+		b, ok := withoutUnreadable(body, msg)
+		if !ok {
+			break
+		}
+		body = b
 	}
 	defer res.Body.Close()
+	if base == codexAPIBase && res.StatusCode == http.StatusUnauthorized {
+		// Codex signed in with an API key OpenAI refuses — often one a
+		// relay issued, left in ~/.codex/auth.json — and one of Codex's own
+		// models was picked, which goes out with Codex's own sign-in
+		msg, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
+		writeError(w, provider.Responses, res.StatusCode, codexKeyRefused(msg))
+		s.record(Call{Time: start, From: provider.Responses, To: provider.Responses, Model: modelOf(body),
+			Provider: "openai", Agent: usage.AgentOf(r.Header.Get("User-Agent")), Status: res.StatusCode,
+			Millis: time.Since(start).Milliseconds(), Error: res.Status})
+		end(res.StatusCode, res.Status, 0)
+		return
+	}
 	for k, vs := range res.Header {
 		if !hopHeader(k) {
 			w.Header()[k] = vs
@@ -191,14 +250,82 @@ func (s *Server) codexUpstream(w http.ResponseWriter, r *http.Request, rest stri
 	if res.StatusCode >= 400 {
 		call.Error = res.Status
 	}
+	end(call.Status, call.Error, uu.Input+uu.Output+uu.CacheRead+uu.CacheWrite)
 	s.record(call)
-	usage.Append(usage.Record{Time: start, Agent: call.Agent, Provider: call.Provider, Model: call.Model,
+	usage.Append(usage.Record{Time: start, Agent: call.Agent, Provider: call.Provider, Host: provider.HostOf(base), Model: call.Model,
 		Input: uu.Input, Output: uu.Output, CacheRead: uu.CacheRead, CacheWrite: uu.CacheWrite,
 		Reasoning: uu.Reasoning, Millis: call.Millis, Status: call.Status})
 }
 
+// unreadableItem is the item OpenAI's refusal names: sealed content it
+// can't verify, or an id it doesn't have ("Item with id 'rs_…' not found").
+var unreadableItem = regexp.MustCompile(`(?i)(?:encrypted content for item|item with id) '?([A-Za-z]+_[A-Za-z0-9_-]+)'?`)
+
+// withoutUnreadable is body without what OpenAI's refusal msg says it
+// can't read: the item it names, or the reasoning another account sealed.
+func withoutUnreadable(body, msg []byte) ([]byte, bool) {
+	if !foreignReasoning.Match(msg) && !bytes.Contains(bytes.ToLower(msg), []byte("not found")) {
+		return nil, false
+	}
+	if m := unreadableItem.FindSubmatch(msg); m != nil {
+		if b, ok := withoutItem(body, string(m[1])); ok {
+			return b, true
+		}
+	}
+	if foreignReasoning.Match(msg) {
+		return withoutReasoning(body)
+	}
+	return nil, false
+}
+
+// withoutItem is a Responses request without the input item of this id.
+func withoutItem(body []byte, id string) ([]byte, bool) {
+	var q map[string]json.RawMessage
+	if json.Unmarshal(body, &q) != nil {
+		return nil, false
+	}
+	var items []json.RawMessage
+	if json.Unmarshal(q["input"], &items) != nil {
+		return nil, false
+	}
+	kept := items[:0:0]
+	for _, it := range items {
+		var t struct {
+			ID string `json:"id"`
+		}
+		if json.Unmarshal(it, &t) == nil && t.ID == id {
+			continue
+		}
+		kept = append(kept, it)
+	}
+	if len(kept) == len(items) {
+		return nil, false
+	}
+	q["input"], _ = json.Marshal(kept)
+	b, err := json.Marshal(q)
+	return b, err == nil
+}
+
 // apiKey reports whether Codex signed in with an API key rather than a
 // ChatGPT account.
+// codexKeyRefused says why a model of Codex's own failed with 401: what
+// OpenAI said, and what to do about it.
+func codexKeyRefused(msg []byte) string {
+	var e struct {
+		Error struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	said := strings.TrimSpace(string(msg))
+	if json.Unmarshal(msg, &e) == nil && e.Error.Message != "" {
+		said = e.Error.Message
+	}
+	return "OpenAI refused the API key Codex is signed in with (" + said + "). " +
+		"This is one of Codex's own models, which goes to OpenAI with Codex's own sign-in: " +
+		"pick one of magpie's models in Codex (provider/model, or set it in magpie's Agents view), " +
+		"or sign Codex in with ChatGPT, or with an OpenAI API key"
+}
+
 func apiKey(h http.Header) bool {
 	return strings.HasPrefix(strings.TrimPrefix(h.Get("Authorization"), "Bearer "), "sk-")
 }
@@ -269,11 +396,10 @@ func modelsEtag(h http.Header) {
 	}
 }
 
-// codexInput readies Codex's input for whoever serves it: a summary magpie
-// made becomes the message it stands for, and the backend's own controls
-// go. compact reports a request to compact the conversation, whose trigger
-// becomes the request to summarise it.
-func codexInput(body []byte) (_ []byte, compact bool) {
+// codexInput restores summaries magpie made. For a magpie model, it also
+// replaces Codex's compaction trigger with a request to summarise the input.
+// OpenAI's own models keep the trigger for their backend to handle.
+func codexInput(body []byte, magpieModel bool) (_ []byte, compact bool) {
 	var q map[string]json.RawMessage
 	if json.Unmarshal(body, &q) != nil {
 		return body, false
@@ -298,8 +424,32 @@ func codexInput(body []byte) (_ []byte, compact bool) {
 				out = append(out, userMessage(codexSummaryPrefix+"\n"+string(b)))
 			}
 		case "compaction_trigger":
+			if !magpieModel {
+				out = append(out, it)
+				continue
+			}
 			changed, compact = true, true
 			out = append(out, userMessage(codexCompactPrompt))
+		case "reasoning":
+			// OpenAI accepts no reasoning content parts in replayed input.
+			// Drop the item so its encrypted_content cannot fail there too.
+			if !magpieModel {
+				if content, present := it["content"]; present && content != nil {
+					parts, ok := content.([]any)
+					if !ok || len(parts) > 0 {
+						changed = true
+						continue
+					}
+				}
+				// Nor reasoning with nothing sealed in it — another vendor's,
+				// only an id (rs_…): OpenAI, which keeps nothing (store is
+				// false), looks the id up and answers 404 "Item … not found".
+				if enc, _ := it["encrypted_content"].(string); enc == "" {
+					changed = true
+					continue
+				}
+			}
+			out = append(out, it)
 		default:
 			out = append(out, it)
 		}

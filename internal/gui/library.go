@@ -131,6 +131,26 @@ func libraryRoutes(mux *http.ServeMux, w Windows) {
 		}
 		writeJSON(rw, p)
 	})
+	// RTK: which agents have its hook, and switching one on or off
+	mux.HandleFunc("GET /api/library/rtk", func(rw http.ResponseWriter, r *http.Request) {
+		writeJSON(rw, library.ReadRTK())
+	})
+	mux.HandleFunc("POST /api/library/rtk", func(rw http.ResponseWriter, r *http.Request) {
+		var in struct {
+			Agent string
+			On    bool
+		}
+		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+			fail(rw, err)
+			return
+		}
+		v, err := library.SetRTK(in.Agent, in.On)
+		if err != nil {
+			fail(rw, err)
+			return
+		}
+		writeJSON(rw, v)
+	})
 	mux.HandleFunc("POST /api/library/reveal", func(rw http.ResponseWriter, r *http.Request) {
 		var in struct{ Path string }
 		if err := json.NewDecoder(r.Body).Decode(&in); err != nil || in.Path == "" {
@@ -159,7 +179,10 @@ func libraryRoutes(mux *http.ServeMux, w Windows) {
 			}
 			p = up
 		}
-		w.OpenFolder(p)
+		if err := w.OpenFolder(p); err != nil {
+			fail(rw, err)
+			return
+		}
 		rw.WriteHeader(http.StatusNoContent)
 	})
 	// every change answers with the page as it is after it, and what it did

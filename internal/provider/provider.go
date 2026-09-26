@@ -91,10 +91,30 @@ type Provider struct {
 	// magpie knows need neither.
 	BalanceURL  string `json:"balanceURL,omitempty"`
 	BalancePath string `json:"balancePath,omitempty"`
+	// BalanceToken is what a vendor tells the whole account's balance to,
+	// where a key is told only what is left on itself: AiHubMix's system
+	// access token (see TakesBalanceToken). It is asked with nothing else.
+	BalanceToken string `json:"balanceToken,omitempty"`
+
+	// ModelsURL, when set, is where the vendor lists its models, for one
+	// that lists them away from the base URL requests go to (Xiaomi MiMo's
+	// plans are served at their own hosts, the list at api.xiaomimimo.com).
+	ModelsURL string `json:"modelsURL,omitempty"`
 
 	// Models the user chose to expose. Empty means "the preset's picks, or
 	// everything the vendor lists when that list is short".
 	Models []string `json:"models,omitempty"`
+	// Unlisted keeps the provider's own models out of the list agents see:
+	// it serves only through the routing groups it is in, and by its
+	// "provider/model" ids.
+	Unlisted bool `json:"unlisted,omitempty"`
+	// Contexts is how long a request the user says a model takes, in
+	// tokens, over what the vendor or models.dev says: by model id, "*"
+	// for all the provider's models. Agents are told it.
+	Contexts map[string]int `json:"contexts,omitempty"`
+	// Family is a tag the provider's models go by in which agents are
+	// shown them (settings' Visible), with the provider's id.
+	Family string `json:"family,omitempty"`
 
 	Catalog string `json:"catalog,omitempty"` // models.dev id, for names and reasoning levels
 	Website string `json:"website,omitempty"`
@@ -176,7 +196,8 @@ func All() []Provider {
 		if _, taken := find(out, a.ID); taken || picks[a.ID].Hidden {
 			continue
 		}
-		a.Models, a.Fallback, a.Routing, a.Affinity = picks[a.ID].Models, picks[a.ID].Fallback, picks[a.ID].Routing, picks[a.ID].Affinity
+		pk := picks[a.ID]
+		a.Models, a.Unlisted, a.Fallback, a.Routing, a.Affinity, a.Contexts, a.Family = pk.Models, pk.Unlisted, pk.Fallback, pk.Routing, pk.Affinity, pk.Contexts, pk.Family
 		out = append(out, a)
 	}
 	return out
@@ -243,8 +264,9 @@ func Save(p Provider) error {
 	}
 	if a, ok := find(Accounts(), p.ID); ok {
 		// an account keeps only the user's model picks; the rest is the
-		// agent's own sign-in. Saving it again brings a removed one back.
-		p = Provider{ID: a.ID, Models: p.Models, Fallback: p.Fallback, Routing: p.Routing, Affinity: p.Affinity}
+		// agent's own sign-in. One the user removed stays removed: only
+		// ShowAccount brings it back.
+		p = Provider{ID: a.ID, Models: p.Models, Unlisted: p.Unlisted, Fallback: p.Fallback, Routing: p.Routing, Affinity: p.Affinity, Contexts: p.Contexts, Family: p.Family, Hidden: hiddenAccount(a.ID)}
 	} else {
 		if slices.Contains(accountIDs, p.ID) && !stored(p.ID) {
 			// taken, it would hide that subscription once signed in
@@ -309,12 +331,21 @@ func freeName(name string) string {
 }
 
 // accountIDs are the ids of the subscriptions magpie can list (account.go).
-var accountIDs = []string{"antigravity", "claude", "codex", "copilot", "cursor", "devin", "gemini", "grok"}
+var accountIDs = []string{"antigravity", "claude", "codex", "copilot", "cursor", "devin", "gemini", "grok", "zcode"}
 
 func stored(id string) bool {
 	for _, p := range load().Providers {
 		if p.ID == id {
 			return true
+		}
+	}
+	return false
+}
+
+func hiddenAccount(id string) bool {
+	for _, p := range load().Providers {
+		if p.ID == id {
+			return p.Hidden
 		}
 	}
 	return false
@@ -493,6 +524,20 @@ func (p Provider) Host() string {
 		}
 	}
 	return ""
+}
+
+// Where is what the provider's calls go to, as usage keeps it: the API's
+// host, and for a subscription who is signed in there too. The id alone
+// can't tell: it can be given to another vendor or account later.
+func (p Provider) Where() string {
+	h := p.Host()
+	if p.Account != nil && p.Account.User != "" {
+		if h == "" {
+			return p.Account.User
+		}
+		return h + " as " + p.Account.User
+	}
+	return h
 }
 
 // IsOpenCode reports whether the provider is OpenCode's gateway (Zen or Go),

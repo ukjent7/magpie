@@ -26,10 +26,11 @@ type updater struct {
 	state   string // checking | latest | downloading | ready | available | source | error
 	latest  *update.Release
 	err     string
-	bundle  string // the .app to replace, "" when not in one or stuck
-	stuck   string // why the .app can't be replaced where it is (update.Stuck)
-	exe     string // off the Mac: the binary to replace, "" when not writable
-	retry   bool   // error: the download failed, and may be tried again
+	bundle  string      // the .app to replace, "" when not in one or stuck
+	stuck   string      // why the .app can't be replaced where it is (update.Stuck)
+	exe     string      // off the Mac: the binary to replace, "" when not writable
+	self    os.FileInfo // exe as this process started from it
+	retry   bool        // error: the download failed, and may be tried again
 	staged  string
 	done    int64 // downloading: bytes so far, of total (0 when unknown)
 	total   int64
@@ -61,7 +62,9 @@ func (u *updater) start() {
 	} else if runtime.GOOS != "darwin" {
 		if exe, err := update.Executable(); err == nil && (update.Writable(filepath.Dir(exe)) || update.CanElevate()) {
 			u.exe = exe
-			os.Remove(exe + ".old") // what the last update on Windows moved aside
+			u.self, _ = os.Stat(exe)
+			update.RemoveOld(exe)      // what the last updates on Windows moved aside
+			update.RemoveStaleNew(exe) // what a magpie left running downloaded again
 		}
 	}
 	go func() {
@@ -113,6 +116,13 @@ func (u *updater) run() {
 	case u.bundle == "" && u.exe == "":
 		u.state = "available" // the user fetches it from the release page
 		return
+	case u.replaced():
+		// another magpie put the update in already: a restart is all
+		u.state = "ready"
+		if u.onReady != nil {
+			go u.onReady(rel.Version)
+		}
+		return
 	}
 	u.state, u.done, u.total = "downloading", 0, 0
 	u.mu.Unlock()
@@ -146,6 +156,13 @@ func (u *updater) run() {
 func (u *updater) install(ask bool) bool {
 	u.mu.Lock()
 	defer u.mu.Unlock()
+	if u.replaced() {
+		// another magpie updated the binary after this one started: it is
+		// in, and swapping this one's download in would move it aside (the
+		// download is left: it may be the other's, staged at the same name)
+		u.staged = ""
+		return true
+	}
 	if u.staged == "" {
 		return false
 	}
@@ -171,6 +188,12 @@ func (u *updater) install(ask bool) bool {
 	}
 	u.staged = ""
 	return true
+}
+
+// replaced is whether the binary was updated by another magpie since this
+// one started, which runs on from where it was moved aside.
+func (u *updater) replaced() bool {
+	return u.exe != "" && update.Replaced(u.exe, u.self)
 }
 
 func (u *updater) json() updateJSON {

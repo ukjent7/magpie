@@ -140,6 +140,9 @@ th { font-weight: 560; color: var(--ink3); font-size: 12.5px; letter-spacing: .0
 td { color: var(--ink2); }
 td:first-child { white-space: nowrap; }
 td:first-child code { font-weight: 600; }
+table.loose { table-layout: fixed; }
+table.loose td:first-child { white-space: normal; }
+pre.wrapped { white-space: pre-wrap; }
 .req { font-size: 11.5px; color: var(--ink3); border: 1px solid var(--line); border-radius: 999px; padding: 0 7px; margin-left: 6px; white-space: nowrap; }
 
 .chips { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 20px; }

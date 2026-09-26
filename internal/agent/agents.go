@@ -63,6 +63,9 @@ func All() []*Agent {
 		omp(home),
 		devin(home, cfg),
 		hermes(home),
+		grok(home),
+		zcode(home),
+		alma(),
 	}
 }
 
@@ -181,7 +184,7 @@ func ownOptions(authFile string, cur string, extra ...string) []Option {
 
 // magpieProviderJSON is the provider block agents with JSON configs get.
 func magpieProviderJSON(shape string) any {
-	models := magpieModels()
+	models := magpieModels(shape) // the shape is the agent's
 	switch shape {
 	case "opencode":
 		ms := map[string]any{}
@@ -190,6 +193,12 @@ func magpieProviderJSON(shape string) any {
 			if m.Images {
 				e["attachment"] = true
 				e["modalities"] = map[string]any{"input": []string{"text", "image"}, "output": []string{"text"}}
+			}
+			// without it OpenCode doesn't know when to compact, and a
+			// group's context (magpie group set … context=) never reaches
+			// it; an output of 0 is OpenCode's own default
+			if m.Context > 0 {
+				e["limit"] = map[string]any{"context": m.Context, "output": m.Output}
 			}
 			ms[m.ID] = e
 		}
@@ -260,7 +269,7 @@ func opencode(home, cfg string) *Agent {
 	auth := filepath.Join(home, ".local", "share", "opencode", "auth.json")
 	opts := func(key string) func(map[string]string) []Option {
 		return func(cur map[string]string) []Option {
-			return append(ownOptions(auth, cur[key]), viaMagpie(magpieID+"/")...)
+			return append(ownOptions(auth, cur[key]), viaMagpie("opencode", magpieID+"/")...)
 		}
 	}
 	get := func(k string) string { v, _ := edit.GetJSON(path, k); return v }
@@ -287,7 +296,19 @@ func opencode(home, cfg string) *Agent {
 		ID: "opencode", Name: "OpenCode", Icon: "opencode", Aliases: []string{"oc"},
 		UA:  []string{"opencode"},
 		Bin: "opencode", Dir: dir, Path: path,
+		Check: func() string {
+			if !usesMagpie(get("model"), get("small_model")) {
+				return ""
+			}
+			return wiringOff("OpenCode", path, func(k string) (string, bool) { return edit.GetJSON(path, "provider."+magpieID+".options."+k) },
+				"baseURL", gatewayV1(), "apiKey", gateway.Token)
+		},
 		Sync: func() error {
+			// a model of magpie's chosen, but its provider gone from the
+			// file: put it back, or OpenCode has nothing to send it to
+			if _, ok := edit.GetJSON(path, "provider."+magpieID); !ok && usesMagpie(get("model"), get("small_model")) {
+				return edit.SetJSON(path, edit.KV{Path: "provider." + magpieID, Value: magpieProviderJSON("opencode")})
+			}
 			return syncJSON(path, "provider."+magpieID, func() any { return magpieProviderJSON("opencode") })
 		},
 		Fields: []Field{
@@ -311,6 +332,13 @@ func pi(home string) *Agent {
 	return &Agent{
 		ID: "pi", Name: "Pi", Icon: "pi", Bin: "pi", Dir: dir, Path: path,
 		UA: []string{"pi-"},
+		Check: func() string {
+			if p, _ := get("defaultProvider"); p != magpieID {
+				return ""
+			}
+			return wiringOff("Pi", modelsPath, func(k string) (string, bool) { return edit.GetJSON(modelsPath, "providers."+magpieID+"."+k) },
+				"baseUrl", gatewayV1(), "apiKey", gateway.Token)
+		},
 		Sync: func() error {
 			return syncJSON(modelsPath, "providers."+magpieID, func() any { return magpieProviderJSON("pi") })
 		},
@@ -333,7 +361,7 @@ func pi(home string) *Agent {
 					return pair(v)
 				},
 				Options: func(cur map[string]string) []Option {
-					return append(ownOptions(auth, cur["model"]), viaMagpie(magpieID+"/")...)
+					return append(ownOptions(auth, cur["model"]), viaMagpie("pi", magpieID+"/")...)
 				},
 			},
 			{
@@ -465,7 +493,7 @@ func crush(home, cfg string) *Agent {
 					}
 				}
 			}
-			return append(ownOptions("", cur[key], extra...), viaMagpie(magpieID+"/")...)
+			return append(ownOptions("", cur[key], extra...), viaMagpie("crush", magpieID+"/")...)
 		}
 	}
 	setter := func(pKey, mKey string) func(string) error {
@@ -493,6 +521,15 @@ func crush(home, cfg string) *Agent {
 	return &Agent{
 		ID: "crush", Name: "Crush", Icon: "crush", Bin: "crush", Dir: filepath.Dir(path), Path: path,
 		UA: []string{"crush"},
+		Check: func() string {
+			large, _ := get("models.large.provider")
+			small, _ := get("models.small.provider")
+			if large != magpieID && small != magpieID {
+				return ""
+			}
+			return wiringOff("Crush", path, func(k string) (string, bool) { return get("providers." + magpieID + "." + k) },
+				"base_url", gatewayV1(), "api_key", gateway.Token)
+		},
 		Sync: func() error {
 			return syncJSON(path, "providers."+magpieID, func() any { return magpieProviderJSON("crush") })
 		},

@@ -138,7 +138,7 @@ func TestInferredGroupImagesReachAgentCatalogs(t *testing.T) {
 			Input []string `json:"input_modalities"`
 		} `json:"models"`
 	}
-	if err := json.Unmarshal(codexcat.Catalog(magpieModels()), &codex); err != nil {
+	if err := json.Unmarshal(codexcat.Catalog(magpieModels("codex")), &codex); err != nil {
 		t.Fatal(err)
 	}
 	for _, m := range codex.Models {

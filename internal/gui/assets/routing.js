@@ -98,7 +98,7 @@
     if (h < 48) return t("{n} h", { n: Math.round(m / 60) });
     return t("{n} d", { n: Math.round(m / 1440) });
   }
-  const took = (ms) => ms < 1000 ? t("{n} ms", { n: ms }) : t("{n} s", { n: (ms / 1000).toFixed(ms < 10e3 ? 1 : 0) });
+  const took = (ms = 0) => ms < 1000 ? t("{n} ms", { n: ms }) : t("{n} s", { n: (ms / 1000).toFixed(ms < 10e3 ? 1 : 0) });
   function clock(s) {
     const d = new Date(s), n = new Date();
     const hm = d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
@@ -106,7 +106,7 @@
   }
   const tokens = (n) => n >= 1e6 ? (n / 1e6).toFixed(1) + "M" : n >= 1e3 ? (n / 1e3).toFixed(1) + "k" : String(Math.round(n));
   const pct = (n) => Math.round(n) + "%";
-  const FAIL = { rate: "rate limited", credit: "out of credit", quota: "quota used up", other: "failed", canceled: "canceled" };
+  const FAIL = { rate: "rate limited", credit: "out of credit", quota: "quota used up", other: "failed", canceled: "canceled", foreign: "another account's reasoning", floor: "reply too short" };
   const failWord = (why) => t(FAIL[why] || "failed");
   const API = { anthropic: "Anthropic", chat: "OpenAI", responses: "OpenAI Responses", gemini: "Gemini" };
   const MODES = {
@@ -217,6 +217,14 @@
     const out = [];
     const aff = affWhy(r, true) ? null : affWhy(r, false);
     if (aff) out.push(aff);
+    const cls = classWhy(r.rule);
+    if (cls) out.push(cls);
+    for (const n of r.nested || []) {
+      const c = classWhy(n.rule);
+      if (c) out.push(t("In {group}: {text}", { group: n.name || n.group, text: c }));
+    }
+    const rule = ruleWhy(r, false);
+    if (rule) out.push(rule);
     const smart = (x) => !x.routing && x.kind === "account";
     const someKnown = r.order.some((x) => x.known);
     for (const x of r.order.slice(1)) {
@@ -258,12 +266,99 @@
       case "no-cache": return t("{who} answered this conversation last, but the vendor read only {n} tokens of it from its cache then — not worth staying for.", { who: last, n: tokens(a.cacheRead || 0) });
       case "cold": return t("{who} answered this conversation {d} ago, longer than the 5 minutes a vendor keeps a prompt cached — so routing decides afresh.", { who: last, d: ago });
       case "off": return t("Affinity is off: each request is routed afresh, whoever answered its conversation before.");
+      case "rule": {
+        // the group's rule, or that of a group in it, that moved it
+        const x = r.nested?.findLast((n) => n.rule?.use && !n.rule.unready && !n.rule.held)?.rule || r.rule;
+        return t("{who} answered this conversation last, but a new turn begins and the group's rule {n} puts {use} first.", { who: last, n: x?.n, use: useName(r, x?.use) });
+      }
     }
     return null;
   }
 
+  // ruleWhy tells what the group's rules did with a request. With lead,
+  // only when a rule put the first where it is.
+  function ruleWhy(r, lead) {
+    if (!r.rule) return null;
+    const x = { ...r.rule, use: useName(r, r.rule.use) };
+    const when = (x.when || []).map(condText).join(", ");
+    if (x.use && !x.unready) {
+      const held = t("Rule {n} ({when}) sent turn {turn} to {use} as it began; the turn stays there.", { n: x.n, when, turn: x.turn, use: x.use });
+      if (x.held) return lead || affWhy(r, true) ? held : null;
+      if (x.grown) return lead ? t("Within turn {turn} the conversation grew to about {tokens} tokens, more than the model it was on takes, so rule {n} ({when}) moves it to {use}.", { turn: x.turn, tokens: tokens(x.tokens), n: x.n, when, use: x.use }) : null;
+      return lead ? t("Turn {turn} begins and rule {n} matches — {when} — so {use} goes first; the group's others stay behind it if it fails.", { turn: x.turn, n: x.n, when, use: x.use }) : null;
+    }
+    if (lead) return null;
+    if (x.use) return t("Rule {n} matches, but {use} has nothing ready now, so the group's order stands.", { n: x.n, use: x.use });
+    if (x.waits) return t("This turn began before magpie saw it, so the rules wait for the next one.");
+    if (x.held) return null;
+    return t("No rule matches turn {turn} (about {n} tokens{img}), so the group routes it as usual.", { turn: x.turn, n: tokens(x.tokens), img: x.images ? t(", with an image") : "" });
+  }
+  // treeText is a group's models, those of a group in it in brackets after
+  // its name: a/m, Fast [b/m, c/m]
+  function treeText(g) {
+    const name = (id) => g.subs?.find((s) => s.id === id)?.name || id;
+    let out = "";
+    const open = [];
+    (g.members || []).forEach((m, i) => {
+      const via = (g.via?.[i] || "").split(">").filter(Boolean);
+      let k = 0;
+      while (k < open.length && k < via.length && open[k] === via[k]) k++;
+      while (open.length > k) { out += "]"; open.pop(); }
+      if (out && !out.endsWith("[")) out += ", ";
+      while (open.length < via.length) { const v = via[open.length]; out += name(v) + " ["; open.push(v); }
+      out += m;
+    });
+    return out + "]".repeat(open.length);
+  }
+  // useName is what a rule sends to: a model, or a group in the group
+  const useName = (r, id) => id?.startsWith("group/") ? t("the group {name}", { name: r.group?.subs?.find((s) => "group/" + s.id === id)?.name || id.slice(6) }) : id;
+  // nestedWhy tells, for each group in the group down to the one that
+  // went first, what its own rules did — and which group it came through
+  function nestedWhy(r) {
+    const out = [];
+    for (const n of r.nested || []) {
+      const x = n.rule, g = n.name || n.group;
+      if (!x) continue;
+      const when = (x.when || []).map(condText).join(", ");
+      if (x.use && x.unready) out.push(t("In {group}, rule {n} matches, but {use} has nothing ready now, so {group}'s order stands.", { group: g, n: x.n, use: x.use }));
+      else if (x.use && x.held) out.push(t("In {group}, rule {n} ({when}) sent turn {turn} to {use} as it began; the turn stays there.", { group: g, n: x.n, when, turn: x.turn, use: x.use }));
+      else if (x.use) out.push(t("In {group}, rule {n} matches — {when} — so {use} goes first there.", { group: g, n: x.n, when, use: x.use }));
+      else if (!x.waits) out.push(t("In {group}, no rule matches, so it routes as usual.", { group: g }));
+    }
+    const f = r.order[0];
+    if (f?.via?.length && r.group) {
+      const names = f.via.map((id) => r.group.subs?.find((s) => s.id === id)?.name || id);
+      const inner = r.group.subs?.find((s) => s.id === f.via[f.via.length - 1]);
+      out.push(t("{who} is one of {path}, a group in {name}; that group routes {mode}.", { who: who(f), path: names.join(" › "), name: r.group.name, mode: t((MODES[inner?.routing || ""] || MODES[""])[0]).toLowerCase() }));
+    }
+    return out;
+  }
+  // classWhy tells what a group's classifier said of the turn's message,
+  // for its rule step x
+  function classWhy(x) {
+    const c = x?.classified;
+    if (!c) return null;
+    const r = { rule: x };
+    const by = c.by || t("the classifier"), kinds = (c.intents || []).map((x) => `“${x}”`).join(", ");
+    if (c.error) return t("{by} was to tell which of {kinds} turn {turn} is, but couldn't — {err} — so no rule with an intent matches it.", { by, kinds, turn: r.rule.turn, err: c.error });
+    const when = c.cached ? t("said before, for the same message") : t("in {ms}", { ms: took(c.ms) });
+    if (!c.intent) return t("{by} was asked which of {kinds} turn {turn} is, and said none ({took}).", { by, kinds, turn: r.rule.turn, took: when });
+    return t("{by} was asked which of {kinds} turn {turn} is, and said “{intent}” ({took}).", { by, kinds, turn: r.rule.turn, intent: c.intent, took: when });
+  }
+  // a rule's condition as the gateway writes it, in the page's words
+  function condText(c) {
+    let m;
+    if ((m = /^intent "(.*)"$/.exec(c))) return t("asks for “{intent}”", { intent: m[1].replace(/\\"/g, '"').replace(/\\\\/g, "\\") });
+    if ((m = /^tokens ≥ (\d+)$/.exec(c))) return t("≥ {n} tokens", { n: Number(m[1]).toLocaleString() });
+    if (c === "images") return t("has an image");
+    if (c === "reasoning") return t("reasoning on");
+    if ((m = /^effort ≥ (\w+)$/.exec(c))) return t("reasoning ≥ {level}", { level: m[1] });
+    if ((m = /^agent (.+)$/.exec(c))) return m[1].split("|").map(agentName).join(" / ");
+    return c;
+  }
+
   function tryWhy(r, i) {
-    const tr = r.tries[i], w = r.order.find((x) => x.id === tr.id), agent = agentName(r.agent);
+    const tr = r.tries[i], w = tried(r, tr), agent = agentName(r.agent);
     const name = w ? `${who(w)} (${w.model})` : tr.id;
     if (!tr.done) return t("{who} is answering…", { who: name });
     if (tr.status < 400) {
@@ -274,11 +369,15 @@
     }
     if (tr.fail === "canceled")
       return t("{agent} canceled the request while {who} was answering: nobody failed, so nobody rests and nobody else is asked.", { who: name, agent });
+    if (tr.fail === "foreign")
+      return t("{who} couldn't read the reasoning another account wrote earlier in this conversation, so it is asked again without it, before any of the reply reaches {agent}.", { who: name, agent });
+    if (tr.fail === "floor")
+      return t("{who} takes no request for a reply as short as this one asked for, so it is asked again for the shortest it gives, before any of the reply reaches {agent}.", { who: name, agent });
     if (tr.again)
       return t("{who} answered {status} · {fail}, and nobody else is left to ask — a failure that may pass, so it is tried again in {d}, before any of the reply reaches {agent}.",
         { who: name, status: tr.status, fail: failWord(tr.fail), d: took(tr.again), agent });
     if (tr.rest) {
-      const next = r.tries[i + 1], nw = next && r.order.find((x) => x.id === next.id);
+      const next = r.tries[i + 1], nw = next && tried(r, next);
       return t("{who} answered {status} · {fail}. {how}; the request goes on to {next} before any of the reply reaches {agent}.",
         { who: name, status: tr.status, fail: failWord(tr.fail), how: restHow(tr.rest, at(tr.start) + (tr.ms || 0)), next: nw ? who(nw) : t("the next"), agent });
     }
@@ -294,7 +393,8 @@
   let seq = 0, mine = true, loaded = false;
   let cur = null;           // the route the header and the log tell of: the newest played
   let pinned = null;        // a past route picked from the strip
-  let rows = new Map();     // id → { li, wire, st, bi, tg, w, rid }
+  let rows = new Map();     // id → { li, wire, st, bi, tg, w, rid, up }
+  const subs = new Map();   // a group in the group's way down → its heading { li, wire, key, up }
   const agents = new Map(); // agent → { node, ic, name, sub, wire }
   let sets = [];            // the account sets on the stage, in the order they came
   const playing = new Set(); // the routes being played
@@ -372,15 +472,28 @@
       const s = b(a.node), mx = (s.r + h.l) / 2;
       a.wire.setAttribute("d", h.l > s.r ? `M${s.r} ${s.cy} C${mx} ${s.cy} ${mx} ${h.cy} ${h.l} ${h.cy}` : `M${s.cx} ${s.b} L${h.cx} ${h.t}`);
     }
-    for (const row of rows.values()) {
-      const a = b(row.li);
+    const fromHub = (a) => {
       if (a.l > h.r) {
         const mx = (h.r + a.l) / 2;
-        row.wire.setAttribute("d", `M${h.r} ${h.cy} C${mx} ${h.cy} ${mx} ${a.cy} ${a.l} ${a.cy}`);
-      } else { // the accounts sit under magpie: a lane down their left, from below the agents too
-        const x = a.l - 12, y = Math.max(h.b, low - 8);
-        row.wire.setAttribute("d", `M${h.cx} ${h.b} L${h.cx} ${y} C${h.cx} ${y + 22} ${x} ${y + 2} ${x} ${y + 24} L${x} ${a.cy - 10} Q${x} ${a.cy} ${a.l} ${a.cy}`);
+        return `M${h.r} ${h.cy} C${mx} ${h.cy} ${mx} ${a.cy} ${a.l} ${a.cy}`;
       }
+      // the accounts sit under magpie: a lane down their left, from below the agents too
+      const x = a.l - 12, y = Math.max(h.b, low - 8);
+      return `M${h.cx} ${h.b} L${h.cx} ${y} C${h.cx} ${y + 22} ${x} ${y + 2} ${x} ${y + 24} L${x} ${a.cy - 10} Q${x} ${a.cy} ${a.l} ${a.cy}`;
+    };
+    // a group in the group: its models hang from its heading, a lane down
+    // from where the wire to it ends (under the heading) to each
+    const fromSub = (s, a) => {
+      const p = b(s.li), x = p.l + 9;
+      return `M${p.l} ${p.cy} Q${x} ${p.cy} ${x} ${p.cy + 9} L${x} ${a.cy - 9} Q${x} ${a.cy} ${a.l} ${a.cy}`;
+    };
+    for (const s of subs.values()) {
+      const up = s.up && subs.get(s.up);
+      s.wire.setAttribute("d", up ? fromSub(up, b(s.li)) : fromHub(b(s.li)));
+    }
+    for (const row of rows.values()) {
+      const up = row.up && subs.get(row.up), a = b(row.li);
+      row.wire.setAttribute("d", up ? fromSub(up, a) : fromHub(a));
     }
   }
 
@@ -393,7 +506,8 @@
   function seated(r) {
     const members = r.group?.members || [];
     const key = (w) => {
-      const m = members.findIndex((x) => x.startsWith(w.provider + "/"));
+      let m = members.indexOf(w.provider + "/" + w.model);
+      if (m < 0) m = members.findIndex((x) => x.startsWith(w.provider + "/"));
       return [w.fallback ? 1 : 0, m < 0 ? members.length : m, w.name || w.provider, w.aside ? 1 : 0, w.who || "", w.id];
     };
     const cmp = (a, b) => {
@@ -404,7 +518,12 @@
     return [...r.order].sort(cmp);
   }
 
-  const setOf = (r) => r.order.map((w) => w.id).sort().join("\n");
+  // a seat is one of a route's keys or accounts for one model: two of a
+  // group's models on one provider go over the same keys, and are two seats
+  const seat = (x) => x.id + "\u0000" + (x.model || "");
+  // tried is the seat a try went to
+  const tried = (r, tr) => r.order.find((x) => seat(x) === seat(tr)) || r.order.find((x) => x.id === tr.id);
+  const setOf = (r) => r.order.map(seat).sort().join("\n");
 
   // staged: the routes the stage shows — a picked one alone; else those
   // playing, and each agent's latest while it lingers, a few agents at most
@@ -447,6 +566,32 @@
     return a;
   }
 
+  // subNode is the heading of a group in the group, key its way down
+  // ("fast>cheap"), at depth d
+  function subNode(key, info, d) {
+    let s = subs.get(key);
+    if (!s) {
+      const li = el("li", "rt-sub"), name = el("b"), id = el("code", "mdl"), mode = el("i");
+      li.append(svg(FAN, 14, 1.5), name, id, mode);
+      s = { li, name, id, mode, wire: path(), key };
+      subs.set(key, s);
+    }
+    s.up = d ? key.slice(0, key.lastIndexOf(">")) : null;
+    s.li.style.setProperty("--depth", d);
+    s.name.textContent = info.name || info.id;
+    s.id.textContent = "group/" + info.id;
+    s.mode.textContent = t((MODES[info.routing || ""] || MODES[""])[0]);
+    s.li.title = info.rules ? t(info.rules === 1 ? "1 rule" : "{n} rules", { n: info.rules }) : "";
+    return s;
+  }
+  // wiresTo is the way from magpie to a row: through the headings of the
+  // groups it is in, then its own wire
+  function wiresTo(row) {
+    const via = row.w.via || [], out = [];
+    for (let d = 1; d <= via.length; d++) { const s = subs.get(via.slice(0, d).join(">")); if (s) out.push(s.wire); }
+    return [...out, row.wire];
+  }
+
   function makeRow(w) {
     const li = el("li"), b = el("b");
     b.append(icon(w.icon || (w.preset ? w.preset : "generic")));
@@ -477,6 +622,8 @@
     if (force) {
       for (const row of rows.values()) row.wire.remove();
       rows = new Map();
+      for (const s of subs.values()) s.wire.remove();
+      subs.clear();
       list.replaceChildren();
       for (const a of agents.values()) a.wire.remove();
       agents.clear();
@@ -502,9 +649,9 @@
     const ids = [], wOf = new Map(), rOf = new Map();
     for (const k of sets) {
       const r = latest.get(k);
-      for (const w of seated(r)) if (!ids.includes(w.id)) ids.push(w.id);
+      for (const w of seated(r)) if (!ids.includes(seat(w))) ids.push(seat(w));
     }
-    for (const r of rs) for (const w of [...r.order, ...(r.left || [])]) { wOf.set(w.id, w); rOf.set(w.id, r.id); }
+    for (const r of rs) for (const w of [...r.order, ...(r.left || [])]) { wOf.set(seat(w), w); rOf.set(seat(w), r.id); }
     const before = new Map([...rows].map(([id, row]) => [id, row.li.getBoundingClientRect().top]));
     for (const [id, row] of rows) if (!ids.includes(id)) { row.li.remove(); row.wire.remove(); rows.delete(id); }
     if (list.querySelector(".idle")) list.replaceChildren();
@@ -518,11 +665,29 @@
       row.w = wOf.get(id);
       row.rid = rOf.get(id);
     }
-    const mine = new Set([...rows.values()].map((row) => row.li));
+    // a group in the group heads its models, which it routes by its own
+    // routing, set in under it
+    const els = [], want = new Set(), infos = rs.flatMap((r) => r.group?.subs || []);
+    let prev = [];
+    for (const id of ids) {
+      const row = rows.get(id), via = row.w.via || [];
+      row.li.style.setProperty("--depth", via.length);
+      row.up = via.length ? via.join(">") : null;
+      via.forEach((g, d) => {
+        const key = via.slice(0, d + 1).join(">");
+        if (prev.slice(0, d + 1).join(">") === key || want.has(key)) return;
+        want.add(key);
+        els.push(subNode(key, infos.find((x) => x.id === g) || { id: g, name: g }, d).li);
+      });
+      els.push(row.li);
+      prev = via;
+    }
+    for (const [k, s] of subs) if (!want.has(k)) { s.li.remove(); s.wire.remove(); subs.delete(k); }
+    const mine = new Set(els);
     for (const li of [...list.children]) if (!mine.has(li)) li.remove();
     // moved only when the order changed: moving a node restarts what it plays
-    if (ids.some((id, i) => list.children[i] !== rows.get(id).li) || list.children.length !== ids.length) {
-      for (const id of ids) list.append(rows.get(id).li);
+    if (els.some((e, i) => list.children[i] !== e) || list.children.length !== els.length) {
+      for (const e of els) list.append(e);
     }
     // FLIP: from where each was to its new place
     let moved = false;
@@ -565,7 +730,7 @@
     hubText();
     const n = now(), rs = staged();
     const trying = new Set(), busy = new Set();
-    for (const r of rs) for (const tr of r.tries) if (!tr.done) { trying.add(tr.id); busy.add(r.agent); }
+    for (const r of rs) for (const tr of r.tries) if (!tr.done) { trying.add(seat(tr)); busy.add(r.agent); }
     const onWire = new Set();
     for (const f of flying.values()) { onWire.add(f.id); busy.add(f.agent); }
     for (const [id, row] of rows) {
@@ -573,12 +738,12 @@
       const r = routes.get(row.rid) || pinned || cur, answered = new Set(), rests = new Map(), gave = new Map();
       for (const w of r.order) if (w.rest) rests.set(w.id, w.rest);
       for (const tr of r.tries) {
-        if (tr.done && tr.status < 400) answered.add(tr.id);
-        else if (tr.done && !tr.rest && !tr.again) gave.set(tr.id, tr); // the error the agent got
+        if (tr.done && tr.status < 400) answered.add(seat(tr));
+        else if (tr.done && !tr.rest && !tr.again) gave.set(seat(tr), tr); // the error the agent got
         if (tr.rest) rests.set(tr.id, tr.rest);
       }
-      for (const id of answered) rests.delete(id); // it answered: whatever rest it began in is over
-      const w = row.w, rest = rests.get(id), resting = rest && at(rest.until) > n;
+      for (const tr of r.tries) if (tr.done && tr.status < 400) rests.delete(tr.id); // it answered: whatever rest it began in is over
+      const w = row.w, rest = rests.get(w.id), resting = rest && at(rest.until) > n;
       let s;
       if (w.unlisted) s = unlistedWord(w);
       else if (resting) s = `${failWord(rest.why)} · ${restWhen(rest)}`;
@@ -608,6 +773,12 @@
       if (on) row.wire.style.setProperty("--agent", hueOf(r.agent));
       row.wire.classList.toggle("rest", !!resting || !!w.unlisted);
     }
+    for (const s of subs.values()) {
+      const lit = [...rows.values()].find((row) => row.li.classList.contains("on") && (row.up === s.key || row.up?.startsWith(s.key + ">")));
+      s.li.classList.toggle("on", !!lit);
+      s.wire.classList.toggle("live", !!lit);
+      if (lit) s.wire.style.setProperty("--agent", lit.wire.style.getPropertyValue("--agent"));
+    }
     for (const [id, a] of agents) a.wire.classList.toggle("live", busy.has(id));
   }
 
@@ -628,11 +799,12 @@
     const items = [];
     const main = r.order.find((x) => !x.fallback);
     items.push([r.group
-      ? t("{agent} asked for the routing group {name}: {members}", { agent: agentName(r.agent), name: r.group.name, members: (r.group.members || []).join(", ") })
+      ? t("{agent} asked for the routing group {name}: {members}", { agent: agentName(r.agent), name: r.group.name, members: treeText(r.group) })
       : main && main.model !== r.model
       ? t("{agent} asked for {model}: {name} serves it, and the vendor is asked for {sent}", { agent: agentName(r.agent), model: r.model, name: main.name, sent: main.model })
       : t("{agent} asked for {model}", { agent: agentName(r.agent), model: r.model }) + " → " + (main?.name || r.provider), ""]);
-    items.push([affWhy(r, true) || firstWhy(r), "why"]);
+    items.push([affWhy(r, true) || ruleWhy(r, true) || firstWhy(r), "why"]);
+    for (const s of nestedWhy(r)) items.push([s, "why"]);
     for (const a of asides(r)) items.push([a, "aside"]);
     r.tries.forEach((_, i) => items.push([tryWhy(r, i), r.tries[i].done ? (r.tries[i].status < 400 ? "ok" : "bad") : "wait"]));
     if (r.done && !r.tries.length) items.push([t("Nothing was tried: {error}", { error: r.error || r.status }), "bad"]);
@@ -646,17 +818,17 @@
     for (const p of sky.querySelectorAll(".pkt, .rt-flier")) p.remove();
     cur = r;
     sync(true); renderAll();
-    say(affWhy(r, true) || firstWhy(r));
+    say(affWhy(r, true) || ruleWhy(r, true) || firstWhy(r));
     if (pinned) { scrollOnPurpose(); box.scrollIntoView({ block: "nearest", behavior: still() ? "auto" : "smooth" }); }
   }
 
   // who answered a request, or what its agent got
   function outcome(r) {
     if (!r.done) {
-      const tr = r.tries[r.tries.length - 1], w = tr && r.order.find((x) => x.id === tr.id);
+      const tr = r.tries[r.tries.length - 1], w = tr && tried(r, tr);
       return [w ? t("{who} is answering…", { who: `${who(w)} · ${w.model}` }) : t("routing…"), "wait"];
     }
-    const ok = r.tries.find((tr) => tr.done && tr.status < 400), w = ok && r.order.find((x) => x.id === ok.id);
+    const ok = r.tries.find((tr) => tr.done && tr.status < 400), w = ok && tried(r, ok);
     if (r.status < 400) return [w ? `${who(w)} · ${w.model}` : r.provider, r.tries.length > 1 ? "moved" : "ok"];
     const last = r.tries[r.tries.length - 1];
     return [last ? `${r.status} · ${failWord(last.fail)}` : `${r.status || ""} ${r.error || ""}`.trim(), "bad"];
@@ -710,7 +882,7 @@
         if (!a || !tr.done || tr.fail === "canceled") continue; // the agent's doing, not its
         a.tried++;
         const end = at(tr.start) + (tr.ms || 0);
-        if (tr.status < 400) { a.ok++; a.last = Math.max(a.last, end); const m = r.order.find((x) => x.id === tr.id)?.model; if (m) a.models.add(m); }
+        if (tr.status < 400) { a.ok++; a.last = Math.max(a.last, end); const m = tr.model || r.order.find((x) => x.id === tr.id)?.model; if (m) a.models.add(m); }
         else a.fails[tr.fail || "other"] = (a.fails[tr.fail || "other"] || 0) + 1;
         if (tr.rest && end >= a.restAt) { a.rest = tr.rest; a.restAt = end; }
       }
@@ -818,7 +990,7 @@
     playing.add(id);
     cur = r;
     sync();
-    say(affWhy(r, true) || firstWhy(r));
+    say(affWhy(r, true) || ruleWhy(r, true) || firstWhy(r));
     const aside = asides(r).find((s) => s);
     if (aside) say(aside, true);
     renderAll();
@@ -845,12 +1017,13 @@
           await until(() => g !== gen || rt().tries.length > i || rt().done);
           continue;
         }
-        const row = rows.get(r.tries[i].id);
+        const row = rows.get(seat(r.tries[i]));
         if (!row) { i++; continue; }
-        flying.set(dot, { id: r.tries[i].id, agent: r.agent });
+        flying.set(dot, { id: seat(r.tries[i]), agent: r.agent });
         if (!carrier) carrier = bird("req");
         if (from) tick(hub);
-        const out = [via(from || tip(A.wire, true), tip(row.wire, false)), { p: row.wire }];
+        const ws = wiresTo(row);
+        const out = [via(from || tip(A.wire, true), tip(ws[0], false)), ...ws.map((p) => ({ p }))];
         await fly(dot, carrier, from ? out : [{ p: A.wire }, ...out], from ? 900 : 1400);
         if (g !== gen) break;
         // let go at the account: it waits there while it answers
@@ -894,11 +1067,11 @@
           break;
         }
         // back to magpie, which hands the request on to the next
-        await fly(dot, back, [{ p: row.wire, rev: true }], 620);
+        await fly(dot, back, [...ws].reverse().map((p) => ({ p, rev: true })), 620);
         flying.delete(dot);
         away(back);
         dot.classList.remove("back", "err");
-        from = tip(row.wire, false, true);
+        from = tip(ws[0], false, true);
         i++;
       }
     } finally { // however it ended, nothing of it stays behind
@@ -912,7 +1085,10 @@
   }
 
   // home: from an account back through magpie to the agent
-  const home = (row, A) => [{ p: row.wire, rev: true }, via(tip(row.wire, false, true), tip(A.wire, true, true)), { p: A.wire, rev: true }];
+  const home = (row, A) => {
+    const ws = wiresTo(row);
+    return [...[...ws].reverse().map((p) => ({ p, rev: true })), via(tip(ws[0], false, true), tip(A.wire, true, true)), { p: A.wire, rev: true }];
+  };
 
   // ---------- the loop ----------
 
@@ -991,6 +1167,8 @@
     srcs.replaceChildren(a.node);
     for (const row of rows.values()) row.wire.remove();
     rows = new Map();
+    for (const s of subs.values()) s.wire.remove();
+    subs.clear();
     chip.hidden = true;
     hubText();
     list.replaceChildren(el("li", "idle", t("No request yet")));
@@ -1028,8 +1206,10 @@
         loaded = true;
         if (first) {
           offline("");
+          // the agents' names come with the app's state, which may not be here yet
+          for (let i = 0; i < 30 && !state.agents.length; i++) await new Promise((res) => setTimeout(res, 100));
           const r = newest();
-          if (r) { cur = r; sync(true); say(affWhy(r, true) || firstWhy(r)); renderAll(); } else empty();
+          if (r) { cur = r; sync(true); say(affWhy(r, true) || ruleWhy(r, true) || firstWhy(r)); renderAll(); } else empty();
         } else {
           if (cur && routes.has(cur.id)) cur = routes.get(cur.id);
           if (pinned && routes.has(pinned.id)) pinned = routes.get(pinned.id);
@@ -1049,7 +1229,8 @@
   function words() {
     for (const s of stats.children) s.lastChild.textContent = t(s.dataset.label);
     hubText();
-    if (loaded) { if (cur) { sync(true); renderAll(); } else empty(); }
+    // the caption said before, said again in these words: it was set as text
+    if (loaded) { if (cur) { sync(true); renderAll(); capQ = []; say(affWhy(cur, true) || ruleWhy(cur, true) || firstWhy(cur)); } else empty(); }
     renderGroups();
   }
   new MutationObserver(words).observe(document.documentElement, { attributes: true, attributeFilter: ["lang"] });
@@ -1079,6 +1260,17 @@
     rotate: "In turn: each conversation's next turn goes to the next member's account or key, spreading the load.",
     usage: "Least used first: the account or key with the most of its allowance left goes first.",
   };
+  const EFFORTS = ["low", "medium", "high", "xhigh", "max"]; // provider.Efforts
+  // what a rule matches, in words
+  function ruleText(r) {
+    const bits = [];
+    if (r.tokens) bits.push(t("≥ {n} tokens", { n: r.tokens.toLocaleString() }));
+    if (r.images) bits.push(t("has an image"));
+    if (r.effort) bits.push(r.effort === "on" ? t("reasoning on") : t("reasoning ≥ {level}", { level: r.effort }));
+    if (r.agents?.length) bits.push(r.agents.map((id) => (state.clients || state.agents || []).find((a) => a.id === id)?.name || id).join(" / "));
+    if (r.intent) bits.push(t("asks for “{intent}”", { intent: r.intent }));
+    return bits.join(" · ");
+  }
   const slug = (s) => String(s || "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
   let groups = null, gEdit = null; // gEdit: { id: "" for a new one, draft }
   async function loadGroups() {
@@ -1095,8 +1287,15 @@
     } catch (e) { status(e.message, "err"); }
   }
   const modelOf = (id) => groups?.models.find((m) => m.id === id);
+  // a routing group among a group's members: group/<id>
+  const subOf = (id) => id?.startsWith("group/") ? groups?.groups.find((x) => "group/" + x.id === id && !x.hidden) : null;
+  const groupIcons = (g) => [...new Map((g.memberInfo || []).filter((i) => i.icon).map((i) => [i.provider || i.icon, i.icon])).values()];
+  const memberIcon = (id) => { const s = subOf(id); return s ? stackIcon(groupIcons(s)) : icon(modelOf(id)?.icon || "generic"); };
+  const memberName = (id) => { const s = subOf(id), m = modelOf(id); return s ? s.name : m ? m.name || m.id : id; };
+  const memberNote = (id) => subOf(id) ? t("routing group") : modelOf(id)?.providerName;
   function memberLabel(g, id) {
-    const i = g.memberInfo?.find((x) => x.id === id), m = modelOf(id);
+    const i = g.memberInfo?.find((x) => x.id === id), m = modelOf(id), s = subOf(id);
+    if (s) return `${t("routing group")} · ${s.name}`;
     if (m) return `${m.providerName} · ${m.name || m.id}`;
     return i?.name ? `${i.name} · ${i.model}` : id;
   }
@@ -1105,7 +1304,7 @@
   }
   function drawGroups() {
     const newBtn = el("button", "text", t("New group"));
-    newBtn.onclick = () => { gEdit = { id: "", draft: { name: "", members: [], routing: "", affinity: "" } }; renderGroups(); };
+    newBtn.onclick = () => { gEdit = { id: "", draft: { name: "", members: [], routing: "", affinity: "", rules: [] } }; renderGroups(); };
     gHead.replaceChildren(el("span", "label", t("Routing groups")), el("span", "grow"), el("span", "note", t("models agents pick as one")), newBtn);
     const rows = [];
     if (gEdit && !gEdit.id) rows.push(groupEditor(null));
@@ -1129,7 +1328,7 @@
   function groupRow(g) {
     const row = el("div", "rt-group" + (g.ready ? "" : " off"));
     const ics = el("span", "ics");
-    ics.append(stackIcon([...new Map((g.memberInfo || []).filter((i) => i.provider).map((i) => [i.provider, i.icon])).values()]));
+    ics.append(stackIcon(groupIcons(g)));
     const main = el("div", "main");
     const nm = el("div", "nm");
     nm.append(el("b", "", g.name), el("code", "mdl", "group/" + g.id));
@@ -1141,10 +1340,15 @@
     const tags = el("span", "tags");
     tags.append(el("span", "tag", t(m[1])));
     if (g.affinity) tags.append(el("span", "tag", t(AFF_OPTS.find(([id]) => id === g.affinity)?.[1] || "")));
+    if (g.rules?.length) {
+      const r = el("span", "tag", t(g.rules.length === 1 ? "1 rule" : "{n} rules", { n: g.rules.length }));
+      r.title = g.rules.map((x, i) => `${i + 1}. ${ruleText(x)} → ${memberLabel(g, x.use)}`).join("\n");
+      tags.append(r);
+    }
     if (!g.ready) tags.append(el("span", "tag bad", t("no member ready")));
     const edit = el("button", "text", t("Edit"));
     edit.onclick = (e) => { e.stopPropagation(); open(); };
-    const open = () => { gEdit = { id: g.id, draft: { name: g.name, members: [...g.members], routing: g.routing || "", affinity: g.affinity || "" } }; renderGroups(); };
+    const open = () => { gEdit = { id: g.id, draft: { name: g.name, members: [...g.members], routing: g.routing || "", affinity: g.affinity || "", classifier: g.classifier || "", rules: (g.rules || []).map((r) => ({ ...r, intent: r.intent || "", agents: [...(r.agents || [])] })) } }; renderGroups(); };
     row.onclick = open;
     row.append(ics, main, tags, edit);
     return row;
@@ -1159,18 +1363,33 @@
     const keys = (i) => { i.onkeydown = (e) => { e.stopPropagation(); if (e.key === "Escape") { gEdit = null; renderGroups(); } else if (e.key === "Enter" && i === name) save(); }; return i; };
     const name = keys(input(d.name, t("e.g. Opus anywhere")));
     const idHint = el("div", "hint");
+    // an existing group's id can change (an auto- one found by magpie too);
+    // a new one's is made from its name
+    if (g && d.id === undefined) d.id = g.id;
+    const idIn = g ? keys(input(d.id, g.id)) : null;
     const idOf = () => {
-      if (g) return g.id;
+      if (g) return slug(d.id) || g.id;
       let id = slug(d.name) || "group", n = 1;
       const base = id;
       while (groups.groups.some((x) => x.id === id)) id = `${base}-${++n}`;
       return id;
     };
-    const showId = () => { idHint.textContent = t("Agents pick it as {id}", { id: "group/" + idOf() }); };
+    const showId = () => {
+      idHint.textContent = t("Agents pick it as {id}", { id: "group/" + idOf() }) +
+        (g && idOf() !== g.id ? " · " + t("an agent set to {id} needs setting again", { id: "group/" + g.id }) : "");
+    };
     name.oninput = () => { d.name = name.value; showId(); };
     const nw = el("div");
-    nw.append(name, idHint);
+    nw.append(name);
+    if (!g) nw.append(idHint);
     ed.append(el("label", "", t("Name")), nw);
+    if (idIn) {
+      idIn.oninput = () => { d.id = idIn.value; showId(); };
+      idIn.onblur = () => { d.id = idIn.value = idOf(); showId(); };
+      const iw = el("div");
+      iw.append(idIn, idHint);
+      ed.append(el("label", "", t("ID")), iw);
+    }
     showId();
 
     // members, in order: the first is what an agent is told the model can do.
@@ -1182,27 +1401,32 @@
     const draw = () => {
       list.replaceChildren();
       d.members.forEach((id, i) => {
-        const m = modelOf(id);
+        const m = modelOf(id), s = subOf(id);
         const row = el("div", "fbrow");
         const n = el("span", "n");
-        n.append(el("span", "", m ? m.name || m.id : id));
-        if (m) n.append(el("small", "", m.providerName));
-        row.append(el("span", "i", String(i + 1)), icon(m?.icon || "generic"), n, el("span", "grow"));
-        if (!m) { row.classList.add("off"); row.title = t("No provider serves {id} now; it is skipped", { id }); }
+        n.append(el("span", "", memberName(id)));
+        if (m || s) n.append(el("small", "", memberNote(id)));
+        row.append(el("span", "i", String(i + 1)), memberIcon(id), n, el("span", "grow"));
+        if (s) row.title = s.members.map((x) => memberLabel(s, x)).join(s.routing === "order" ? " → " : " · ");
+        if (!m && !s) { row.classList.add("off"); row.title = t("No provider serves {id} now; it is skipped", { id }); }
         if (i) { const up = el("button", "text", t("Up")); up.onclick = () => { d.members.splice(i - 1, 0, d.members.splice(i, 1)[0]); draw(); }; row.append(up); }
         const rm = el("button", "text", t("Remove"));
-        rm.onclick = () => { d.members.splice(i, 1); draw(); };
+        rm.onclick = () => { d.members.splice(i, 1); d.rules = d.rules.filter((r) => d.members.includes(r.use)); draw(); drawRules(); };
         row.append(rm);
         list.append(row);
       });
       addBtn.querySelector("span").textContent = t(d.members.length ? "Add another model" : "Add a model");
     };
     addBtn.onclick = (ev) => {
-      const options = groups.models.filter((x) => !d.members.includes(x.id))
-        .map((x) => ({ value: x.id, label: x.name || x.id, note: x.providerName, icon: x.icon, group: x.providerName, ref: x.id }));
+      // a group in it may be any other, but never one it is in already:
+      // that would put it in itself
+      const subs = groups.groups.filter((x) => !x.hidden && x.id !== g?.id && !(g && x.holds?.includes(g.id)) && !d.members.includes("group/" + x.id))
+        .map((x) => ({ value: "group/" + x.id, label: x.name, note: "group/" + x.id, icons: groupIcons(x), group: ROUTING_GROUPS, ref: "group/" + x.id }));
+      const options = [...subs, ...groups.models.filter((x) => !d.members.includes(x.id))
+        .map((x) => ({ value: x.id, label: x.name || x.id, note: x.providerName, icon: x.icon, group: x.providerName, ref: x.id }))];
       openPicker({ id: "", name: "", fields: [] }, { key: "member", label: "model", value: "", options, onPick: (id) => {
         if (id && !d.members.includes(id)) d.members.push(id);
-        draw();
+        draw(); drawRules();
       } }, addBtn, ev);
     };
     box.append(list, addBtn);
@@ -1220,6 +1444,110 @@
     aw.append(segs(AFF_OPTS.map(([id, n]) => [id, t(n)]), d.affinity, (v) => { d.affinity = v; aHint.textContent = t(AFF_HINT[v] || AFF_HINT[""]); }), aHint);
     ed.append(el("label", "", t("Stays")), aw);
 
+    // rules: which member a turn goes to first, by what the request shows
+    const rbox = el("div", "fallback rt-rules");
+    const rlist = el("div", "fbl");
+    const rAdd = el("button", "rt-gadd");
+    rAdd.append(svg(PLUS, 11, 1.8), el("span", "", t("Add a rule")));
+    const infoOf = (id) => g?.memberInfo?.find((x) => x.id === id);
+    const pickFrom = (label, anchor, ev, options, onPick) => openPicker({ id: "", name: "", fields: [] }, { key: "rule", label, value: "", menu: true, options, onPick }, anchor, ev);
+    const rHint2 = el("div", "hint");
+    const drawRules = () => {
+      rlist.replaceChildren();
+      rAdd.hidden = d.members.length < 2;
+      rHint2.textContent = t(d.members.length < 2 ? "With two models or more, a rule can send some turns to one of them first." : "Checked top first when you send a message: the first that matches sends that turn to its model first; the rest stay behind it if it fails. A turn under way is never moved.");
+      d.rules.forEach((r, i) => {
+        const row = el("div", "rt-rule");
+        const when = el("div", "when");
+        when.append(el("span", "w", t("When")));
+        // tokens: at least this long
+        const tk = el("span", "rt-cond tk" + (r.tokens ? " on" : ""));
+        tk.onclick = () => ti.focus();
+        const ti = input(r.tokens ? String(r.tokens) : "", "", "number");
+        ti.min = "0"; ti.step = "1000";
+        ti.oninput = () => { r.tokens = Math.max(0, parseInt(ti.value, 10) || 0); tk.classList.toggle("on", !!r.tokens); warn(); };
+        ti.onkeydown = (e) => e.stopPropagation();
+        tk.append(el("span", "", "≥"), ti, el("span", "", t("tokens")));
+        // images
+        const im = el("button", "rt-cond" + (r.images ? " on" : ""), t("has an image"));
+        im.onclick = () => { r.images = !r.images; im.classList.toggle("on", r.images); warn(); };
+        // reasoning
+        const effortName = (v) => v === "on" ? t("reasoning on") : v ? t("reasoning ≥ {level}", { level: v }) : t("any reasoning");
+        const ef = el("button", "rt-cond" + (r.effort ? " on" : ""), effortName(r.effort));
+        ef.onclick = (ev) => pickFrom("reasoning", ef, ev, [
+          { value: "", label: t("any reasoning"), note: t("not a condition") },
+          { value: "on", label: t("reasoning on"), note: t("thinking or any effort level") },
+          ...EFFORTS.map((v) => ({ value: v, label: t("reasoning ≥ {level}", { level: v }) })),
+        ], (v) => { r.effort = v; ef.textContent = effortName(v); ef.classList.toggle("on", !!v); });
+        // agents
+        const clients = state.clients || state.agents || [];
+        const agentsName = () => r.agents.length ? r.agents.map((id) => clients.find((a) => a.id === id)?.name || id).join(", ") : t("any agent");
+        const ag = el("button", "rt-cond" + (r.agents.length ? " on" : ""), agentsName());
+        ag.onclick = (ev) => pickFrom("agent", ag, ev, [
+          { value: "", label: t("any agent"), note: t("not a condition") },
+          ...clients.map((a) => ({ value: a.id, label: a.name, icon: a.icon, note: r.agents.includes(a.id) ? "✓" : "" })),
+        ], (v) => {
+          r.agents = !v ? [] : r.agents.includes(v) ? r.agents.filter((x) => x !== v) : [...r.agents, v];
+          ag.textContent = agentsName(); ag.classList.toggle("on", r.agents.length > 0);
+        });
+        // intent: what the message asks for, as the classifier judges it
+        const it = el("span", "rt-cond in" + (r.intent ? " on" : ""));
+        it.onclick = () => ii.focus();
+        const ii = input(r.intent || "", t("what it asks for, e.g. writing tests"));
+        ii.maxLength = 200;
+        ii.oninput = () => { r.intent = ii.value; it.classList.toggle("on", !!r.intent.trim()); drawClassifier(); };
+        ii.onkeydown = (e) => e.stopPropagation();
+        it.append(el("span", "", t("asks for")), ii);
+        when.append(tk, im, ef, ag, it);
+        // the member it sends to
+        const use = el("div", "rt-use");
+        const ub = el("button", "rt-cond on");
+        const drawUse = () => { const note = memberNote(r.use); ub.replaceChildren(memberIcon(r.use), el("span", "", note ? `${memberName(r.use)} · ${note}` : r.use)); };
+        drawUse();
+        ub.onclick = (ev) => pickFrom("member", ub, ev, d.members.map((id) => { const s = subOf(id); return { value: id, label: memberName(id), note: memberNote(id), icon: s ? undefined : modelOf(id)?.icon, icons: s ? groupIcons(s) : undefined }; }),
+          (v) => { r.use = v; drawUse(); warn(); });
+        const hint = el("span", "rt-rwarn");
+        const warn = () => {
+          const m = infoOf(r.use), bits = [];
+          if (r.images && m && m.ready && !m.images) bits.push(t("it doesn't take images"));
+          if (r.tokens && m?.context && m.context < r.tokens) bits.push(t("it takes {n} tokens", { n: m.context.toLocaleString() }));
+          hint.textContent = bits.join(" · ");
+        };
+        warn();
+        use.append(el("span", "w", t("send to")), ub, hint);
+        const ctl = el("span", "ctl");
+        if (i) { const up = el("button", "text", t("Up")); up.onclick = () => { d.rules.splice(i - 1, 0, d.rules.splice(i, 1)[0]); drawRules(); }; ctl.append(up); }
+        const rm = el("button", "text", t("Remove"));
+        rm.onclick = () => { d.rules.splice(i, 1); drawRules(); };
+        ctl.append(rm);
+        row.append(el("span", "i", String(i + 1)), when, use, ctl);
+        rlist.append(row);
+      });
+      drawClassifier();
+    };
+    rAdd.onclick = () => { d.rules.push({ use: d.members[d.members.length - 1], tokens: 0, images: false, effort: "", agents: [], intent: "" }); drawRules(); };
+    // the classifier, once a rule has an intent: the model asked which
+    // intent a turn's message is
+    const cls = el("div", "rt-classifier");
+    const drawClassifier = () => {
+      const on = d.rules.some((r) => r.intent?.trim());
+      cls.hidden = !on;
+      if (!on) return;
+      const m = groups.models.find((x) => x.id === d.classifier);
+      const cb = el("button", "rt-cond" + (d.classifier ? " on" : ""));
+      if (d.classifier) cb.append(icon(m?.icon || "generic"), el("span", "", m ? `${m.name || m.id} · ${m.providerName}` : d.classifier));
+      else cb.append(el("span", "", t("choose a model")));
+      cb.onclick = (ev) => openPicker({ id: "", name: "", fields: [] }, { key: "classifier", label: "model", value: d.classifier, options: groups.models.map((x) => ({ value: x.id, label: x.name || x.id, note: x.providerName, icon: x.icon, group: x.providerName, ref: x.id })),
+        onPick: (id) => { if (id) d.classifier = id; drawClassifier(); } }, cb, ev);
+      cls.replaceChildren(el("span", "w", t("Intent told by")), cb,
+        el("div", "hint", t("As a turn begins, this model is asked which of the intents the message is — once; a small, fast one without reasoning is best. If it fails or can't say, no intent matches. Its calls show in the usage as magpie’s own.")));
+    };
+    rbox.append(rlist, rAdd);
+    const rw2 = el("div");
+    rw2.append(rbox, cls, rHint2);
+    ed.append(el("label", "", t("Rules")), rw2);
+    drawRules();
+
     const bar = el("div", "bar");
     if (g) {
       const del = el("button", "text danger", t("Remove"));
@@ -1232,8 +1560,12 @@
     const saveBtn = el("button", "text primary", t(g ? "Save" : "Add"));
     const save = () => {
       if (!d.members.length) { addBtn.focus({ preventScroll: true }); return status(t("A group needs a model in it"), "warn"); }
+      d.rules.forEach((r) => { r.intent = (r.intent || "").trim(); });
+      const bare = d.rules.findIndex((r) => !r.tokens && !r.images && !r.effort && !r.agents.length && !r.intent);
+      if (bare >= 0) return status(t("Rule {n} needs a condition", { n: bare + 1 }), "warn");
+      if (d.rules.some((r) => r.intent) && !d.classifier) return status(t("Choose the model that tells which intent a message is"), "warn");
       saveBtn.classList.add("busy");
-      groupAction("save", { id: idOf(), name: d.name.trim() || idOf(), members: d.members, routing: d.routing, affinity: d.affinity }, t(g ? "{name} saved" : "{name} added", { name: d.name.trim() || idOf() }));
+      groupAction("save", { id: idOf(), from: g?.id, name: d.name.trim() || idOf(), members: d.members, routing: d.routing, affinity: d.affinity, rules: d.rules, classifier: d.rules.some((r) => r.intent) ? d.classifier : "", context: g?.context || 0 }, t(g ? "{name} saved" : "{name} added", { name: d.name.trim() || idOf() }));
     };
     saveBtn.onclick = save;
     bar.append(cancel, saveBtn);

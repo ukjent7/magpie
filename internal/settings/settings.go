@@ -22,10 +22,21 @@ type Settings struct {
 	Theme string `json:"theme,omitempty"` // system | light | dark
 	Lang  string `json:"lang,omitempty"`  // system | en | zh
 	Tray  string `json:"tray,omitempty"`  // what clicking the tray icon opens: panel | window
+	// Dock keeps magpie in the Mac's Dock as well as the menu bar, for a
+	// menu bar too full to show its icon.
+	Dock bool `json:"dock,omitempty"`
 	// Proxy for magpie's own requests to vendors: "" follows the
 	// environment and then the system, "direct" uses none, anything else
 	// is the proxy (http://, https:// or socks5://; host:port means http).
 	Proxy string `json:"proxy,omitempty"`
+	// Redact keeps secrets in what agents send (API keys, private keys,
+	// tokens, passwords) from the vendors behind magpie: they go as
+	// placeholders, and come back as they were. RedactPersonal does the same
+	// for emails, phone numbers and ID and bank card numbers, and
+	// RedactWords for the user's own words.
+	Redact         bool     `json:"redact,omitempty"`
+	RedactPersonal bool     `json:"redactPersonal,omitempty"`
+	RedactWords    []string `json:"redactWords,omitempty"`
 	// How the agents are listed, by agent id. AgentOrder comes first, as
 	// ordered; an agent it doesn't name (one installed since) follows in
 	// magpie's own order. A hidden agent is folded away at the bottom of the
@@ -34,6 +45,13 @@ type Settings struct {
 	AgentOrder   []string `json:"agentOrder,omitempty"`
 	AgentsHidden []string `json:"agentsHidden,omitempty"`
 	AgentsShown  []string `json:"agentsShown,omitempty"`
+	// Visible narrows the models an agent is shown, by agent id: the
+	// families (the tag a provider or group is given), provider ids and
+	// group ids its lists hold. An agent it doesn't name is shown them all.
+	Visible map[string][]string `json:"visible,omitempty"`
+	// The main window's size when it was last resized, width and height,
+	// so it opens at it again after a restart.
+	Window []int `json:"window,omitempty"`
 }
 
 // Arrange puts items in the order the user gave the agents, those named

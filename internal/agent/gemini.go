@@ -158,6 +158,19 @@ func gemini(home string) *Agent {
 		ID: "gemini", Name: "Gemini CLI", Icon: "geminicli-color", Aliases: []string{"gemini-cli"},
 		UA:  []string{"geminicli", "gemini-cli"},
 		Bin: "gemini", Dir: dir, Path: path,
+		Check: func() string {
+			if !isMagpie(model()) {
+				return ""
+			}
+			if d := wiringOff("Gemini CLI", envPath, func(k string) (string, bool) { return edit.GetEnvFile(envPath, k) },
+				"GOOGLE_GEMINI_BASE_URL", gateway.URL(), "GEMINI_API_KEY", gateway.Token); d != "" {
+				return d
+			}
+			if a := auth(); a != "gemini-api-key" {
+				return "Gemini CLI signs in with " + orDefault(a) + " rather than magpie's key, so it asks Google directly"
+			}
+			return ""
+		},
 		Notice: func() string {
 			if Running(`(^|/)gemini( |$)`) {
 				return "Gemini CLI reads its settings at start-up — restart open gemini sessions to see this."
@@ -205,7 +218,7 @@ func gemini(home string) *Agent {
 						}
 					}
 					own := group("Gemini CLI", options(ms, ""))
-					return append(own, viaMagpie("")...)
+					return append(own, viaMagpie("gemini", "")...)
 				},
 			},
 		},
