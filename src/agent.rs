@@ -1,4 +1,4 @@
-use std::{collections::HashMap, env, path::PathBuf};
+use std::{collections::HashMap, env, fs, path::PathBuf};
 
 use anyhow::{Context, Result, bail, ensure};
 use serde_json::{Value, json};
@@ -362,6 +362,9 @@ impl Agent {
         if self.spec.id == "opencode" && !field.catalog_prefix.is_empty() {
             return self.set_opencode_model(field, value);
         }
+        if self.spec.id == "codex" && field.key == "model" {
+            return self.set_codex_model(value);
+        }
 
         if value.is_empty() {
             if let Some(provider_path) = field.provider_path {
@@ -414,9 +417,73 @@ impl Agent {
         }
         Ok(())
     }
+
+    fn set_codex_model(&self, value: &str) -> Result<()> {
+        if value.is_empty() {
+            if let Some(provider_id) = codex_gateway_provider(self)? {
+                restore_codex_config(self, Some(&provider_id))?;
+            } else if is_legacy_codex_gateway(self)? {
+                restore_codex_config(self, None)?;
+            }
+            return config::delete(&self.path, self.spec.format, "model");
+        }
+
+        if !is_gateway_model(value)? {
+            if let Some(provider_id) = codex_gateway_provider(self)? {
+                restore_codex_config(self, Some(&provider_id))?;
+            } else if is_legacy_codex_gateway(self)? {
+                restore_codex_config(self, None)?;
+            }
+            return config::set(&self.path, self.spec.format, "model", value);
+        }
+
+        let gateway_provider = codex_gateway_provider(self)?;
+        let legacy_gateway = is_legacy_codex_gateway(self)?;
+        let provider_id = gateway_provider
+            .as_ref()
+            .map_or_else(|| available_codex_provider_id(self), |id| Ok(id.clone()))?;
+        let catalog_path = codex_catalog_path(self);
+        let model_catalog = crate::codexcat::render()?;
+        settings::write_json(&catalog_path, &model_catalog)?;
+        if gateway_provider.is_none() && !legacy_gateway {
+            stash_codex_config(self)?;
+        }
+
+        let provider = format!("model_providers.{provider_id}");
+        let catalog_path = catalog_path.to_string_lossy().into_owned();
+        let base_url = crate::gateway::v1_url();
+        let assignments = [
+            ("model_provider".to_owned(), provider_id),
+            ("model_catalog_json".to_owned(), catalog_path),
+            ("model".to_owned(), value.to_owned()),
+            (format!("{provider}.name"), "magpie".to_owned()),
+            (format!("{provider}.base_url"), base_url),
+            (format!("{provider}.wire_api"), "responses".to_owned()),
+            (
+                format!("{provider}.experimental_bearer_token"),
+                crate::gateway::TOKEN.to_owned(),
+            ),
+        ];
+        let assignments = assignments
+            .iter()
+            .map(|(key, value)| (key.as_str(), value.as_str()))
+            .collect::<Vec<_>>();
+        config::set_many(&self.path, self.spec.format, &assignments)?;
+        config::delete(&self.path, self.spec.format, "openai_base_url")?;
+        settle_codex_effort(self, value)
+    }
 }
 
 pub fn sync_catalog_models() -> Result<()> {
+    if let Some(agent) = all().into_iter().find(|agent| agent.spec.id == "codex")
+        && codex_gateway_provider(&agent)?.is_some()
+        && config::get(&agent.path, agent.spec.format, "model_catalog_json")?.as_deref()
+            == Some(codex_catalog_path(&agent).to_string_lossy().as_ref())
+    {
+        let model_catalog = crate::codexcat::render()?;
+        settings::write_json(&codex_catalog_path(&agent), &model_catalog)?;
+    }
+
     let Some(agent) = all().into_iter().find(|agent| agent.spec.id == "opencode") else {
         return Ok(());
     };
@@ -424,6 +491,215 @@ pub fn sync_catalog_models() -> Result<()> {
         config::set_jsonc_value(&agent.path, "provider.magpie", &opencode_provider()?)?;
     }
     Ok(())
+}
+
+fn is_gateway_model(value: &str) -> Result<bool> {
+    let (groups, entries) = crate::provider::desktop_group_data()?;
+    Ok(entries.iter().any(|entry| entry.id == value)
+        || groups
+            .iter()
+            .any(|group| !group.hidden && format!("group/{}", group.id) == value))
+}
+
+fn settle_codex_effort(agent: &Agent, model: &str) -> Result<()> {
+    let (groups, entries) = crate::provider::desktop_group_data()?;
+    let efforts = if let Some(entry) = entries.iter().find(|entry| entry.id == model) {
+        entry.model.efforts.clone()
+    } else if let Some(group) = groups
+        .iter()
+        .find(|group| format!("group/{}", group.id) == model)
+    {
+        group
+            .members
+            .iter()
+            .filter_map(|member| entries.iter().find(|entry| entry.id == *member))
+            .flat_map(|entry| entry.model.efforts.iter().cloned())
+            .fold(Vec::new(), |mut efforts, effort| {
+                if !efforts.contains(&effort) {
+                    efforts.push(effort);
+                }
+                efforts
+            })
+    } else {
+        Vec::new()
+    };
+    if efforts.is_empty() {
+        return Ok(());
+    }
+
+    let current =
+        config::get(&agent.path, agent.spec.format, "model_reasoning_effort")?.unwrap_or_default();
+    if efforts.contains(&current) {
+        return Ok(());
+    }
+    if let Some(default) = crate::codexcat::default_effort(&efforts) {
+        config::set(
+            &agent.path,
+            agent.spec.format,
+            "model_reasoning_effort",
+            &default,
+        )?;
+    }
+    Ok(())
+}
+
+fn codex_gateway_provider(agent: &Agent) -> Result<Option<String>> {
+    let Some(provider_id) = config::get(&agent.path, agent.spec.format, "model_provider")? else {
+        return Ok(None);
+    };
+    if !matches!(provider_id.as_str(), "magpie" | "magpie_gateway") {
+        return Ok(None);
+    }
+
+    let prefix = format!("model_providers.{provider_id}");
+    let base_url = config::get(
+        &agent.path,
+        agent.spec.format,
+        &format!("{prefix}.base_url"),
+    )?;
+    let wire_api = config::get(
+        &agent.path,
+        agent.spec.format,
+        &format!("{prefix}.wire_api"),
+    )?;
+    let token = config::get(
+        &agent.path,
+        agent.spec.format,
+        &format!("{prefix}.experimental_bearer_token"),
+    )?;
+    Ok((base_url.as_deref().is_some_and(is_gateway_v1_url)
+        && wire_api.as_deref() == Some("responses")
+        && token.as_deref() == Some(crate::gateway::TOKEN))
+    .then_some(provider_id))
+}
+
+fn is_gateway_v1_url(value: &str) -> bool {
+    if value.trim_end_matches('/') == crate::gateway::v1_url() {
+        return true;
+    }
+    let Ok(url) = url::Url::parse(value) else {
+        return false;
+    };
+    url.scheme() == "http"
+        && url.path().trim_end_matches('/') == "/v1"
+        && url.query().is_none()
+        && matches!(
+            url.host_str(),
+            Some("localhost" | "127.0.0.1" | "0.0.0.0" | "::1")
+        )
+}
+
+fn available_codex_provider_id(agent: &Agent) -> Result<String> {
+    for provider_id in ["magpie", "magpie_gateway"] {
+        let prefix = format!("model_providers.{provider_id}");
+        if !config::exists(&agent.path, agent.spec.format, &prefix)? {
+            return Ok(provider_id.to_owned());
+        }
+    }
+    bail!("Codex already has providers named magpie and magpie_gateway")
+}
+
+fn stash_codex_config(agent: &Agent) -> Result<()> {
+    let mut stash = read_agent_stash()?;
+    for (stash_key, config_key) in [
+        ("codex.provider", "model_provider"),
+        ("codex.catalog", "model_catalog_json"),
+        ("codex.effort", "model_reasoning_effort"),
+        ("codex.openai_base_url", "openai_base_url"),
+    ] {
+        match config::get(&agent.path, agent.spec.format, config_key)? {
+            Some(value) if !value.is_empty() => {
+                stash.insert(stash_key.to_owned(), value);
+            }
+            _ => {
+                stash.remove(stash_key);
+            }
+        }
+    }
+    write_agent_stash(&stash)
+}
+
+fn restore_codex_config(agent: &Agent, provider_id: Option<&str>) -> Result<()> {
+    let mut stash = read_agent_stash()?;
+    let mut deletes = vec![
+        "model_provider".to_owned(),
+        "model_catalog_json".to_owned(),
+        "openai_base_url".to_owned(),
+    ];
+    if let Some(provider_id) = provider_id {
+        deletes.push(format!("model_providers.{provider_id}"));
+    }
+    let mut assignments = Vec::new();
+    for (stash_key, config_key) in [
+        ("codex.provider", "model_provider"),
+        ("codex.catalog", "model_catalog_json"),
+        ("codex.effort", "model_reasoning_effort"),
+        ("codex.openai_base_url", "openai_base_url"),
+    ] {
+        if let Some(value) = stash.remove(stash_key) {
+            assignments.push((config_key.to_owned(), value));
+        }
+    }
+    let delete_refs = deletes.iter().map(String::as_str).collect::<Vec<_>>();
+    config::delete_many(&agent.path, agent.spec.format, &delete_refs)?;
+    let assignment_refs = assignments
+        .iter()
+        .map(|(key, value)| (key.as_str(), value.as_str()))
+        .collect::<Vec<_>>();
+    if !assignment_refs.is_empty() {
+        config::set_many(&agent.path, agent.spec.format, &assignment_refs)?;
+    }
+
+    let catalog_path = codex_catalog_path(agent);
+    if let Err(error) = fs::remove_file(&catalog_path)
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        return Err(error).with_context(|| format!("remove {}", catalog_path.display()));
+    }
+    stash.remove("codex.model");
+    write_agent_stash(&stash)
+}
+
+fn codex_catalog_path(agent: &Agent) -> PathBuf {
+    agent
+        .path
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."))
+        .join("magpie-gateway-models.json")
+}
+
+fn is_legacy_codex_gateway(agent: &Agent) -> Result<bool> {
+    let Some(base_url) = config::get(&agent.path, agent.spec.format, "openai_base_url")? else {
+        return Ok(false);
+    };
+    let Ok(url) = url::Url::parse(&base_url) else {
+        return Ok(false);
+    };
+    Ok(url.path().trim_end_matches('/') == "/backend-api/codex"
+        && matches!(
+            url.host_str(),
+            Some("localhost" | "127.0.0.1" | "0.0.0.0" | "::1")
+        ))
+}
+
+fn agent_stash_path() -> PathBuf {
+    settings::providers_path().with_file_name("stash.json")
+}
+
+fn read_agent_stash() -> Result<HashMap<String, String>> {
+    let path = agent_stash_path();
+    match fs::read_to_string(&path) {
+        Ok(contents) => serde_json::from_str(&contents)
+            .with_context(|| format!("parse agent settings stash at {}", path.display())),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(HashMap::new()),
+        Err(error) => {
+            Err(error).with_context(|| format!("read agent settings stash at {}", path.display()))
+        }
+    }
+}
+
+fn write_agent_stash(stash: &HashMap<String, String>) -> Result<()> {
+    settings::write_json(&agent_stash_path(), stash)
 }
 
 fn opencode_has_magpie_model(agent: &Agent) -> Result<bool> {

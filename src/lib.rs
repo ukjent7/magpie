@@ -11,6 +11,7 @@ pub mod backup;
 pub mod catalog;
 pub mod cli;
 mod codex;
+mod codexcat;
 pub mod config;
 mod copilot;
 pub mod desktop;

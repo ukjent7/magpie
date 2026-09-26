@@ -31,6 +31,54 @@ pub fn get(path: &Path, format: ConfigFormat, key_path: &str) -> Result<Option<S
     }
 }
 
+pub fn exists(path: &Path, format: ConfigFormat, key_path: &str) -> Result<bool> {
+    let Some(text) = read_optional(path)? else {
+        return Ok(false);
+    };
+    if text.trim().is_empty() {
+        return Ok(false);
+    }
+
+    match format {
+        ConfigFormat::Jsonc => {
+            let root =
+                CstRootNode::parse(&text, &ParseOptions::default()).context("parse JSONC")?;
+            let Some(mut value) = root.value().and_then(|node| node.to_serde_value()) else {
+                return Ok(false);
+            };
+            for key in key_parts(key_path)? {
+                let Some(next) = value.get(key) else {
+                    return Ok(false);
+                };
+                value = next.clone();
+            }
+            Ok(true)
+        }
+        ConfigFormat::Toml => {
+            let document = DocumentMut::from_str(&text).context("parse TOML")?;
+            let parts = key_parts(key_path)?;
+            let mut table = document.as_table();
+            for (index, key) in parts.iter().enumerate() {
+                let Some(item) = table.get(key) else {
+                    return Ok(false);
+                };
+                if index + 1 == parts.len() {
+                    return Ok(true);
+                }
+                let Some(nested) = item.as_table() else {
+                    return Ok(false);
+                };
+                table = nested;
+            }
+            Ok(false)
+        }
+        ConfigFormat::Yaml => {
+            let document = Document::from_str(&text).context("parse YAML")?;
+            Ok(document.try_get_path(key_path).is_ok())
+        }
+    }
+}
+
 pub fn set(path: &Path, format: ConfigFormat, key_path: &str, value: &str) -> Result<()> {
     set_many(path, format, &[(key_path, value)])
 }
