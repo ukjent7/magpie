@@ -157,6 +157,10 @@ func parseKiroWhoami(b []byte) (user, plan string, ok bool) {
 		plan = "Builder ID"
 	case "IamIdentityCenter":
 		plan = "IAM Identity Center"
+	case "SocialGoogle":
+		plan = "Google"
+	case "SocialGithub", "SocialGitHub":
+		plan = "GitHub"
 	default:
 		plan = w.AccountType
 	}

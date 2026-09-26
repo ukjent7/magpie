@@ -17,6 +17,7 @@ func TestParseKiroWhoami(t *testing.T) {
 		{`{"account":null}`, "", "", false},
 		{`{"accountType":"ApiKey","email":null}`, "Kiro api key", "API key", true},
 		{`{"accountType":"BuilderId","email":"me@example.com"}`, "me@example.com", "Builder ID", true},
+		{`{"accountType":"SocialGoogle","email":"me@example.com"}`, "me@example.com", "Google", true},
 		{`{"accountType":"IamIdentityCenter","email":"me@corp.example","startUrl":"https://corp.awsapps.com/start"}`, "me@corp.example", "IAM Identity Center", true},
 		{``, "", "", false},
 		{`error`, "", "", false},
