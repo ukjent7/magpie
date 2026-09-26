@@ -57,6 +57,14 @@ struct ProviderDraft {
     key: String,
 }
 
+#[derive(Clone)]
+struct ProviderKeyDraft {
+    provider_id: String,
+    key_id: String,
+    name: String,
+    protocol: String,
+}
+
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
 enum ProviderSource {
     #[default]
@@ -90,6 +98,12 @@ enum Action {
         action: String,
         key_id: String,
     },
+    EditProviderKey {
+        provider_id: String,
+        key_id: String,
+    },
+    SaveProviderKeyDetails(ProviderKeyDraft),
+    CancelProviderKeyEdit,
     SetProviderRouting {
         id: String,
         routing: String,
@@ -173,6 +187,7 @@ struct App {
     provider_key_draft: String,
     provider_key_name_draft: String,
     provider_key_protocol_draft: String,
+    provider_key_edit: Option<ProviderKeyDraft>,
     confirm_remove: Option<String>,
     confirm_key_removal: Option<(String, String)>,
     provider_refreshing: bool,
@@ -310,6 +325,7 @@ impl App {
             provider_key_draft: String::new(),
             provider_key_name_draft: String::new(),
             provider_key_protocol_draft: "any".to_owned(),
+            provider_key_edit: None,
             confirm_remove: None,
             confirm_key_removal: None,
             provider_refreshing: false,
@@ -728,6 +744,12 @@ impl App {
                             ui.label(format!("{} · {}", key.protocol, key.id));
                         });
                         ui.horizontal_wrapped(|ui| {
+                            if ui.button("Edit name / protocol").clicked() {
+                                actions.push(Action::EditProviderKey {
+                                    provider_id: provider.id.clone(),
+                                    key_id: key.id.clone(),
+                                });
+                            }
                             if !key.primary {
                                 if ui.button("Make primary").clicked() {
                                     actions.push(Action::UpdateProviderKey {
@@ -770,6 +792,36 @@ impl App {
                     })
                     .response
                     .on_hover_text("Key secrets are never displayed after saving.");
+                if self
+                    .provider_key_edit
+                    .as_ref()
+                    .is_some_and(|draft| draft.provider_id == provider.id && draft.key_id == key.id)
+                    && let Some(draft) = self.provider_key_edit.as_mut()
+                {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.add_sized(
+                            [180.0, 28.0],
+                            egui::TextEdit::singleline(&mut draft.name).hint_text("Key name"),
+                        );
+                        egui::ComboBox::from_id_salt(("edit-key-protocol", key.id.as_str()))
+                            .selected_text(&draft.protocol)
+                            .show_ui(ui, |ui| {
+                                for value in ["any", "chat", "responses", "anthropic"] {
+                                    ui.selectable_value(
+                                        &mut draft.protocol,
+                                        value.to_owned(),
+                                        value,
+                                    );
+                                }
+                            });
+                        if ui.button("Save details").clicked() {
+                            actions.push(Action::SaveProviderKeyDetails(draft.clone()));
+                        }
+                        if ui.button("Cancel").clicked() {
+                            actions.push(Action::CancelProviderKeyEdit);
+                        }
+                    });
+                }
             }
 
             ui.add_space(8.0);
@@ -1672,6 +1724,7 @@ impl App {
                 self.provider_key_draft.clear();
                 self.provider_key_name_draft.clear();
                 self.provider_key_protocol_draft = "any".to_owned();
+                self.provider_key_edit = None;
             }
             Action::AddProvider(draft) => {
                 let added = if draft.source == ProviderSource::Custom {
@@ -1705,6 +1758,7 @@ impl App {
                 Ok(()) => {
                     self.provider_key_draft.clear();
                     self.provider_key_name_draft.clear();
+                    self.provider_key_edit = None;
                     self.provider_key_protocol_draft = "any".to_owned();
                     match self.reload_provider_data() {
                         Ok(()) => self.set_status(&format!("Updated API key for {id}"), true),
@@ -1753,6 +1807,47 @@ impl App {
                     }
                 }
             }
+            Action::EditProviderKey {
+                provider_id,
+                key_id,
+            } => {
+                let details = self
+                    .providers
+                    .iter()
+                    .find(|provider| provider.id == provider_id)
+                    .and_then(|provider| provider.keys.iter().find(|key| key.id == key_id))
+                    .map(|key| (key.name.clone(), key.protocol.clone()));
+                self.provider_key_edit = details.map(|(name, protocol)| ProviderKeyDraft {
+                    provider_id,
+                    key_id,
+                    name,
+                    protocol,
+                });
+            }
+            Action::SaveProviderKeyDetails(draft) => match provider::set_desktop_key_details(
+                &draft.provider_id,
+                &draft.key_id,
+                &draft.name,
+                &draft.protocol,
+            ) {
+                Ok(()) => {
+                    self.provider_key_edit = None;
+                    match self.reload_provider_data() {
+                        Ok(()) => self.set_status(
+                            &format!("Updated API key details for {}", draft.provider_id),
+                            true,
+                        ),
+                        Err(error) => self.set_status(
+                            &format!("Key updated, but provider data could not reload: {error:#}"),
+                            false,
+                        ),
+                    }
+                }
+                Err(error) => {
+                    self.set_status(&format!("Could not update API key: {error:#}"), false)
+                }
+            },
+            Action::CancelProviderKeyEdit => self.provider_key_edit = None,
             Action::SetProviderRouting { id, routing } => {
                 match provider::set_desktop_routing(&id, &routing) {
                     Ok(()) => match self.reload_provider_data() {
@@ -1810,6 +1905,7 @@ impl App {
                 key_id,
             } => {
                 self.confirm_key_removal = None;
+                self.provider_key_edit = None;
                 match provider::update_desktop_key(&provider_id, "rm", &key_id) {
                     Ok(()) => match self.reload_provider_data() {
                         Ok(()) => {

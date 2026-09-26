@@ -931,6 +931,28 @@ pub fn update_desktop_key(id: &str, action: &str, reference: &str) -> Result<()>
     update_key_for(id, action, reference, false)
 }
 
+pub fn set_desktop_key_details(
+    id: &str,
+    reference: &str,
+    name: &str,
+    protocol: &str,
+) -> Result<()> {
+    let name = name.trim().to_owned();
+    let protocol = parse_key_protocol(protocol)?;
+    update_desktop_provider(id, |provider| {
+        let index = locate_key(provider, reference)
+            .with_context(|| format!("{} has no key {reference:?}", provider.name))?;
+        if index == 0 {
+            provider.key_name = name;
+            provider.key_protocol = protocol;
+        } else {
+            provider.keys[index - 1].name = name;
+            provider.keys[index - 1].protocol = protocol;
+        }
+        Ok(())
+    })
+}
+
 pub fn set_desktop_routing(id: &str, routing: &str) -> Result<()> {
     let routing = normalize_routing(routing)?;
     update_desktop_provider(id, |provider| {
