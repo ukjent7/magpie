@@ -166,7 +166,45 @@ fn parse_balance(bytes: &[u8], format: Format) -> Result<String> {
     }
 }
 
+// read_balance_path is the balance path's answer: where in the reply the
+// amount is, or sums of those, with + - * / and brackets, for a relay
+// counting in its own units ("data.total_available / 500000") or telling
+// what was used of a plan ("(1 - credits.monthlyCredits / 70) %"). A "$" or
+// "¥" before it is put in front of the amount; a "%" after it shows it as a
+// percent of 1 (0.25 is 25%). A path alone that is not a number is shown as
+// it is. Several amounts, each with a label if wanted, go apart by ";" and
+// are shown together: "5h: windowLimits.fiveHour.used / cap %; $credits.left"
+// is "5h 0% · $70.00".
 fn custom_balance(value: &Value, path: &str) -> Result<String> {
+    let path = path.trim();
+    if !path.contains(';') && !path.contains(':') {
+        return read_balance_one(value, path);
+    }
+    let mut out = Vec::new();
+    for part in path.split(';') {
+        if part.trim().is_empty() {
+            continue;
+        }
+        let (label, expr) = match part.split_once(':') {
+            Some((label, expr)) => (label.trim(), expr),
+            None => ("", part),
+        };
+        let mut amount =
+            read_balance_one(value, expr).map_err(|error| anyhow!("{label}: {error}"))?;
+        if !label.is_empty() {
+            amount = format!("{label} {amount}");
+        }
+        out.push(amount);
+    }
+    ensure!(
+        !out.is_empty(),
+        "no balance path: where in the reply the amount is, e.g. data.balance"
+    );
+    Ok(out.join(" · "))
+}
+
+// read_balance_one is one amount of a balance path.
+fn read_balance_one(value: &Value, path: &str) -> Result<String> {
     let mut path = path.trim();
     let mut sign = "";
     for candidate in ["$", "¥", "€", "£"] {
@@ -176,41 +214,187 @@ fn custom_balance(value: &Value, path: &str) -> Result<String> {
             break;
         }
     }
-    let (path, divisor) = match path.split_once('/') {
-        Some((path, divisor)) => {
-            let divisor_text = divisor.trim();
-            let divisor = divisor_text.parse::<f64>().with_context(|| {
-                format!("the balance path divides by {divisor_text:?}, not a number")
-            })?;
-            ensure!(divisor != 0.0, "the balance path divisor cannot be zero");
-            (path.trim(), divisor)
-        }
-        None => (path, 1.0),
-    };
+    let mut percent = false;
+    if let Some(rest) = path.strip_suffix('%') {
+        percent = true;
+        path = rest.trim();
+    }
     ensure!(
         !path.is_empty(),
-        "no balance path: name where the amount is, e.g. data.balance"
+        "no balance path: where in the reply the amount is, e.g. data.balance"
     );
 
-    let mut amount = value;
-    for segment in path.split('.') {
-        amount = match amount {
-            Value::Object(object) => object.get(segment),
-            Value::Array(array) => segment
-                .parse::<usize>()
-                .ok()
-                .and_then(|index| array.get(index)),
-            _ => None,
+    let expression = BalanceExpression::new(path, value);
+    if expression.lone() {
+        // a path alone: its value, a number or not
+        let found = expression.at(path).map_err(|error| anyhow!("{error}"))?;
+        if let Some(amount) = number(found) {
+            return Ok(balance_amount(sign, amount, percent));
         }
-        .with_context(|| format!("nothing at {path:?} in the reply"))?;
+        if !percent && let Some(amount) = found.as_str().filter(|amount| !amount.is_empty()) {
+            return Ok(format!("{sign}{amount}"));
+        }
+        bail!("{path:?} in the reply is not an amount");
     }
-    if let Some(amount) = number(amount) {
-        return Ok(money(sign, amount / divisor));
+    let amount = expression.sum().map_err(|error| anyhow!("{error}"))?;
+    ensure!(amount.is_finite(), "the balance path divides by nothing");
+    Ok(balance_amount(sign, amount, percent))
+}
+
+fn balance_amount(sign: &str, amount: f64, percent: bool) -> String {
+    if percent {
+        let value = format!("{:.1}", amount * 100.0);
+        let value = value.strip_suffix(".0").unwrap_or(&value);
+        return format!("{sign}{value}%");
     }
-    if let Some(amount) = amount.as_str().filter(|amount| !amount.is_empty()) {
-        return Ok(format!("{sign}{amount}"));
+    money(sign, amount)
+}
+
+// BalanceExpression reads a balance path's sum: paths into the reply,
+// numbers, + - * / and brackets.
+struct BalanceExpression<'a> {
+    source: Vec<char>,
+    index: usize,
+    reply: &'a Value,
+}
+
+impl<'a> BalanceExpression<'a> {
+    fn new(source: &str, reply: &'a Value) -> Self {
+        Self {
+            source: source.chars().collect(),
+            index: 0,
+            reply,
+        }
     }
-    bail!("{path:?} in the reply is not an amount")
+
+    fn lone(&self) -> bool {
+        !self.source.is_empty()
+            && !self
+                .source
+                .iter()
+                .any(|c| matches!(c, '+' | '-' | '*' | '/' | '(' | ')' | ' '))
+            && !self.source[0].is_ascii_digit()
+    }
+
+    fn space(&mut self) {
+        while self.index < self.source.len() && self.source[self.index] == ' ' {
+            self.index += 1;
+        }
+    }
+
+    fn peek(&self) -> Option<char> {
+        self.source.get(self.index).copied()
+    }
+
+    fn sum(&self) -> std::result::Result<f64, String> {
+        let mut value = self.product()?;
+        while let Some(operator) = self.peek() {
+            if operator != '+' && operator != '-' {
+                break;
+            }
+            self.index += 1;
+            let operand = self.product()?;
+            if operator == '+' {
+                value += operand;
+            } else {
+                value -= operand;
+            }
+        }
+        Ok(value)
+    }
+
+    fn product(&self) -> std::result::Result<f64, String> {
+        let mut value = self.unary()?;
+        while let Some(operator) = self.peek() {
+            if operator != '*' && operator != '/' {
+                break;
+            }
+            self.index += 1;
+            let operand = self.unary()?;
+            if operator == '*' {
+                value *= operand;
+            } else if operand == 0.0 {
+                return Err("the balance path divides by 0".to_owned());
+            } else {
+                value /= operand;
+            }
+        }
+        Ok(value)
+    }
+
+    fn unary(&self) -> std::result::Result<f64, String> {
+        self.space();
+        let Some(current) = self.peek() else {
+            return Err("the balance path ends where a number or a path should be".to_owned());
+        };
+        match current {
+            '-' => {
+                self.index += 1;
+                Ok(-self.unary()?)
+            }
+            '(' => {
+                self.index += 1;
+                let value = self.sum()?;
+                self.space();
+                match self.peek() {
+                    Some(')') => self.index += 1,
+                    _ => return Err("the balance path has a ( without its )".to_owned()),
+                }
+                Ok(value)
+            }
+            c if c.is_ascii_digit() || c == '.' => {
+                let start = self.index;
+                while let Some(c) = self.peek() {
+                    if c.is_ascii_digit() || c == '.' {
+                        self.index += 1;
+                    } else {
+                        break;
+                    }
+                }
+                let text: String = self.source[start..self.index].iter().collect();
+                text.parse::<f64>()
+                    .map_err(|_| format!("the balance path has {text:?}, not a number"))
+            }
+            _ => {
+                let start = self.index;
+                while let Some(c) = self.peek() {
+                    if matches!(c, '+' | '-' | '*' | '/' | '(' | ')' | ' ') {
+                        break;
+                    }
+                    self.index += 1;
+                }
+                if self.index == start {
+                    let rest: String = self.source[start..].iter().collect();
+                    return Err(format!(
+                        "the balance path has {rest:?} where a number or a path should be"
+                    ));
+                }
+                let path: String = self.source[start..self.index].iter().collect();
+                let found = self.at(&path).map_err(|error| anyhow!("{error}"))?;
+                number(found).ok_or_else(|| format!("{path:?} in the reply is not a number"))
+            }
+        }
+    }
+
+    // at is what is at a dotted path in the reply.
+    fn at(&self, path: &str) -> std::result::Result<&'a Value, String> {
+        let mut found = self.reply;
+        for segment in path.split('.') {
+            found = match found {
+                Value::Object(object) => object.get(segment).unwrap_or(&Value::Null),
+                Value::Array(array) => segment
+                    .parse::<usize>()
+                    .ok()
+                    .and_then(|index| array.get(index))
+                    .unwrap_or(&Value::Null),
+                _ => &Value::Null,
+            };
+            if found.is_null() {
+                return Err(format!("nothing at {path:?} in the reply"));
+            }
+        }
+        Ok(found)
+    }
 }
 
 fn number(value: &Value) -> Option<f64> {
@@ -279,5 +463,44 @@ mod tests {
             custom_balance(&value, "$balances.0.amount / 500000").unwrap(),
             "$5.00"
         );
+    }
+
+    #[test]
+    fn custom_paths_take_sums_brackets_and_percents() {
+        let value = serde_json::json!({"credits": {"monthlyCredits": 42.0, "cap": 70.0}});
+        assert_eq!(
+            custom_balance(&value, "(1 - credits.monthlyCredits / credits.cap) %").unwrap(),
+            "40%"
+        );
+        assert_eq!(custom_balance(&value, "$credits.cap").unwrap(), "$70.00");
+        assert_eq!(
+            custom_balance(&value, "-credits.monthlyCredits").unwrap(),
+            "-42.00"
+        );
+    }
+
+    #[test]
+    fn custom_paths_take_several_labelled_amounts() {
+        let value = serde_json::json!({
+            "windowLimits": {"fiveHour": {"used": 0.0, "cap": 100.0}, "weekly": {"used": 3.4, "cap": 100.0}},
+            "credits": {"monthlyCredits": 70.0}
+        });
+        assert_eq!(
+            custom_balance(
+                &value,
+                "5h: windowLimits.fiveHour.used / windowLimits.fiveHour.cap %; week: windowLimits.weekly.used / windowLimits.weekly.cap %; $credits.monthlyCredits"
+            )
+            .unwrap(),
+            "5h 0% · week 3.4% · $70.00"
+        );
+    }
+
+    #[test]
+    fn custom_paths_reject_broken_sums() {
+        let value = serde_json::json!({"a": 1.0});
+        assert!(custom_balance(&value, "a +").is_err());
+        assert!(custom_balance(&value, "(a").is_err());
+        assert!(custom_balance(&value, "a / 0").is_err());
+        assert!(custom_balance(&value, "b + a").is_err());
     }
 }
