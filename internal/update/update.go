@@ -176,6 +176,13 @@ func Bundle() string {
 	return app
 }
 
+// Homebrew is whether exe was installed by Homebrew (brew install magpie),
+// which keeps it in its Cellar and has to be the one to upgrade it: a
+// binary replaced under it leaves brew thinking the old version is there.
+func Homebrew(exe string) bool {
+	return strings.Contains(filepath.ToSlash(exe), "/Cellar/magpie/")
+}
+
 // Executable is the running binary, symlinks resolved.
 func Executable() (string, error) {
 	exe, err := os.Executable()

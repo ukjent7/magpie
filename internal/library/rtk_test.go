@@ -1,16 +1,17 @@
 package library
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"testing"
 )
 
 // fakeRTK is an rtk on PATH that acts as rtk 0.50's installer does for
 // Claude Code, OpenCode and Cursor: installing OpenCode or Cursor gives it to
-// Claude Code as well, and uninstalling Claude Code or OpenCode takes all
-// three away.
+// Claude Code as well. Its uninstaller isn't there: magpie doesn't use it.
 const fakeRTK = `#!/bin/sh
 c="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 claude() { [ -d "$c" ] && echo '{"hooks":{"PreToolUse":[{"hooks":[{"command":"rtk hook claude"}]}]}}' > "$c/settings.json"; }
@@ -23,9 +24,6 @@ case "$*" in
 "--auto-patch") claude ;;
 "--opencode --auto-patch") claude; /bin/mkdir -p "$XDG_CONFIG_HOME/opencode/plugins"; echo x > "$XDG_CONFIG_HOME/opencode/plugins/rtk.ts" ;;
 "--agent cursor --auto-patch") claude; echo '{"hooks":{"preToolUse":[{"command":"rtk hook cursor"}]}}' > "$HOME/.cursor/hooks.json" ;;
-"--agent cursor --uninstall") echo '{}' > "$HOME/.cursor/hooks.json" ;;
-"--uninstall"|"--opencode --uninstall")
-	echo '{}' > "$c/settings.json"; /bin/rm -f "$XDG_CONFIG_HOME/opencode/plugins/rtk.ts"; echo '{}' > "$HOME/.cursor/hooks.json" ;;
 *) echo "unknown: $*" >&2; exit 2 ;;
 esac
 `
@@ -73,7 +71,7 @@ func TestRTK(t *testing.T) {
 	want(false, true, true)
 	set("claude", true)
 	want(true, true, true)
-	// Claude Code's uninstaller takes the other two with it: they're put back
+	// taking it out of Claude Code leaves the other two as they are
 	set("claude", false)
 	want(false, true, true)
 	set("claude", true)
@@ -89,7 +87,139 @@ func TestRTK(t *testing.T) {
 	if v := ReadRTK(); v.Path != "" {
 		t.Fatalf("rtk found at %s with nothing on PATH", v.Path)
 	}
-	if _, err := SetRTK("claude", false); err == nil {
-		t.Fatal("switched without rtk installed")
+	if _, err := SetRTK("opencode", true); err == nil {
+		t.Fatal("switched on without rtk installed")
+	}
+	// the hook of an rtk since removed can still be taken out
+	set("claude", false)
+	want(false, false, false)
+}
+
+// TestRTKRemove: switching an agent off takes out just what rtk's installer
+// put in, as rtk 0.50 writes it, with no rtk to do it.
+func TestRTKRemove(t *testing.T) {
+	h := sandbox(t)
+	hook := func(key, matcher, cmd string) string {
+		return `"hooks": {
+    "` + key + `": [
+      {
+        "matcher": "` + matcher + `",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "` + cmd + `"
+          }
+        ]
+      }
+    ]
+  }`
+	}
+	claude := filepath.Join(h, ".claude")
+	write(t, filepath.Join(claude, "settings.json"), `{
+  "model": "opus",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Write",
+        "hooks": [{"type": "command", "command": "lint"}]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "rtk hook claude"
+          }
+        ]
+      }
+    ]
+  }
+}
+`)
+	write(t, filepath.Join(claude, "CLAUDE.md"), "# mine\n\n@RTK.md\n")
+	write(t, filepath.Join(claude, "RTK.md"), "# RTK\n")
+	codex := filepath.Join(h, ".codex")
+	write(t, filepath.Join(codex, "hooks.json"), "{\n  "+hook("PreToolUse", "Bash", "rtk hook codex")+"\n}\n")
+	write(t, filepath.Join(codex, "AGENTS.md"), "@"+filepath.Join(codex, "RTK.md")+"\n")
+	write(t, filepath.Join(codex, "RTK.md"), "# RTK\n")
+	gemini := filepath.Join(h, ".gemini")
+	sh := filepath.Join(gemini, "hooks", "rtk-hook-gemini.sh")
+	write(t, filepath.Join(gemini, "settings.json"), "{\n  \"theme\": \"dark\",\n  "+hook("BeforeTool", "run_shell_command", sh)+"\n}\n")
+	write(t, sh, "#!/bin/sh\n")
+	write(t, filepath.Join(gemini, "hooks", ".rtk-hook.sha256"), "x\n")
+	write(t, filepath.Join(gemini, "GEMINI.md"), "# g\n")
+	write(t, filepath.Join(h, ".cursor", "hooks.json"), `{"version":1,"hooks":{"preToolUse":[{"command":"rtk hook cursor","matcher":"Shell"}]}}`)
+	copilot := filepath.Join(h, ".copilot")
+	write(t, filepath.Join(copilot, "hooks", "rtk-rewrite.json"), "{}")
+	write(t, filepath.Join(copilot, "copilot-instructions.md"), "# c\n\n<!-- rtk-instructions v2 -->\nAlways prefix shell commands with rtk\n<!-- /rtk-instructions -->\n")
+	write(t, filepath.Join(h, ".pi", "agent", "extensions", "rtk.ts"), "x")
+	write(t, filepath.Join(h, ".config", "opencode", "plugins", "rtk.ts"), "x")
+
+	ids := []string{"claude", "codex", "gemini", "cursor", "copilot", "pi", "opencode"}
+	v := ReadRTK()
+	if v.Path != "" {
+		t.Fatalf("rtk found at %s", v.Path)
+	}
+	on := map[string]bool{}
+	for _, a := range v.Agents {
+		on[a.ID] = a.On
+	}
+	for _, id := range ids {
+		if !on[id] {
+			t.Fatalf("%s's hook isn't seen: %v", id, on)
+		}
+		if _, err := SetRTK(id, false); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, a := range ReadRTK().Agents {
+		if a.On {
+			t.Fatalf("%s still has rtk", a.ID)
+		}
+	}
+	jsonIs := func(p, want string) {
+		t.Helper()
+		var got, w any
+		if err := json.Unmarshal([]byte(read(t, p)), &got); err != nil {
+			t.Fatalf("%s: %v\n%s", p, err, read(t, p))
+		}
+		json.Unmarshal([]byte(want), &w)
+		if !reflect.DeepEqual(got, w) {
+			t.Fatalf("%s:\n%s\nwant %s", p, read(t, p), want)
+		}
+	}
+	jsonIs(filepath.Join(claude, "settings.json"), `{"model":"opus","hooks":{"PreToolUse":[{"matcher":"Write","hooks":[{"type":"command","command":"lint"}]}]}}`)
+	jsonIs(filepath.Join(codex, "hooks.json"), `{}`)
+	jsonIs(filepath.Join(gemini, "settings.json"), `{"theme":"dark"}`)
+	jsonIs(filepath.Join(h, ".cursor", "hooks.json"), `{"version":1}`)
+	for p, want := range map[string]string{
+		filepath.Join(claude, "CLAUDE.md"):                  "# mine\n",
+		filepath.Join(copilot, "copilot-instructions.md"):   "# c\n",
+		filepath.Join(gemini, "GEMINI.md"):                  "# g\n",
+		filepath.Join(claude, "RTK.md"):                     "",
+		filepath.Join(codex, "AGENTS.md"):                   "",
+		filepath.Join(codex, "RTK.md"):                      "",
+		sh:                                                  "",
+		filepath.Join(copilot, "hooks", "rtk-rewrite.json"): "",
+	} {
+		if got := read(t, p); got != want {
+			t.Errorf("%s = %q, want %q", p, got, want)
+		}
+	}
+}
+
+func TestDropHermesPlugin(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "config.yaml")
+	for in, want := range map[string]string{
+		"model: x\nplugins:\n  enabled:\n    - rtk-rewrite\n":          "model: x\n",
+		"model: x\nplugins:\n  enabled:\n    - a\n    - rtk-rewrite\n": "model: x\nplugins:\n  enabled:\n    - a\n",
+	} {
+		write(t, p, in)
+		if err := dropHermesPlugin(p); err != nil {
+			t.Fatal(err)
+		}
+		if got := read(t, p); got != want {
+			t.Errorf("%q → %q, want %q", in, got, want)
+		}
 	}
 }

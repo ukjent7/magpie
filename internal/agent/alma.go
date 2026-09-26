@@ -26,6 +26,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -61,27 +62,81 @@ type almaProvider struct {
 
 // almaDo sends one request to Alma's API and decodes its reply into out.
 func almaDo(method, path string, body, out any) error {
+	return almaAsk(method, path, body, out, false)
+}
+
+// almaLook is a GET that may be answered with what Alma said a moment ago,
+// for showing what Alma is on: its providers run to most of a megabyte and
+// take most of a second, and one look at the Agents page asks for them
+// several times over. What is changed goes by almaDo's own GETs, never
+// by these.
+func almaLook(path string, out any) error {
+	return almaAsk("GET", path, nil, out, true)
+}
+
+func almaAsk(method, path string, body, out any, recent bool) error {
 	if almaAPI == "" {
 		return errAlmaDown
 	}
+	b, err := almaSend(method, path, body, recent)
+	if err != nil {
+		return err
+	}
+	if out == nil || len(bytes.TrimSpace(b)) == 0 {
+		return nil
+	}
+	return json.Unmarshal(b, out)
+}
+
+// almaRead is what Alma last answered each GET with, for almaLook. Any
+// change sent to Alma forgets it all.
+var almaRead struct {
+	sync.Mutex
+	at   map[string]time.Time
+	body map[string][]byte
+	gen  int // changes sent so far: a GET answered across one is not kept
+}
+
+// almaReadFor is how long almaLook takes an answer as current. Tests,
+// which change their fake Alma behind magpie's back, see every change.
+var almaReadFor = func() time.Duration {
+	if testing.Testing() {
+		return 0
+	}
+	return 5 * time.Second
+}()
+
+func almaSend(method, path string, body any, recent bool) ([]byte, error) {
+	key := almaAPI + path
+	almaRead.Lock()
+	if method != "GET" {
+		almaRead.at, almaRead.body = nil, nil
+		almaRead.gen++
+	} else if at, ok := almaRead.at[key]; ok && recent && time.Since(at) < almaReadFor {
+		b := almaRead.body[key]
+		almaRead.Unlock()
+		return b, nil
+	}
+	gen := almaRead.gen
+	almaRead.Unlock()
 	var rd io.Reader
 	if body != nil {
 		b, err := json.Marshal(body)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		rd = bytes.NewReader(b)
 	}
 	req, err := http.NewRequest(method, strings.TrimRight(almaAPI, "/")+path, rd)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
 	resp, err := almaClient.Do(req)
 	if err != nil {
-		return errAlmaDown
+		return nil, errAlmaDown
 	}
 	defer resp.Body.Close()
 	b, _ := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
@@ -93,18 +148,31 @@ func almaDo(method, path string, body, out any) error {
 		if json.Unmarshal(b, &e) == nil && e.Error != "" {
 			msg = e.Error
 		}
-		return fmt.Errorf("Alma: %s %s: %d %s", method, path, resp.StatusCode, msg)
+		return nil, fmt.Errorf("Alma: %s %s: %d %s", method, path, resp.StatusCode, msg)
 	}
-	if out == nil || len(bytes.TrimSpace(b)) == 0 {
-		return nil
+	if method == "GET" {
+		almaRead.Lock()
+		if almaRead.gen == gen {
+			if almaRead.at == nil {
+				almaRead.at, almaRead.body = map[string]time.Time{}, map[string][]byte{}
+			}
+			almaRead.at[key], almaRead.body[key] = time.Now(), b
+		}
+		almaRead.Unlock()
 	}
-	return json.Unmarshal(b, out)
+	return b, nil
 }
 
-// almaProviders lists Alma's providers.
+// almaProviders lists Alma's providers; seen, as almaLook has them.
 func almaProviders() ([]almaProvider, error) {
 	var ps []almaProvider
 	err := almaDo("GET", "/api/providers", nil, &ps)
+	return ps, err
+}
+
+func almaProvidersSeen() ([]almaProvider, error) {
+	var ps []almaProvider
+	err := almaLook("/api/providers", &ps)
 	return ps, err
 }
 
@@ -193,10 +261,15 @@ func almaWire() (string, error) {
 	return p.ID, almaSyncModels(p)
 }
 
-// almaSettings reads Alma's whole settings, every key kept as it is.
-func almaSettings() (map[string]any, error) {
+// almaSettings reads Alma's whole settings, every key kept as it is;
+// seen, as almaLook has them.
+func almaSettings() (map[string]any, error) { return almaSettingsOf(false) }
+
+func almaSettingsSeen() (map[string]any, error) { return almaSettingsOf(true) }
+
+func almaSettingsOf(recent bool) (map[string]any, error) {
 	var s map[string]any
-	if err := almaDo("GET", "/api/settings", nil, &s); err != nil {
+	if err := almaAsk("GET", "/api/settings", nil, &s, recent); err != nil {
 		return nil, err
 	}
 	if s == nil {
@@ -234,7 +307,7 @@ func almaSetDefault(v string) error {
 // Alma not running it is what magpie last set there, so that isn't taken
 // for something else having changed it.
 func almaGet() string {
-	s, err := almaSettings()
+	s, err := almaSettingsSeen()
 	if err != nil {
 		return appliedOf("alma").Fields["model"]
 	}
@@ -243,7 +316,7 @@ func almaGet() string {
 	if !ok {
 		return v
 	}
-	ps, err := almaProviders()
+	ps, err := almaProvidersSeen()
 	if err != nil {
 		return appliedOf("alma").Fields["model"]
 	}
@@ -297,10 +370,10 @@ func almaOwn() []Option {
 		Provider   string `json:"provider"`
 		ProviderID string `json:"providerId"`
 	}
-	if almaDo("GET", "/api/models", nil, &ms) != nil {
+	if almaLook("/api/models", &ms) != nil {
 		return nil
 	}
-	ps, _ := almaProviders()
+	ps, _ := almaProvidersSeen()
 	mine := ""
 	if p := almaMagpie(ps); p != nil {
 		mine = p.ID
@@ -331,11 +404,11 @@ func alma() *Agent {
 		UA:  []string{"alma"},
 		Dir: dir, Path: almaAPI,
 		Check: func() string {
-			s, err := almaSettings()
+			s, err := almaSettingsSeen()
 			if err != nil {
 				return ""
 			}
-			ps, err := almaProviders()
+			ps, err := almaProvidersSeen()
 			if err != nil {
 				return ""
 			}

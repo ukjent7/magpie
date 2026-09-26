@@ -108,6 +108,20 @@ func hermes(home string) *Agent {
 			Options: func(cur map[string]string) []Option {
 				return append(ownOptions("", cur["model"]), viaMagpie("hermes", magpieID+"/")...)
 			},
+		}, {
+			// agent.reasoning_effort, which Hermes's /reasoning saves; none
+			// turns reasoning off, and unset Hermes asks for medium
+			Key: "effort", Label: "effort",
+			Get: func() string { return getKey("agent.reasoning_effort") },
+			Set: func(v string) error {
+				if v == "" {
+					return edit.DelYAML(path, "agent.reasoning_effort")
+				}
+				return edit.SetYAML(path, edit.KV{Path: "agent.reasoning_effort", Value: v})
+			},
+			Options: func(map[string]string) []Option {
+				return static("none", "minimal", "low", "medium", "high", "xhigh")
+			},
 		}},
 	}
 }

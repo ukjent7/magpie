@@ -1,0 +1,181 @@
+package provider
+
+import (
+	"os"
+	"path/filepath"
+	"runtime"
+	"slices"
+	"strings"
+	"testing"
+
+	"github.com/yetone/magpie/internal/catalog"
+	"github.com/yetone/magpie/internal/settings"
+)
+
+// prefsHome is a sandbox home where two providers serve the same model,
+// which models.dev names and gives four reasoning levels.
+func prefsHome(t *testing.T) {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
+	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(home, ".claude"))
+	t.Setenv("CODEX_HOME", filepath.Join(home, ".codex"))
+	// a `security` that finds nothing: no Keychain of the user's is read
+	if runtime.GOOS != "windows" {
+		bin := t.TempDir()
+		os.WriteFile(filepath.Join(bin, "security"), []byte("#!/bin/sh\nexit 44\n"), 0o755)
+		t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	}
+	os.MkdirAll(filepath.Dir(catalog.CachePath()), 0o755)
+	data := `{"a":{"models":{"sol":{"id":"sol","name":"Sol","reasoning_options":[{"type":"effort","values":["low","medium","high","max"]}]}}},
+		"b":{"models":{"sol":{"id":"sol","name":"Sol","reasoning_options":[{"type":"effort","values":["low","medium","high","max"]}]}}}}`
+	if err := os.WriteFile(catalog.CachePath(), []byte(data), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	catalog.Reset()
+	t.Cleanup(catalog.Reset)
+	for _, id := range []string{"a", "b"} {
+		if err := Save(Provider{ID: id, Name: strings.ToUpper(id), Catalog: id, Key: "k", Chat: "http://127.0.0.1:1/v1", Models: []string{"sol"}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func entry(t *testing.T, id string) Entry {
+	t.Helper()
+	for _, e := range Catalog() {
+		if e.ID == id {
+			return e
+		}
+	}
+	t.Fatalf("no %s in the catalog", id)
+	return Entry{}
+}
+
+// A model's name of the user's is kept by provider/model in settings, is
+// what the catalog and the lists agents get call it, leaves the same model
+// from another provider (and the group they make) alone, and goes when
+// reset. The agents are told each time.
+func TestModelName(t *testing.T) {
+	prefsHome(t)
+	touched := 0
+	catalog.Changed = func() { touched++ }
+	t.Cleanup(func() { catalog.Changed = nil })
+
+	if err := SetModelName("a/sol", "  My   Sol "); err != nil {
+		t.Fatal(err)
+	}
+	if touched != 1 {
+		t.Fatalf("agents told %d times", touched)
+	}
+	if got := settings.Load().ModelNames["a/sol"]; got != "My Sol" {
+		t.Fatalf("settings hold %q", got)
+	}
+	if n, ok := ModelName("a", "sol"); !ok || n != "My Sol" {
+		t.Fatal(n, ok)
+	}
+	a, b := entry(t, "a/sol"), entry(t, "b/sol")
+	if a.Name != "My Sol" || a.Default != "Sol" || a.Label() != "My Sol" || a.Model != "sol" {
+		t.Fatalf("%+v %q", a, a.Label())
+	}
+	if b.Name != "Sol" || b.Default != "" || b.Label() != "Sol · B" {
+		t.Fatalf("%+v %q", b, b.Label())
+	}
+	if g := entry(t, "group/auto-sol"); g.Name != "Sol" {
+		t.Fatalf("the group took a provider's name: %+v", g)
+	}
+	if p, m, ok := Resolve("a/sol"); !ok || p.ID != "a" || m != "sol" {
+		t.Fatal("a named model no longer resolves", p.ID, m, ok)
+	}
+	var listed []string
+	for _, m := range CodexListed() {
+		listed = append(listed, m.ID+"="+m.Name)
+	}
+	if !slices.Contains(listed, "a/sol=My Sol") || !slices.Contains(listed, "b/sol=Sol · B") {
+		t.Fatal(listed)
+	}
+	if got := (Provider{ID: "a"}).ModelNames(); got["sol"] != "My Sol" || len(got) != 1 {
+		t.Fatal(got)
+	}
+
+	// a provider's name, or a Find by it, is the same provider
+	if err := SetModelName("B/sol", "Sol from B"); err != nil {
+		t.Fatal(err)
+	}
+	if b := entry(t, "b/sol"); b.Name != "Sol from B" {
+		t.Fatalf("%+v", b)
+	}
+	// a rename takes its names with it
+	if err := Rename("b", "c"); err != nil {
+		t.Fatal(err)
+	}
+	if c := entry(t, "c/sol"); c.Name != "Sol from B" {
+		t.Fatalf("%+v", c)
+	}
+	if _, ok := settings.Load().ModelNames["b/sol"]; ok {
+		t.Fatal("the old id's name stayed")
+	}
+
+	if err := SetModelName("a/sol", ""); err != nil {
+		t.Fatal(err)
+	}
+	if a := entry(t, "a/sol"); a.Name != "Sol" || a.Default != "" || a.Label() != "Sol · A" {
+		t.Fatalf("%+v", a)
+	}
+	if _, ok := settings.Load().ModelNames["a/sol"]; ok {
+		t.Fatal("a reset name is still kept")
+	}
+	for _, bad := range []string{"sol", "nobody/sol", "group/auto-sol", "a/", "a/no-such-model"} {
+		if err := SetModelName(bad, "x"); err == nil {
+			t.Errorf("%s was named", bad)
+		}
+	}
+}
+
+// Keeping some of a model's reasoning levels offers only those, in the
+// vendor's order, where magpie lists it (and so in the groups it is in);
+// asking for one it hasn't fails, and all of them, or none, is a reset.
+func TestModelEfforts(t *testing.T) {
+	prefsHome(t)
+	if err := SetModelEfforts("a/sol", []string{"high", "low", "high"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := settings.Load().ModelEfforts["a/sol"]; !slices.Equal(got, []string{"low", "high"}) {
+		t.Fatal(got)
+	}
+	if got := entry(t, "a/sol").Efforts; !slices.Equal(got, []string{"low", "high"}) {
+		t.Fatal(got)
+	}
+	if got := entry(t, "b/sol").Efforts; !slices.Equal(got, []string{"low", "medium", "high", "max"}) {
+		t.Fatal(got)
+	}
+	if got := entry(t, "group/auto-sol").Efforts; !slices.Equal(got, []string{"low", "high"}) {
+		t.Fatal(got)
+	}
+	// the vendor is still asked at any level it has
+	if got := (Provider{ID: "a", Catalog: "a"}).Efforts("sol"); len(got) != 4 {
+		t.Fatal(got)
+	}
+	if err := SetModelEfforts("a/sol", []string{"ultra"}); err == nil {
+		t.Fatal("kept a level the model hasn't")
+	}
+	if err := SetModelEfforts("a/sol", []string{"low", "medium", "high", "max"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := settings.Load().ModelEfforts["a/sol"]; ok {
+		t.Fatal("every level kept is still a narrowing")
+	}
+	SetModelEfforts("a/sol", []string{"max"})
+	if err := SetModelEfforts("a/sol", nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := entry(t, "a/sol").Efforts; len(got) != 4 {
+		t.Fatal(got)
+	}
+	// levels kept that the vendor no longer has offer them all
+	if got := effortsKept([]string{"low", "high"}, []string{"max"}); !slices.Equal(got, []string{"low", "high"}) {
+		t.Fatal(got)
+	}
+}

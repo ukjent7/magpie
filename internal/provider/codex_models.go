@@ -196,11 +196,7 @@ func CodexListed() []catalog.Model {
 		if e.Provider.Account != nil && e.Provider.Account.Agent == "codex" {
 			continue
 		}
-		by := e.Provider.Name
-		if e.Group != "" {
-			by = "routing group"
-		}
-		ms = append(ms, catalog.Model{ID: e.ID, Name: e.Name + " · " + by, Efforts: e.Efforts, Images: e.Images, Context: e.Context})
+		ms = append(ms, catalog.Model{ID: e.ID, Name: e.Label(), Efforts: e.Efforts, Images: e.Images, Context: e.Context})
 	}
 	return ms
 }

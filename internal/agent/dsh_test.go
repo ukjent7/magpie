@@ -185,7 +185,7 @@ func TestDshModelLimits(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	s := strings.Join(dshProviderLines(true), "\n")
+	s := strings.Join(dshProviderLines(true, ""), "\n")
 	want := `      - id: "v/see"
         name: "see · V"
         contextWindow: 400000

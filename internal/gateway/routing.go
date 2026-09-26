@@ -11,6 +11,7 @@ package gateway
 // again.
 
 import (
+	"encoding/json"
 	"math"
 	"net/http"
 	"regexp"
@@ -43,8 +44,9 @@ func (u tokenUse) now(t time.Time) float64 {
 	return u.n * math.Exp2(-t.Sub(u.at).Seconds()/usageHalfLife.Seconds())
 }
 
-// served counts what a candidate just answered against it.
-func served(rest string, tokens int) {
+// served counts what a candidate just answered against it; key is what it
+// rests by (restKey).
+func served(rest, key string, tokens int) {
 	if tokens <= 0 {
 		tokens = 1 // it answered, whether or not it said how much
 	}
@@ -55,8 +57,8 @@ func served(rest string, tokens int) {
 	routed.Unlock()
 	// one that answered — tried all the same, or again — rests no longer
 	restingUntil.Lock()
-	delete(restingUntil.m, rest)
-	delete(restingUntil.note, rest)
+	delete(restingUntil.m, key)
+	delete(restingUntil.note, key)
 	restingUntil.Unlock()
 }
 
@@ -119,6 +121,25 @@ type Rest struct {
 	Failures int    `json:"failures,omitempty"` // in a row, for a backoff
 }
 
+// resetsIn is how long until a used-up ChatGPT account is back, as its
+// refusal says: {"error":{"type":"usage_limit_reached","resets_at":<unix>,
+// "resets_in_seconds":<n>}}. Zero when it doesn't say.
+func resetsIn(body []byte, now time.Time) time.Duration {
+	var e struct {
+		Error struct {
+			At int64 `json:"resets_at"`
+			In int64 `json:"resets_in_seconds"`
+		} `json:"error"`
+	}
+	if json.Unmarshal(body, &e) != nil {
+		return 0
+	}
+	if t := time.Unix(e.Error.At, 0); e.Error.At > 0 && t.After(now) {
+		return t.Sub(now)
+	}
+	return time.Duration(max(e.Error.In, 0)) * time.Second
+}
+
 // restAfter sets a failed candidate aside for as long as its failure says.
 func (s *Server) restAfter(c candidate, status int, header http.Header, body []byte) Rest {
 	now := time.Now()
@@ -136,6 +157,8 @@ func (s *Server) restAfter(c candidate, status int, header http.Header, body []b
 			if n, _ := strconv.ParseInt(string(m[1]), 10, 64); time.Unix(n, 0).After(now) {
 				d, r.By = time.Unix(n, 0).Sub(now), "resets"
 			}
+		} else if w := resetsIn(body, now); w > 0 {
+			d, r.By = w, "resets"
 		} else if t := c.full(now); !t.IsZero() {
 			d, r.By = t.Sub(now), "window"
 		}
@@ -160,8 +183,8 @@ func (s *Server) restAfter(c candidate, status int, header http.Header, body []b
 	}
 	r.Until = now.Add(d)
 	restingUntil.Lock()
-	restingUntil.m[c.rest] = r.Until
-	restingUntil.note[c.rest] = r
+	restingUntil.m[c.restKey()] = r.Until
+	restingUntil.note[c.restKey()] = r
 	restingUntil.Unlock()
 	return r
 }
@@ -177,12 +200,18 @@ func (c candidate) full(now time.Time) time.Time {
 
 // keepRetry passes on, with a vendor's error, what it said about when to
 // try again: restAfter reads it to rest the candidate that long, and an
-// agent given the error reads it too.
-func keepRetry(dst, src http.Header) {
+// agent given the error reads it too. When it said so in the error itself
+// (ChatGPT's resets_at), that goes on as Retry-After.
+func keepRetry(dst, src http.Header, body []byte) {
 	for k, vs := range src {
 		l := strings.ToLower(k)
 		if l == "retry-after" || strings.Contains(l, "ratelimit") && strings.Contains(l, "reset") {
 			dst[k] = vs
+		}
+	}
+	if dst.Get("Retry-After") == "" {
+		if d := resetsIn(body, time.Now()); d > 0 {
+			dst.Set("Retry-After", strconv.Itoa(int(d.Seconds())))
 		}
 	}
 }

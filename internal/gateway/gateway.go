@@ -146,6 +146,8 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 	// the magpie serving the gateway, and only it, keeps the saved accounts
 	// signed in, so two never refresh one sign-in at once
 	go provider.KeepLoginsAlive(ctx)
+	// and signs Codex in to its next account when the one it is on is out
+	go provider.KeepCodexOnAnAccountWithRoom(ctx)
 	for _, f := range WhileServing {
 		go f(ctx)
 	}
@@ -406,7 +408,14 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 		call.ResponseBody = capture.body.text()
 		call.ResponseTruncated = capture.body.truncated
 	}
-	p, model, ok := provider.Resolve(call.Model)
+	// a model's id without a provider in it that names a routing group is
+	// the group's, as "group/<id>" is, rather than one provider's that
+	// serves it: the Routing view shows the group it went to
+	asked := call.Model
+	if id, ok := provider.GroupFor(asked); ok {
+		asked = id
+	}
+	p, model, ok := provider.Resolve(asked)
 	if !ok {
 		call.Status, call.Error = 404, "unknown model"
 		msg := fmt.Sprintf("magpie knows no model %q", call.Model)
@@ -422,7 +431,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 	}
 	// a routing group's rules pick the member that goes first, looked at
 	// before any image is taken out of the request: one may be for images
-	g, ms, isGroup := provider.FindGroup(call.Model)
+	g, ms, isGroup := provider.FindGroup(asked)
 	var hit *RuleHit
 	var ruled []provider.Member
 	var ruleAt, words string
@@ -636,7 +645,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 		hw.release()
 		model = c.model
 		if call.Status < 400 {
-			served(c.rest, call.Usage.Input+call.Usage.Output+call.Usage.CacheRead+call.Usage.CacheWrite)
+			served(c.rest, c.restKey(), call.Usage.Input+call.Usage.Output+call.Usage.CacheRead+call.Usage.CacheWrite)
 			answered(stuck, c, aff.Turn, call.Usage.CacheRead)
 			if hit != nil {
 				ruleAnswered(ruleAt, call.Usage)
@@ -788,7 +797,7 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.
 				return res.StatusCode, msg, false
 			}
 		}
-		keepRetry(w.Header(), res.Header)
+		keepRetry(w.Header(), res.Header, b)
 		return writeError(w, proto, res.StatusCode, msg), msg, true
 	}
 	rd, sse := eventStream(res)
@@ -976,7 +985,7 @@ func (s *Server) translate(w http.ResponseWriter, r *http.Request, p provider.Pr
 	if res.StatusCode >= 400 {
 		b, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
 		msg := p.Name + ": " + provider.APIError(b, res.Status)
-		keepRetry(w.Header(), res.Header)
+		keepRetry(w.Header(), res.Header, b)
 		return writeError(w, from, res.StatusCode, msg), msg
 	}
 	dec := decoder(actual)

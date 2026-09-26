@@ -51,6 +51,9 @@ func updateCmd(args []string) error {
 		fmt.Println(green.Render("✓"), "updated", tilde(app), "to", rel.Version, muted.Render("· quit and reopen magpie to use it"))
 		return nil
 	}
+	if exe, err := update.Executable(); err == nil && update.Homebrew(exe) {
+		return fmt.Errorf("this magpie was installed with Homebrew; update it with: brew upgrade magpie")
+	}
 	fmt.Println(muted.Render("  downloading " + update.BinaryAsset() + " …"))
 	if err := update.ReplaceBinary(ctx, rel); err != nil {
 		return err

@@ -16,7 +16,8 @@ import (
 //	{"provider":{"magpie":{"name":"magpie","kind":"anthropic",
 //	  "options":{"apiKey":"magpie","baseURL":"http://127.0.0.1:3425"},
 //	  "enabled":true,"source":"custom",
-//	  "models":{"<id>":{"name":…,"limit":{"context":…},"modalities":{…}}}}}}
+//	  "models":{"<id>":{"name":…,"limit":{"context":…,"output":…},"modalities":{…},
+//	    "reasoning":{"enabled":true,"variants":[…],"defaultVariant":…}}}}}}
 //
 // An anthropic provider is asked at baseURL + /v1/messages. The model is
 // picked per task in ZCode's own picker and kept in its window, not in a
@@ -36,7 +37,8 @@ import (
 //	      "personalModelIds":[…],"modelOrder":[…]}}]},
 //	  "modelConfigRules":{"providerModelRules":[{"providerId":"magpie",
 //	    "modelId":…,"config":{"properties":{"contextWindow":…,
-//	      "inputFormat":{"supportsImage":…}}}}],
+//	      "inputFormat":{"supportsImage":…}},
+//	      "optionSpecs":{"maxOutputTokens":{"max":…},"reasoningLevel":{"values":[…]}}}}],
 //	    "manualProviderModelRules":[…]}}}
 //
 // magpie writes both files, so an older ZCode sees its models too. A model
@@ -111,8 +113,17 @@ func zcodeProviderJSON(path string) any {
 		if m.Images {
 			in = append(in, "image")
 		}
-		ms[m.ID] = map[string]any{"name": m.Name, "limit": map[string]any{"context": window},
+		limit := map[string]any{"context": window}
+		// without it ZCode caps every reply at 32000 tokens
+		if out := zcodeOutput(m.Output); out > 0 {
+			limit["output"] = out
+		}
+		e := map[string]any{"name": m.Name, "limit": limit,
 			"modalities": map[string]any{"input": in, "output": []string{"text"}}}
+		if levels := zcodeLevels(m.Efforts); levels != nil {
+			e["reasoning"] = map[string]any{"enabled": true, "variants": levels, "defaultVariant": zcodeDefaultLevel(levels)}
+		}
+		ms[m.ID] = e
 	}
 	on := true
 	if v, ok := edit.GetJSON(path, "provider."+magpieID+".enabled"); ok && v == "false" {
@@ -120,6 +131,40 @@ func zcodeProviderJSON(path string) any {
 	}
 	return map[string]any{"name": "magpie", "kind": "anthropic", "enabled": on, "source": "custom",
 		"options": map[string]any{"apiKey": gateway.Token, "baseURL": gateway.URL()}, "models": ms}
+}
+
+// zcodeMaxOutput caps a model's output limit: some vendors report their
+// context window there (grok's 500000), and ZCode would offer that much.
+const zcodeMaxOutput = 128000
+
+func zcodeOutput(n int) int { return min(n, zcodeMaxOutput) }
+
+// zcodeLevels are a model's reasoning levels as ZCode names them: "disabled"
+// turns thinking off, any other is sent as the effort.
+func zcodeLevels(efforts []string) []string {
+	var out []string
+	for _, e := range efforts {
+		if e == "none" {
+			e = "disabled"
+		}
+		if !slices.Contains(out, e) {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// zcodeDefaultLevel is medium where the model has it, else its middle level
+// that thinks.
+func zcodeDefaultLevel(levels []string) string {
+	if slices.Contains(levels, "medium") {
+		return "medium"
+	}
+	on := slices.DeleteFunc(slices.Clone(levels), func(l string) bool { return l == "disabled" })
+	if len(on) == 0 {
+		return levels[0]
+	}
+	return on[len(on)/2]
 }
 
 // zcodeRuled reports whether provider_config.json has magpie's provider.
@@ -209,8 +254,20 @@ func zcodeRules(path string, on bool) error {
 			if m.Context > 0 {
 				props["contextWindow"] = m.Context
 			}
-			models = append(models, map[string]any{"providerId": magpieID, "modelId": m.ID,
-				"config": map[string]any{"properties": props}})
+			config := map[string]any{"properties": props}
+			// ZCode's own rules give a model it doesn't know 32000 tokens
+			// out and thinking only on or off
+			specs := map[string]any{}
+			if out := zcodeOutput(m.Output); out > 0 {
+				specs["maxOutputTokens"] = map[string]any{"max": out}
+			}
+			if levels := zcodeLevels(m.Efforts); levels != nil {
+				specs["reasoningLevel"] = map[string]any{"values": levels}
+			}
+			if len(specs) > 0 {
+				config["optionSpecs"] = specs
+			}
+			models = append(models, map[string]any{"providerId": magpieID, "modelId": m.ID, "config": config})
 		}
 		if ids == nil {
 			ids = []string{}

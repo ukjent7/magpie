@@ -83,12 +83,31 @@ func (u *updater) check() {
 	}
 }
 
-// begin marks a check as under way, unless one is or there's nothing left
-// to do.
+// recheck asks the feed again before a restart into what was downloaded,
+// so a newer version out since is the one restarted into. It waits for
+// the feed a little while; a newer version is then downloading.
+func (u *updater) recheck() {
+	if u.begin() {
+		go u.run()
+	}
+	for range 50 {
+		u.mu.Lock()
+		s := u.state
+		u.mu.Unlock()
+		if s != "checking" {
+			return
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+}
+
+// begin marks a check as under way, unless one is. One with a version
+// already downloaded checks too: a newer one out since takes its place,
+// so the restart goes straight to the latest.
 func (u *updater) begin() bool {
 	u.mu.Lock()
 	defer u.mu.Unlock()
-	if u.state == "checking" || u.state == "downloading" || u.state == "ready" {
+	if u.state == "checking" || u.state == "downloading" {
 		return false
 	}
 	u.state, u.err, u.retry = "checking", "", false
@@ -101,6 +120,10 @@ func (u *updater) run() {
 	rel, err := update.Latest(ctx)
 	u.mu.Lock()
 	defer u.mu.Unlock()
+	if u.staged != "" && u.latest != nil && (err != nil || !update.Newer(rel.Version, u.latest.Version)) {
+		u.state = "ready" // what was downloaded is still the latest
+		return
+	}
 	if err != nil {
 		u.state, u.err = "error", err.Error()
 		return
@@ -124,7 +147,9 @@ func (u *updater) run() {
 		}
 		return
 	}
-	u.state, u.done, u.total = "downloading", 0, 0
+	// an older download is replaced by this one: until it is in, there is
+	// nothing to install
+	u.state, u.done, u.total, u.staged = "downloading", 0, 0, ""
 	u.mu.Unlock()
 	ctx = update.WithProgress(ctx, func(done, total int64) {
 		u.mu.Lock()
@@ -200,6 +225,9 @@ func (u *updater) json() updateJSON {
 	u.mu.Lock()
 	defer u.mu.Unlock()
 	j := updateJSON{State: u.state, Current: Version, Error: u.err, Retry: u.retry}
+	if u.state == "checking" && u.staged != "" {
+		j.State = "ready" // what was downloaded can still be restarted into
+	}
 	if u.state == "available" {
 		j.Stuck = u.stuck
 	}
@@ -224,6 +252,9 @@ func updateRoutes(mux *http.ServeMux, w Windows) {
 	// downloads it again, and the page restarts once it's in. Only an app
 	// that can't replace itself is sent to the release page.
 	mux.HandleFunc("POST /api/update/install", func(rw http.ResponseWriter, r *http.Request) {
+		if updates.json().State == "ready" {
+			updates.recheck()
+		}
 		switch j := updates.json(); {
 		case j.State == "ready":
 			if restartToUpdate() {

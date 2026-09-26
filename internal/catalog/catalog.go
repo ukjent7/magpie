@@ -16,6 +16,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/yetone/magpie/internal/filememo"
 )
 
 // Model is one entry the picker can offer.
@@ -479,10 +481,11 @@ func Providers() []string {
 // Codex CLI writes; there is no compiled-in list to fall back to.
 func Codex() []Model {
 	home, _ := os.UserHomeDir()
-	b, err := os.ReadFile(filepath.Join(home, ".codex", "models_cache.json"))
-	if err != nil {
-		return nil
-	}
+	out, _ := filememo.Read("codex models", filepath.Join(home, ".codex", "models_cache.json"), parseCodex)
+	return slices.Clone(out)
+}
+
+func parseCodex(b []byte) ([]Model, error) {
 	var cache struct {
 		Models []struct {
 			Slug        string   `json:"slug"`
@@ -495,8 +498,8 @@ func Codex() []Model {
 			} `json:"supported_reasoning_levels"`
 		} `json:"models"`
 	}
-	if json.Unmarshal(b, &cache) != nil || len(cache.Models) == 0 {
-		return nil
+	if err := json.Unmarshal(b, &cache); err != nil || len(cache.Models) == 0 {
+		return nil, err
 	}
 	sort.SliceStable(cache.Models, func(i, j int) bool { return cache.Models[i].Priority < cache.Models[j].Priority })
 	var out []Model
@@ -513,7 +516,7 @@ func Codex() []Model {
 		}
 		out = append(out, mm)
 	}
-	return out
+	return out, nil
 }
 
 // Efforts returns the reasoning levels a model supports, if known.

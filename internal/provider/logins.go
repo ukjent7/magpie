@@ -19,6 +19,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/yetone/magpie/internal/filememo"
 )
 
 // Login is a remembered subscription account, without its secrets.
@@ -237,6 +239,22 @@ func readClaudeProfile() (map[string]any, error) {
 	return m, nil
 }
 
+// claudeProfileAccount is the account ~/.claude.json says Claude Code is
+// signed in to, read again only when the file changes: it is large, and a
+// page asks for it for every provider it lists. It must not be changed.
+func claudeProfileAccount() (map[string]any, bool) {
+	acct, err := filememo.Read("claude account", claudeProfilePath(), func(b []byte) (map[string]any, error) {
+		var m struct {
+			OAuthAccount map[string]any `json:"oauthAccount"`
+		}
+		d := json.NewDecoder(bytes.NewReader(b))
+		d.UseNumber()
+		err := d.Decode(&m)
+		return m.OAuthAccount, err
+	})
+	return acct, err == nil && acct != nil
+}
+
 // savedButSignedOut is, for each agent with accounts saved in magpie that
 // isn't signed in where magpie looks, why none of them is offered: they
 // are served beside the account the agent is signed in to, and there is
@@ -306,12 +324,10 @@ func liveLogin(agent string) (savedLogin, bool) {
 			return savedLogin{}, false
 		}
 		l := savedLogin{Agent: agent, Plan: c.OAuth.SubscriptionType, Auth: b}
-		if m, err := readClaudeProfile(); err == nil {
-			if acct, ok := m["oauthAccount"].(map[string]any); ok {
-				email, _ := acct["emailAddress"].(string)
-				l.User = claudeUser(email, l.Plan, acct)
-				l.Profile, _ = json.Marshal(acct)
-			}
+		if acct, ok := claudeProfileAccount(); ok {
+			email, _ := acct["emailAddress"].(string)
+			l.User = claudeUser(email, l.Plan, acct)
+			l.Profile, _ = json.Marshal(acct)
 		}
 		if l.User == "" {
 			l.User = user

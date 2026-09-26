@@ -8,6 +8,8 @@ package agent
 // at the first "/". Command Code still wants its own sign-in for these.
 
 import (
+	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -91,6 +93,47 @@ func commandCode(home string) *Agent {
 				}
 				return append(out, viaMagpie("commandcode", magpieID+"/")...)
 			},
+		}, {
+			// settings.json's reasoningEffort keeps an effort for each model
+			// (Command Code's /effort saves it); this is the current model's
+			Key: "effort", Label: "effort",
+			Get: func() string { return ccEffortMap(path)[get("model")] },
+			Set: func(v string) error {
+				model := get("model")
+				if model == "" {
+					return fmt.Errorf("pick Command Code's model first; it keeps an effort for each model")
+				}
+				efforts := ccEffortMap(path)
+				if v == "" {
+					delete(efforts, model)
+				} else {
+					efforts[model] = v
+				}
+				if len(efforts) == 0 {
+					return edit.DelJSON(path, "reasoningEffort")
+				}
+				// written whole, as model ids hold dots
+				return edit.SetJSON(path, edit.KV{Path: "reasoningEffort", Value: efforts})
+			},
+			Options: func(cur map[string]string) []Option {
+				if ref, ok := strings.CutPrefix(cur["model"], magpieID+"/"); ok {
+					for _, m := range magpieModels("commandcode") {
+						if m.ID != ref {
+							continue
+						}
+						var efforts []string
+						for _, x := range ccEfforts {
+							if slices.Contains(m.Efforts, x) {
+								efforts = append(efforts, x)
+							}
+						}
+						if len(efforts) > 0 {
+							return static(efforts...)
+						}
+					}
+				}
+				return static(ccEfforts...)
+			},
 		}},
 	}
 }
@@ -114,4 +157,25 @@ func ccProviderJSON() any {
 		ms[m.ID] = e
 	}
 	return map[string]any{"name": "magpie", "api": "openai-completions", "baseURL": gatewayV1(), "apiKey": false, "models": ms}
+}
+
+// ccEffortMap is settings.json's reasoningEffort, model id to effort.
+func ccEffortMap(path string) map[string]string {
+	out := map[string]string{}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return out
+	}
+	var c struct {
+		Efforts map[string]any `json:"reasoningEffort"`
+	}
+	if json.Unmarshal(b, &c) != nil {
+		return out
+	}
+	for k, v := range c.Efforts {
+		if s, ok := v.(string); ok {
+			out[k] = s
+		}
+	}
+	return out
 }

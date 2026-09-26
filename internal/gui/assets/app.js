@@ -31,6 +31,7 @@ let usage = null;   // last usage summary
 let pick = null; // { agent, field, options, items, cursor, anchor }
 let editing = null; // provider id being edited; { preset } or { custom: true } for a new one
 let draft = null; // the editor's working copy
+let naming = null; // the provider whose models' names and levels are open in its editor
 let adding = false; // the preset sheet is open
 let importing = null; // a magpie://import link waiting for a yes: { provider, error, replaces }
 let importingApps = null; // the Import from other apps dialog: { sources, picks }
@@ -722,9 +723,12 @@ async function renderUpdateBadge() {
   const restart = async () => {
     b.classList.add("busy");
     label.textContent = t("Restarting…");
-    // an answer means it didn't: the password prompt dismissed, or the swap failed
-    if (await api("update/install", {}).catch(() => ({}))) {
-      b.classList.remove("busy");
+    // an answer means it didn't: the password prompt dismissed, the swap
+    // failed, or a newer version is out and downloading first
+    const a = await api("update/install", {}).catch(() => ({}));
+    if (a) {
+      if (["checking", "downloading"].includes(a.state)) b.dataset.pulling = "1";
+      else b.classList.remove("busy");
       renderUpdateBadge();
     }
   };
@@ -2152,11 +2156,30 @@ function renderEditor(p, presetID) {
     wrap.append(name, hint);
     ed.append(el("label", "", t("Name")), wrap);
   }
+  // an added provider's id can change: its models are picked by it, and
+  // the agents and routing groups on them move to the new one
+  const idField = () => {
+    const idIn = input(draft.id, p.id);
+    const hint = el("div", "hint");
+    const idOf = () => slug(draft.id) || p.id;
+    const show = () => {
+      hint.textContent = t("Agents pick its models as {id}", { id: idOf() + "/…" }) +
+        (idOf() !== p.id ? " · " + t("agents and routing groups on {id} move to it", { id: p.id + "/…" }) : "");
+    };
+    idIn.oninput = () => { draft.id = idIn.value; show(); };
+    idIn.onblur = () => { draft.id = idIn.value = idOf(); show(); };
+    show();
+    const w = el("div");
+    w.append(idIn, hint);
+    ed.append(el("label", "", t("ID")), w);
+  };
+  if (p && !p.account && !custom) idField();
   let fillEndpoints = () => {};
   if (custom) {
     name = input(draft.name, t("e.g. My Relay"));
     name.oninput = () => { draft.name = name.value; if (isNew) draft.id = slug(name.value); };
     ed.append(...field(t("Name"), name));
+    if (p) idField();
 
     // the base URL is the one the chosen protocol is asked at; a vendor
     // that serves only the Responses API is added (and tested) with that
@@ -2374,7 +2397,7 @@ function renderEditor(p, presetID) {
   const saveBtn = el("button", "text primary", t(isNew ? "Add" : "Save"));
   const save = () => {
     // new: an Add never replaces a provider that has the id already
-    const body = { id: draft.id, name: draft.name, preset: draft.preset, key: draft.key || "", chat: draft.chat, responses: draft.responses, anthropic: draft.anthropic, catalog: draft.catalog, models: p ? draft.chosen : draft.extra, headers: headersOf(draft.headers), new: isNew };
+    const body = { id: p ? slug(draft.id) || p.id : draft.id, from: p?.id, name: draft.name, preset: draft.preset, key: draft.key || "", chat: draft.chat, responses: draft.responses, anthropic: draft.anthropic, catalog: draft.catalog, models: p ? draft.chosen : draft.extra, headers: headersOf(draft.headers), new: isNew };
     if (custom) { body.icon = draft.icon || "generic"; body.balanceURL = (draft.balanceURL || "").trim(); body.balancePath = (draft.balancePath || "").trim(); body.modelsURL = (draft.modelsURL || "").trim(); }
     if (p) { body.fallback = draft.fallback; body.unlisted = draft.unlisted; }
     const cx = parseContexts(draft.contexts || "");
@@ -2746,6 +2769,7 @@ function renderEndpoints(p, src) {
 function renderModels(p) {
   const box = el("div", "models");
   const chips = el("div", "mchips");
+  const names = el("div", "mnames");
   const q = p.models.length > 24 ? input("", t("filter {n} models…", { n: p.models.length })) : null;
   const draw = () => {
     chips.replaceChildren();
@@ -2753,10 +2777,11 @@ function renderModels(p) {
     let shown = 0;
     for (const m of p.models) {
       const on = draft.chosen.includes(m.id);
-      if (f && !m.id.toLowerCase().includes(f) && !(m.name || "").toLowerCase().includes(f) && !on) continue;
+      if (f && !m.id.toLowerCase().includes(f) && !(m.name || "").toLowerCase().includes(f) && !(m.default || "").toLowerCase().includes(f) && !on) continue;
       const c = el("button", "mchip" + (on ? " on" : ""));
       c.append(el("span", "", m.name && m.name !== m.id ? m.name : m.id));
-      if (m.name && m.name !== m.id) c.title = m.id;
+      if (m.default) c.title = `${m.id} · ${m.default}`;
+      else if (m.name && m.name !== m.id) c.title = m.id;
       c.onclick = () => { draft.chosen = on ? draft.chosen.filter((x) => x !== m.id) : [...draft.chosen, m.id]; draw(); };
       chips.append(c);
       if (++shown >= 80 && !f) { chips.append(el("span", "hint", t("… {n} more, filter to find them", { n: p.models.length - shown }))); break; }
@@ -2770,11 +2795,66 @@ function renderModels(p) {
       chips.append(c);
     }
     if (!p.models.length && !draft.chosen.length) chips.append(el("span", "hint", t("The vendor's list is empty. Refresh, or type a model id.")));
+    drawNames();
     why.textContent = draft.unlisted ? t("Agents don't see them: only the routing groups they are in use them.")
       : t(draft.chosen.length ? "Agents see the models picked." : "None picked: agents see the vendor's list, up to {n}.", { n: 24 });
   };
+  // the names and reasoning levels of the models agents see: saved at once,
+  // apart from the editor's Save, as they change nothing but what is shown
+  const drawNames = () => {
+    names.replaceChildren();
+    names.hidden = naming !== p.id;
+    if (names.hidden) return;
+    const ids = draft.chosen.length ? draft.chosen : p.models.filter((m) => m.on).map((m) => m.id);
+    if (!ids.length) { names.append(el("span", "hint", t("Pick a model first."))); return; }
+    for (const id of ids) {
+      const m = p.models.find((x) => x.id === id) || { id, name: id };
+      const own = m.default || m.name || m.id;
+      const row = el("div", "mname");
+      const name = input(m.default ? m.name : "", own);
+      name.title = t("The name agents and magpie show for {id}; empty for its own", { id: m.id });
+      const save = () => {
+        const v = name.value.trim();
+        if (v === (m.default ? m.name : "")) return;
+        accountAction("provider/name", { id: p.id, model: m.id, modelName: v }, v ? t("{id} is called {name}", { id: m.id, name: v }) : t("{id} has its own name again", { id: m.id }));
+      };
+      name.onchange = save;
+      name.onkeydown = (e) => { e.stopPropagation(); if (e.key === "Enter") name.blur(); else if (e.key === "Escape") { name.value = m.default ? m.name : ""; name.blur(); } };
+      const who = el("div", "mwho");
+      who.append(name, el("code", "", m.id));
+      row.append(who);
+      const levels = m.efforts || [];
+      if (levels.length > 1) {
+        const lv = el("div", "mlevels");
+        lv.title = t("Reasoning levels agents are offered");
+        const kept = m.kept?.length ? m.kept : levels;
+        for (const l of levels) {
+          const [tk, cb] = tick(t(l), kept.includes(l));
+          cb.onchange = () => {
+            const next = levels.filter((x) => x === l ? cb.checked : kept.includes(x));
+            if (!next.length) { cb.checked = true; status(t("Keep at least one level"), "err"); return; }
+            accountAction("provider/efforts", { id: p.id, model: m.id, efforts: next.length === levels.length ? [] : next }, t("{id}: {levels}", { id: m.id, levels: next.map((x) => t(x)).join(", ") }));
+          };
+          lv.append(tk);
+        }
+        row.append(lv);
+      }
+      if (m.default || m.kept?.length) {
+        const reset = el("button", "text action", t("Restore default"));
+        reset.title = t("Its own name and every reasoning level it has");
+        reset.onclick = async () => {
+          reset.classList.add("busy");
+          try { if (m.default) await api("provider/name", { id: p.id, model: m.id, modelName: "" }); }
+          catch (e) { status(e.message, "err"); reset.classList.remove("busy"); return; }
+          accountAction("provider/efforts", { id: p.id, model: m.id, efforts: [] }, t("{id} is as its provider has it again", { id: m.id }));
+        };
+        row.append(reset);
+      }
+      names.append(row);
+    }
+  };
   if (q) { q.oninput = draw; box.append(q); }
-  box.append(chips);
+  box.append(chips, names);
   const foot = el("div", "mfoot");
   const add = input("", t("add a model id…"));
   add.onkeydown = (e) => {
@@ -2796,7 +2876,10 @@ function renderModels(p) {
       renderProviders();
     } catch (e) { status(e.message, "err"); refresh.classList.remove("busy"); }
   };
-  foot.append(add, refresh);
+  const rename = el("button", "text action" + (naming === p.id ? " on" : ""), t("Names & levels"));
+  rename.title = t("Rename the models agents see, or offer fewer of their reasoning levels");
+  rename.onclick = () => { naming = naming === p.id ? null : p.id; rename.classList.toggle("on", naming === p.id); drawNames(); };
+  foot.append(add, refresh, rename);
   if (p.fetched) foot.append(el("span", "hint", t("vendor list · {when}", { when: p.fetched })));
   // a signed-in account's list, until the vendor gives one, is magpie's own
   else if (p.models.length) foot.append(el("span", "hint", t(p.account ? "magpie's list · Refresh asks the vendor" : "from models.dev · Refresh asks the vendor")));
@@ -3143,15 +3226,15 @@ function accountQuota(data, user) {
     return line;
   }
   // the two rolling windows fit a line; the per-model ones go in its tooltip
-  line.title = q.windows.slice(2).map((w) => t(w.name) + " " + (w.display || t("{n} used", { n: Math.round(w.used) + "%" }))).join(" · ");
+  line.title = q.windows.slice(2).map((w) => t(w.name) + " " + quotaText(w)).join(" · ");
   for (const w of q.windows.slice(0, 2)) {
     const used = Math.max(0, Math.min(100, w.used));
     const m = el("span", "aq-w" + (used >= 90 ? " full" : ""));
     const track = el("span", "aq-track");
     const fill = el("i");
-    fill.style.width = used + "%";
+    fill.style.width = quotaFill(w) + "%";
     track.append(fill);
-    m.append(el("span", "aq-n", t(w.name)), track, el("b", "", w.display || t("{n} used", { n: Math.round(w.used) + "%" })));
+    m.append(el("span", "aq-n", t(w.name)), track, el("b", "", quotaText(w)));
     if (w.resetsAt) {
       const at = new Date(w.resetsAt);
       m.title = t("Resets {when}", { when: at.toLocaleString() });
@@ -3160,6 +3243,26 @@ function accountQuota(data, user) {
     line.append(m);
   }
   return line;
+}
+
+// A window reads as how much of it is used, or — as the vendors' own apps
+// show it — how much is left, the bar filling with that; one choice for
+// every meter, kept for next time. The vendor's own count, where it gives
+// one, stands before the percentage.
+let quotaLeft = false;
+try { quotaLeft = localStorage.getItem("magpie.quotaLeft") === "1"; } catch {}
+function quotaFill(w) {
+  const used = Math.round(Math.max(0, Math.min(100, w.used)));
+  return quotaLeft ? 100 - used : used;
+}
+function quotaText(w) {
+  const pct = t(quotaLeft ? "{n} left" : "{n} used", { n: quotaFill(w) + "%" });
+  return w.display ? w.display + " · " + pct : pct;
+}
+function setQuotaLeft(on) {
+  quotaLeft = on;
+  try { localStorage.setItem("magpie.quotaLeft", on ? "1" : "0"); } catch {}
+  renderQuotas();
 }
 
 function untilText(at) {
@@ -3498,6 +3601,19 @@ const tokensOf = (t) => t.input + t.output;
 function renderQuotas() {
   const subscriptions = $("#subscriptionUsage");
   subscriptions.replaceChildren();
+  // used or left: only there when some card has a window to read
+  const mode = $("#quotaMode");
+  mode.hidden = !quotas?.some((q) => !q.balance && !q.error && q.windows?.length);
+  if (!mode.hidden) {
+    mode.replaceChildren();
+    for (const [left, name] of [[false, "Used"], [true, "Left"]]) {
+      const b = el("button", "opt" + (left === quotaLeft ? " on" : ""), t(name));
+      b.title = t(left ? "Show how much of each window is left" : "Show how much of each window is used");
+      b.onclick = () => { if (left !== quotaLeft) setQuotaLeft(left); };
+      mode.append(b);
+    }
+    slide(mode, "quotaMode");
+  }
   if (!quotas) {
     subscriptions.hidden = false;
     for (let i = 0; i < 2; i++) {
@@ -3552,10 +3668,13 @@ function quotaWindows(sub) {
   for (const w of sub.windows) {
     const quota = el("div", "quota");
     const labels = el("div", "quota-labels");
-    labels.append(el("span", "", t(w.name)), el("b", "", w.display || t("{n} used", { n: `${Math.round(w.used)}%` })));
+    const n = el("button", "quota-n", quotaText(w));
+    n.title = t(quotaLeft ? "Show how much of each window is used" : "Show how much of each window is left");
+    n.onclick = () => setQuotaLeft(!quotaLeft);
+    labels.append(el("span", "", t(w.name)), n);
     const track = el("div", "quota-track");
     const fill = el("i");
-    fill.style.width = `${Math.max(0, Math.min(100, w.used))}%`;
+    fill.style.width = `${quotaFill(w)}%`;
     track.append(fill);
     quota.append(labels, track);
     if (w.resetsAt) quota.title = t("Resets {when}", { when: new Date(w.resetsAt).toLocaleString() });

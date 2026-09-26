@@ -49,6 +49,14 @@ type Settings struct {
 	// families (the tag a provider or group is given), provider ids and
 	// group ids its lists hold. An agent it doesn't name is shown them all.
 	Visible map[string][]string `json:"visible,omitempty"`
+	// ModelNames are the names the user gave models, by "<provider
+	// id>/<model id>": agents, the gateway's model list and magpie itself
+	// show them for the vendor's (see provider.SetModelName).
+	ModelNames map[string]string `json:"modelNames,omitempty"`
+	// ModelEfforts are the reasoning levels the user keeps of a model's,
+	// by "<provider id>/<model id>": the lists magpie hands out offer only
+	// those (see provider.SetModelEfforts).
+	ModelEfforts map[string][]string `json:"modelEfforts,omitempty"`
 	// The main window's size when it was last resized, width and height,
 	// so it opens at it again after a restart.
 	Window []int `json:"window,omitempty"`

@@ -1,6 +1,7 @@
 package gui
 
 import (
+	"cmp"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -22,7 +23,9 @@ import (
 
 type modelJSON struct {
 	ID      string   `json:"id"`
-	Name    string   `json:"name"`
+	Name    string   `json:"name"`              // the user's name for it, if they gave one
+	Default string   `json:"default,omitempty"` // its own name, when the user gave it another
+	Kept    []string `json:"kept,omitempty"`    // the reasoning levels the user keeps of Efforts, when not all
 	Efforts []string `json:"efforts,omitempty"`
 	On      bool     `json:"on"` // exposed to agents
 }
@@ -56,16 +59,16 @@ type providerJSON struct {
 		Optional bool   `json:"optional"`
 	} `json:"key"`
 	Ready     bool               `json:"ready"`
-	Chosen    []string           `json:"chosen"`   // the user's explicit picks, if any
-	Fallback  []string           `json:"fallback"` // where requests go when this one can't take them
-	Routing   string             `json:"routing"`  // how requests spread over its keys or accounts
-	Affinity  string             `json:"affinity"` // how long a conversation stays with who answered it
-	Models    []modelJSON        `json:"models"`   // everything the vendor lists, exposed ones flagged
-	Exposed   int                `json:"exposed"`  // how many reach the agents
-	Unlisted  bool               `json:"unlisted"` // its models serve only through routing groups
+	Chosen    []string           `json:"chosen"`             // the user's explicit picks, if any
+	Fallback  []string           `json:"fallback"`           // where requests go when this one can't take them
+	Routing   string             `json:"routing"`            // how requests spread over its keys or accounts
+	Affinity  string             `json:"affinity"`           // how long a conversation stays with who answered it
+	Models    []modelJSON        `json:"models"`             // everything the vendor lists, exposed ones flagged
+	Exposed   int                `json:"exposed"`            // how many reach the agents
+	Unlisted  bool               `json:"unlisted"`           // its models serve only through routing groups
 	Contexts  map[string]int     `json:"contexts,omitempty"` // the windows the user set, "*" for all its models
-	Fetched   string             `json:"fetched"`  // "3h ago" when the list came from the vendor
-	Agents    []providerAgent    `json:"agents"`   // detected agents, current ones flagged
+	Fetched   string             `json:"fetched"`            // "3h ago" when the list came from the vendor
+	Agents    []providerAgent    `json:"agents"`             // detected agents, current ones flagged
 	Sponsored bool               `json:"sponsored"`
 	KeyList   []provider.KeyInfo `json:"keyList"`           // its keys, in the order requests try them
 	Account   *accountJSON       `json:"account,omitempty"` // a signed-in agent, see provider.Account
@@ -124,7 +127,6 @@ type providersJSON struct {
 	Gateway   gatewayJSON    `json:"gateway"`
 }
 
-// currentProvider reads which provider (and model) an agent is routed to now.
 // agentModel is the model an agent is on, as magpie's catalog names it.
 func agentModel(a *agent.Agent) string {
 	if len(a.Fields) == 0 {
@@ -133,20 +135,34 @@ func agentModel(a *agent.Agent) string {
 	return strings.TrimPrefix(a.Fields[0].Get(), "magpie/")
 }
 
-func currentProvider(a *agent.Agent) (string, string) {
-	v := agentModel(a)
-	if strings.HasPrefix(v, provider.GroupPrefix) {
-		return "", "" // a routing group: no one provider
-	}
-	if pid, model, ok := strings.Cut(v, "/"); ok {
-		if _, err := provider.Find(pid); err == nil {
-			return pid, model
-		}
-	}
-	return "", ""
+// agentUse is what an agent is on now: read once for the page, not again
+// for each provider (reading it may ask the agent itself, as Alma's does).
+type agentUse struct {
+	*agent.Agent
+	pid, model string
+	group      provider.Group
+	members    []provider.Member
+	inGroup    bool
 }
 
-func providerInfo(p provider.Provider, agents []*agent.Agent) providerJSON {
+func agentUses(agents []*agent.Agent, findGroup func(string) (provider.Group, []provider.Member, bool)) []agentUse {
+	out := make([]agentUse, 0, len(agents))
+	for _, a := range agents {
+		u := agentUse{Agent: a}
+		v := agentModel(a)
+		if strings.HasPrefix(v, provider.GroupPrefix) {
+			u.group, u.members, u.inGroup = findGroup(v)
+		} else if pid, model, ok := strings.Cut(v, "/"); ok {
+			if _, err := provider.Find(pid); err == nil {
+				u.pid, u.model = pid, model
+			}
+		}
+		out = append(out, u)
+	}
+	return out
+}
+
+func providerInfo(p provider.Provider, agents []agentUse) providerJSON {
 	out := providerJSON{
 		ID: p.ID, Name: p.Name, Icon: p.Icon, Preset: p.Preset, Host: p.Host(),
 		Chat: p.Chat, Responses: p.Responses, Anthropic: p.Anthropic,
@@ -192,14 +208,26 @@ func providerInfo(p provider.Provider, agents []*agent.Agent) providerJSON {
 		exposed[m.ID] = true
 	}
 	seen := map[string]bool{}
+	names, kept := p.ModelNames(), p.ModelEfforts()
+	named := func(m catalog.Model, on bool) modelJSON {
+		j := modelJSON{ID: m.ID, Name: m.Name, Efforts: provider.EffortsOf(m), On: on}
+		if n, ok := names[m.ID]; ok {
+			j.Default = cmp.Or(m.Name, m.ID)
+			j.Name = n
+		}
+		if k, ok := kept[m.ID]; ok {
+			j.Kept = slices.DeleteFunc(slices.Clone(j.Efforts), func(e string) bool { return !slices.Contains(k, e) })
+		}
+		return j
+	}
 	for _, m := range p.Available() {
 		seen[m.ID] = true
-		out.Models = append(out.Models, modelJSON{ID: m.ID, Name: m.Name, Efforts: m.Efforts, On: exposed[m.ID]})
+		out.Models = append(out.Models, named(m, exposed[m.ID]))
 	}
 	// picks the vendor list does not know go first, so they are visible
 	for _, m := range p.Exposed() {
 		if !seen[m.ID] {
-			out.Models = append([]modelJSON{{ID: m.ID, Name: m.Name, Efforts: m.Efforts, On: true}}, out.Models...)
+			out.Models = append([]modelJSON{named(m, true)}, out.Models...)
 		}
 	}
 	out.Exposed = len(exposed)
@@ -207,12 +235,11 @@ func providerInfo(p provider.Provider, agents []*agent.Agent) providerJSON {
 		out.Fetched = ago(t)
 	}
 	for _, a := range agents {
-		pid, model := currentProvider(a)
-		pa := providerAgent{ID: a.ID, Name: a.Name, Icon: a.Icon, Current: pid == p.ID, Model: model}
-		if g, ms, ok := provider.FindGroup(agentModel(a)); ok {
-			for _, m := range ms {
+		pa := providerAgent{ID: a.ID, Name: a.Name, Icon: a.Icon, Current: a.pid == p.ID, Model: a.model}
+		if a.inGroup {
+			for _, m := range a.members {
 				if m.Provider.ID == p.ID {
-					pa.Current, pa.Model, pa.Group = true, m.Model, g.Name
+					pa.Current, pa.Model, pa.Group = true, m.Model, a.group.Name
 					break
 				}
 			}
@@ -232,11 +259,13 @@ func providersState() providersJSON {
 		}
 		s.Excluded = append(s.Excluded, e)
 	}
+	findGroup := provider.GroupFinder()
+	uses := agentUses(agents, findGroup)
 	have := map[string]bool{}
 	for _, p := range provider.All() {
 		// a preset is added once any provider is its, whatever its id
 		have[p.ID], have[p.Preset] = true, true
-		s.Providers = append(s.Providers, providerInfo(p, agents))
+		s.Providers = append(s.Providers, providerInfo(p, uses))
 	}
 	for _, pr := range provider.Presets() {
 		s.Presets = append(s.Presets, presetJSON{PresetDef: pr, Added: have[pr.ID]})
@@ -248,7 +277,7 @@ func providersState() providersJSON {
 			continue
 		}
 		g := gwGroupJSON{ID: e.ID, Name: e.Name, Icons: e.Icons}
-		if _, ms, ok := provider.FindGroup(e.ID); ok {
+		if _, ms, ok := findGroup(e.ID); ok {
 			for _, m := range ms {
 				if !slices.Contains(g.Providers, m.Provider.Name) {
 					g.Providers = append(g.Providers, m.Provider.Name)
@@ -336,6 +365,15 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 			// ClearBalanceToken drops the saved balance token, which a
 			// blank one in the form otherwise keeps
 			ClearBalanceToken bool `json:"clearBalanceToken"`
+			// From is the id the provider had: another is a rename
+			From string `json:"from"`
+			// Model and ModelName, for name: the name the user gives one
+			// of its models, "" for its own again
+			Model     string `json:"model"`
+			ModelName string `json:"modelName"`
+			// Efforts, for efforts: the reasoning levels it offers, none
+			// for all it has
+			Efforts []string `json:"efforts"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			fail(rw, err)
@@ -373,6 +411,16 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 				}
 				in.ID = id
 			} else {
+				// a rename saves the rest under the id it had, then moves it
+				to := strings.ToLower(strings.TrimSpace(in.ID))
+				rename := req.From != "" && req.From != to
+				if rename {
+					if to == "" || to != provider.Slug(to) {
+						fail(rw, fmt.Errorf("a provider's id must be lowercase letters, digits and dashes, not %q", in.ID))
+						return
+					}
+					in.ID = req.From
+				}
 				old, _ = provider.Find(in.ID)
 				if in.Key == "" && old != nil {
 					in.Key = old.Key
@@ -398,6 +446,13 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 					fail(rw, err)
 					return
 				}
+				if rename {
+					if _, err := agent.RenameProvider(in.ID, to); err != nil {
+						fail(rw, err)
+						return
+					}
+					in.ID = to
+				}
 			}
 			provider.ForgetBalances()
 			// a new key means a new vendor list is worth a try; keep it short
@@ -416,6 +471,17 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 			}
 			writeJSON(rw, map[string]string{"key": p.Key})
 			return
+		case "name":
+			// the agents' own model lists follow, through catalog.Changed
+			if err := provider.SetModelName(in.ID+"/"+req.Model, req.ModelName); err != nil {
+				fail(rw, err)
+				return
+			}
+		case "efforts":
+			if err := provider.SetModelEfforts(in.ID+"/"+req.Model, req.Efforts); err != nil {
+				fail(rw, err)
+				return
+			}
 		case "route":
 			if err := provider.SetRouting(in.ID, in.Routing); err != nil {
 				fail(rw, err)
@@ -442,7 +508,7 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 			writeJSON(rw, struct {
 				Results  []provider.Result `json:"results"`
 				Provider providerJSON      `json:"provider"`
-			}{p.Test(ctx), providerInfo(*p, agent.Detected())})
+			}{p.Test(ctx), providerInfo(*p, agentUses(agent.Detected(), provider.GroupFinder()))})
 			return
 		case "unfetch":
 			// the vendor's list, forgotten until the next Refresh
@@ -466,7 +532,7 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 			writeJSON(rw, struct {
 				Count    int          `json:"count"`
 				Provider providerJSON `json:"provider"`
-			}{len(ms), providerInfo(*p, agent.Detected())})
+			}{len(ms), providerInfo(*p, agentUses(agent.Detected(), provider.GroupFinder()))})
 			return
 		default:
 			http.NotFound(rw, r)
@@ -504,6 +570,9 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 			fail(rw, err)
 			return
 		}
+		// an agent on its own models goes through magpie while more of
+		// its accounts are on, and straight to its vendor again once not
+		agent.SyncCatalog()
 		writeJSON(rw, providersState())
 	})
 	// A provider's several keys: add one, put one in use, name or remove it.

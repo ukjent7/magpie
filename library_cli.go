@@ -20,7 +20,8 @@ const libraryUsage = `magpie library                     what the library gives 
   magpie library skill agents <name> <a,b…|none>
   magpie library skill rm <name>     (skills are installed from the app's Library page)
   magpie library rtk                 which agents run their shell commands through RTK (rtk-ai.app), to save tokens
-  magpie library rtk on|off <agent>  switch it, with RTK's own installer
+  magpie library rtk on|off <agent>  switch it (on with RTK's own installer; off works with RTK gone)
+  magpie library rtk install         install RTK (Homebrew, winget, or RTK's own script)
 `
 
 // libraryCmd is magpie library …: the instructions, MCP servers and skills
@@ -72,27 +73,22 @@ func libraryCmd(args []string) error {
 	case "mcp":
 		switch {
 		case len(rest) >= 3 && rest[0] == "add":
-			s := library.Server{Name: rest[1], Agents: []string{}}
-			var cmd []string
+			var cmd, agents []string
 			for _, a := range rest[2:] {
 				if v, ok := strings.CutPrefix(a, "agents="); ok {
-					if s.Agents, err = libraryAgents(v, "mcp"); err != nil {
+					if agents, err = libraryAgents(v, "mcp"); err != nil {
 						return err
 					}
 				} else {
 					cmd = append(cmd, a)
 				}
 			}
-			switch {
-			case len(cmd) == 0:
-				return fmt.Errorf("a URL or a command is needed")
-			case strings.HasPrefix(cmd[0], "http://") || strings.HasPrefix(cmd[0], "https://"):
-				s.Transport, s.URL = "http", cmd[0]
-				if len(cmd) > 1 {
-					return fmt.Errorf("a server by URL takes nothing after it")
-				}
-			default:
-				s.Transport, s.Command, s.Args = "stdio", cmd[0], cmd[1:]
+			var s library.Server
+			if s, err = library.ServerOf(rest[1], cmd); err != nil {
+				return err
+			}
+			if agents != nil {
+				s.Agents = agents
 			}
 			res, err = library.SaveServer("", s)
 		case len(rest) == 3 && rest[0] == "agents":
@@ -250,6 +246,12 @@ func rtkCmd(args []string) error {
 	switch {
 	case len(args) == 0:
 		v = library.ReadRTK()
+	case len(args) == 1 && args[0] == "install":
+		fmt.Println(muted.Render("installing rtk…"))
+		var err error
+		if v, err = library.InstallRTK(); err != nil {
+			return err
+		}
 	case len(args) == 2 && (args[0] == "on" || args[0] == "off"):
 		id, err := library.RTKTakes(args[1])
 		if err != nil {
@@ -263,6 +265,9 @@ func rtkCmd(args []string) error {
 	}
 	if v.Path == "" {
 		fmt.Println(amber.Render("!"), "rtk isn't installed —", v.URL)
+		if v.Install != "" {
+			fmt.Println(muted.Render("  magpie library rtk install runs: " + v.Install))
+		}
 	} else {
 		fmt.Println(bold.Render("RTK"), muted.Render(v.Version+" · "+v.Path))
 		if g := v.Gain; g != nil {
@@ -271,10 +276,14 @@ func rtkCmd(args []string) error {
 	}
 	for _, a := range v.Agents {
 		mark := muted.Render("off")
+		note := ""
 		if a.On {
 			mark = green.Render("on ")
+			if v.Path == "" {
+				mark, note = amber.Render("on "), muted.Render(" — its hook calls rtk, which isn't installed: install it, or switch this off")
+			}
 		}
-		fmt.Println(" ", mark, a.Name)
+		fmt.Println(" ", mark, a.Name+note)
 	}
 	if len(v.Agents) == 0 {
 		fmt.Println(" ", muted.Render("none of the agents here is one RTK has a hook for"))

@@ -8,7 +8,6 @@ package tui
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"runtime"
 	"slices"
 	"strings"
@@ -18,6 +17,7 @@ import (
 
 	"github.com/yetone/magpie/internal/agent"
 	"github.com/yetone/magpie/internal/library"
+	"github.com/yetone/magpie/internal/proc"
 )
 
 // libRow is one line of the page.
@@ -124,6 +124,12 @@ func (m model) updateLibrary(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.lrow = (m.lrow + n - 1) % n
 		}
 		return m, nil
+	case "a":
+		m.openLibAdd()
+		return m, nil
+	case "s":
+		m.flash, m.flashOK = "writing the library into the agents…", true
+		return m, libCmd(library.Sync, "synced")
 	}
 	if n == 0 {
 		return m, nil
@@ -138,10 +144,18 @@ func (m model) updateLibrary(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.flash, m.flashOK = "i brings "+r.name+" into the library, for magpie to give it to other agents too", true
 		}
 	case "e":
-		if r.kind != "instructions" {
+		switch r.kind {
+		case "instructions":
+			return m, editInstructions()
+		case "mcp":
+			m.openServer(r.name)
+		}
+	case "u":
+		if r.kind != "skill" {
 			return m, nil
 		}
-		return m, editInstructions()
+		m.flash, m.flashOK = "fetching "+r.name+" from GitHub again…", true
+		return m, libCmd(func() (*library.Result, error) { return library.UpdateSkill(r.name) }, "updated "+r.name)
 	case "i":
 		if r.own {
 			m.flash, m.flashOK = r.name+" is put there by the agent's app itself, each time it starts: it stays as it is", false
@@ -294,6 +308,131 @@ func (m *model) openLibAgents(r libRow) {
 	m.back = modeList
 }
 
+// openLibAdd picks what to add: an MCP server, or skills.
+func (m *model) openLibAdd() {
+	m.pk = picker{
+		crumbs: []string{"library", "add"},
+		input:  newInput("filter"),
+		items: []agent.Option{
+			{Value: "mcp server", Note: "a URL, or a command it runs"},
+			{Value: "skills", Note: "from a GitHub repository, or a folder on this machine"},
+		},
+		onPick: func(v string) tea.Cmd {
+			return func() tea.Msg {
+				if v == "skills" {
+					in := newInput("a GitHub link (owner/repo, or a folder in one) or a folder's full path")
+					in.CharLimit = 400
+					return askMsg{ask{crumbs: []string{"library", "add", "skills"}, input: in,
+						hint:    "magpie looks there for skills, then you pick one",
+						onEnter: probeCmd}}
+				}
+				in := newInput("<name> <url | command args…>")
+				in.CharLimit = 400
+				return askMsg{ask{crumbs: []string{"library", "add", "mcp server"}, input: in,
+					hint:    "e.g. context7 https://mcp.context7.com/mcp · fs npx -y @modelcontextprotocol/server-filesystem ~/code\nthen ↵ on it gives it to agents",
+					onEnter: func(line string) tea.Cmd { return saveServer(nil, line) }}}
+			}
+		},
+	}
+	m.pk.refilter()
+	m.mode = modePick
+	m.back = modeList
+}
+
+// openServer types a library server again: its name, then its URL or
+// command; what else it has (env, headers, agents) stays.
+func (m *model) openServer(name string) {
+	var old *library.Server
+	for _, s := range m.libView.Servers {
+		if s.Name == name {
+			c := *s.Server
+			old = &c
+		}
+	}
+	if old == nil {
+		return
+	}
+	line := old.Name + " " + old.URL
+	if old.Command != "" {
+		line = strings.Join(append([]string{old.Name, old.Command}, old.Args...), " ")
+	}
+	in := newInput("<name> <url | command args…>")
+	in.CharLimit = 400
+	in.SetValue(line)
+	in.CursorEnd()
+	m.openAsk(ask{crumbs: []string{"library", name, "edit"}, input: in,
+		hint:    "its env, headers and agents stay as they are",
+		onEnter: func(line string) tea.Cmd { return saveServer(old, line) }})
+}
+
+// saveServer makes a server of a typed line, in place of old when it is
+// one being changed.
+func saveServer(old *library.Server, line string) tea.Cmd {
+	return func() tea.Msg {
+		words := strings.Fields(line)
+		if len(words) < 2 {
+			return flashMsg{text: "a name, then a URL or a command"}
+		}
+		s, err := library.ServerOf(words[0], words[1:])
+		if err != nil {
+			return flashMsg{text: err.Error()}
+		}
+		was, done := "", "added "+s.Name+" · ↵ on it gives it to agents"
+		if old != nil {
+			was, done = old.Name, "saved "+s.Name
+			s.Agents, s.Env, s.Headers = old.Agents, old.Env, old.Headers
+		}
+		return libCmd(func() (*library.Result, error) { return library.SaveServer(was, s) }, done)()
+	}
+}
+
+// probedMsg is what was found at a source typed for skills.
+type probedMsg struct{ p *library.Probe }
+
+func probeCmd(source string) tea.Cmd {
+	return func() tea.Msg {
+		p, err := library.ProbeSkills(source)
+		if err != nil {
+			return flashMsg{text: err.Error()}
+		}
+		return probedMsg{p}
+	}
+}
+
+// openProbe lists the skills found at a source; enter adds one to the
+// library.
+func (m *model) openProbe(p *library.Probe) {
+	var items []agent.Option
+	for _, c := range p.Candidates {
+		note := c.Description
+		if c.Have {
+			note = "in the library already · " + note
+		}
+		v := c.Path
+		if v == "" {
+			v = "."
+		}
+		items = append(items, agent.Option{Value: v, Note: c.Name + "  " + trunc(note, 80)})
+	}
+	m.pk = picker{
+		crumbs: []string{"library", "add", "skills", p.Source},
+		input:  newInput("filter skills"),
+		items:  items,
+		empty:  "no skills there: a skill is a folder with a SKILL.md",
+		onPick: func(path string) tea.Cmd {
+			if path == "." {
+				path = ""
+			}
+			return libCmd(func() (*library.Result, error) {
+				return library.InstallSkills(p.Source, []string{path}, []string{})
+			}, "added the skill · ↵ on it gives it to agents")
+		},
+	}
+	m.pk.refilter()
+	m.mode = modePick
+	m.back = modeList
+}
+
 // editedMsg is the shared instructions as the editor left them.
 type editedMsg struct {
 	text string
@@ -325,7 +464,7 @@ func editInstructions() tea.Cmd {
 	}
 	// the editor may come with flags: code -w
 	words := strings.Fields(ed)
-	c := exec.Command(words[0], append(words[1:], f.Name())...)
+	c := proc.Command(words[0], append(words[1:], f.Name())...)
 	return tea.ExecProcess(c, func(err error) tea.Msg {
 		defer os.Remove(f.Name())
 		if err != nil {
@@ -363,8 +502,8 @@ func (m model) viewLibrary() string {
 	nameW = min(nameW, 32)
 	heads := map[string]string{
 		"instructions": "instructions · what every agent reads before a conversation",
-		"mcp":          "mcp servers · magpie library mcp add <name> <url | command> adds one",
-		"skill":        "skills · added from the app's market, or a folder magpie keeps",
+		"mcp":          "mcp servers · a adds one, e changes it",
+		"skill":        "skills · a adds some from GitHub or a folder, u fetches one from GitHub again",
 		"found-mcp":    "mcp servers in your agents, not in the library",
 		"found-skill":  "skills in your agents, not in the library",
 		"rtk":          "rtk · its hook in each agent, by RTK's own installer",

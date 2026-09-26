@@ -35,11 +35,14 @@ var Protocols = []Protocol{Chat, Responses, Anthropic}
 
 // Provider is one configured vendor.
 type Provider struct {
-	ID     string `json:"id"`
-	Name   string `json:"name"`
-	Icon   string `json:"icon,omitempty"`
-	Preset string `json:"preset,omitempty"` // preset this was created from, if any
-	Key    string `json:"key"`              // API key, as typed by the user
+	ID   string `json:"id"`
+	Name string `json:"name"`
+	// Was are ids the provider had before it was renamed (see Rename):
+	// a model still picked by one of them reaches it.
+	Was    []string `json:"was,omitempty"`
+	Icon   string   `json:"icon,omitempty"`
+	Preset string   `json:"preset,omitempty"` // preset this was created from, if any
+	Key    string   `json:"key"`              // API key, as typed by the user
 
 	// KeyName names the key in use, and Keys are the provider's other
 	// accounts: keys saved to switch to (see keys.go).
@@ -228,8 +231,14 @@ func find(ps []Provider, id string) (Provider, bool) {
 // Find looks a provider up by id (or name, case-insensitively).
 func Find(id string) (*Provider, error) {
 	q := strings.ToLower(strings.TrimSpace(id))
-	for _, p := range All() {
+	all := All()
+	for _, p := range all {
 		if p.ID == q || strings.ToLower(p.Name) == q {
+			return &p, nil
+		}
+	}
+	for _, p := range all {
+		if slices.Contains(p.Was, q) {
 			return &p, nil
 		}
 	}
@@ -282,6 +291,9 @@ func Save(p Provider) error {
 	f := load()
 	for i := range f.Providers {
 		if f.Providers[i].ID == p.ID {
+			if p.Was == nil {
+				p.Was = f.Providers[i].Was
+			}
 			f.Providers[i] = p
 			return store(f)
 		}

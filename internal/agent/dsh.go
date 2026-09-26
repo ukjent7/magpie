@@ -74,6 +74,13 @@ func dsh(home string) *Agent {
 			Options: func(map[string]string) []Option {
 				return append(append([]Option{}, dshModels...), viaMagpie("dsh", magpieID+"/")...)
 			},
+		}, {
+			// llm-deepseek's reasoningEffort, the thinking effort sessions
+			// start with (off, high or max; dsh's own default is high)
+			Key: "effort", Label: "thinking",
+			Get:     func() string { return dshGetEffort(dir) },
+			Set:     func(v string) error { return dshSetEffort(dir, v) },
+			Options: func(map[string]string) []Option { return static(dshEfforts...) },
 		}},
 	}
 }
@@ -320,13 +327,13 @@ func dshSetFile(path, v string, modern bool) error {
 		drop("agent-loop")
 		drop("llm-deepseek")
 	case modern && viaGateway:
-		put("llm-deepseek", dshProviderLines(true))
+		put("llm-deepseek", dshProviderLines(true, dshEffortIn(items)))
 		put("agent-default-model", dshDefaultLines(ref))
 	case modern:
 		drop("llm-deepseek")
 		put("agent-default-model", dshDefaultLines(v))
 	case viaGateway:
-		put("llm-deepseek", dshProviderLines(false))
+		put("llm-deepseek", dshProviderLines(false, dshEffortIn(items)))
 		put("agent-loop", dshLoopLines(ref))
 		put("api-gateway", dshRouteLines(ref))
 	default:
@@ -356,11 +363,15 @@ func yamlQuote(s string) string {
 
 // dshProviderLines is the llm-deepseek entry pointing dsh at the gateway,
 // with the catalog as the models its /model offers. Since 0.1.5 the key is a
-// credential the entry names rather than holds.
-func dshProviderLines(modern bool) []string {
+// credential the entry names rather than holds. effort is the thinking
+// effort sessions start with, high (dsh's own default) when "".
+func dshProviderLines(modern bool, effort string) []string {
 	key := "    apiKey: " + yamlQuote(gateway.Token)
 	if modern {
 		key = "    apiKeyEnv: " + dshKeyRef
+	}
+	if effort == "" {
+		effort = "high"
 	}
 	lines := []string{
 		"- id: llm-deepseek " + dshMark,
@@ -368,7 +379,7 @@ func dshProviderLines(modern bool) []string {
 		key,
 		"    baseURL: " + yamlQuote(gatewayV1()),
 		"    thinking: enabled",
-		"    reasoningEffort: high",
+		"    reasoningEffort: " + effort,
 		"    models:",
 	}
 	ms := magpieModels("dsh")
@@ -447,7 +458,7 @@ func dshSync(dir string) error {
 		for _, l := range items[i].lines {
 			modern = modern || strings.HasPrefix(strings.TrimSpace(l), "apiKeyEnv:")
 		}
-		lines := dshProviderLines(modern)
+		lines := dshProviderLines(modern, dshEffortIn(items))
 		if strings.Join(lines, "\n") == strings.Join(items[i].lines, "\n") {
 			continue
 		}
@@ -459,6 +470,79 @@ func dshSync(dir string) error {
 		if err := edit.WriteAtomic(f, []byte(strings.Join(out, "\n")+"\n")); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+// dshEfforts are the thinking efforts llm-deepseek takes.
+var dshEfforts = []string{"off", "high", "max"}
+
+// dshEffortIn is the reasoningEffort of the llm-deepseek entry magpie
+// wrote, "" when there is none.
+func dshEffortIn(items []dshItem) string {
+	i := dshFind(items, "llm-deepseek")
+	if i < 0 || !items[i].magpie {
+		return ""
+	}
+	for _, l := range items[i].lines {
+		if k, v, ok := strings.Cut(strings.TrimSpace(l), ":"); ok && k == "reasoningEffort" {
+			return yamlScalar(strings.TrimSpace(v))
+		}
+	}
+	return ""
+}
+
+// dshFiles are the patch lists magpie writes: every profile's, else
+// config.yaml.
+func dshFiles(dir string) []string {
+	if files := dshProfiles(dir); len(files) > 0 {
+		return files
+	}
+	return []string{filepath.Join(dir, "config.yaml")}
+}
+
+// dshGetEffort reads the effort of magpie's llm-deepseek entry.
+func dshGetEffort(dir string) string {
+	_, items, err := dshRead(dshFiles(dir)[0])
+	if err != nil {
+		return ""
+	}
+	return dshEffortIn(items)
+}
+
+// dshSetEffort writes v into each llm-deepseek entry magpie wrote. dsh's
+// own row is used whole when there is none, so the effort goes with a
+// model through magpie.
+func dshSetEffort(dir, v string) error {
+	if v != "" && !contains(dshEfforts, v) {
+		return fmt.Errorf("DeepSeek Harness takes an effort of %s, not %q", strings.Join(dshEfforts, ", "), v)
+	}
+	done := false
+	for _, f := range dshFiles(dir) {
+		head, items, err := dshRead(f)
+		if err != nil {
+			continue
+		}
+		i := dshFind(items, "llm-deepseek")
+		if i < 0 || !items[i].magpie {
+			continue
+		}
+		modern := false
+		for _, l := range items[i].lines {
+			modern = modern || strings.HasPrefix(strings.TrimSpace(l), "apiKeyEnv:")
+		}
+		items[i].lines = dshProviderLines(modern, v)
+		out := append([]string{}, head...)
+		for _, it := range items {
+			out = append(out, it.lines...)
+		}
+		if err := edit.WriteAtomic(f, []byte(strings.Join(out, "\n")+"\n")); err != nil {
+			return err
+		}
+		done = true
+	}
+	if !done && v != "" {
+		return fmt.Errorf("pick a model through magpie for DeepSeek Harness first; the effort is kept with magpie's DeepSeek entry")
 	}
 	return nil
 }

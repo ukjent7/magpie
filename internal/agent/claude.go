@@ -30,6 +30,9 @@ var claudeEnv = []string{
 // A tier that has none follows the main model.
 var claudeTiers = []string{"opus", "sonnet", "haiku", "fable"}
 
+// claudeEfforts are the levels settings.json's effortLevel takes.
+var claudeEfforts = []string{"low", "medium", "high", "xhigh"}
+
 func tierEnv(tier string) string { return "ANTHROPIC_DEFAULT_" + strings.ToUpper(tier) + "_MODEL" }
 
 func claude(home string) *Agent {
@@ -147,6 +150,20 @@ func claude(home string) *Agent {
 			// not something any API lists, and a compiled-in copy would just
 			// go stale.
 			return append(group(name, own), claudeViaMagpie()...)
+		},
+	}, {
+		// the effort Claude Code starts with, as its /effort saves it;
+		// settings.json keeps low to xhigh (max lasts a session only)
+		Key: "effort", Label: "effort",
+		Get: jsonGet(path, "effortLevel"),
+		Set: func(v string) error {
+			if v != "" && !contains(claudeEfforts, v) {
+				return fmt.Errorf("Claude Code keeps an effort of %s, not %q", strings.Join(claudeEfforts, ", "), v)
+			}
+			return jsonSet(path, "effortLevel")(v)
+		},
+		Options: func(map[string]string) []Option {
+			return static(claudeEfforts...)
 		},
 	}}
 	for _, tier := range claudeTiers {

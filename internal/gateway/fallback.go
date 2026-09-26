@@ -49,6 +49,16 @@ func (c candidate) label() string {
 	return c.p.ID + " (" + provider.Mask(c.p.Key) + ")"
 }
 
+// restKey is what a candidate rests by: an account by its user, whether
+// or not the agent is signed in to it — magpie can sign Codex in to the
+// next account when the one it is on is out, and the one out stays out.
+func (c candidate) restKey() string {
+	if a := c.p.Account; a != nil && a.User != "" {
+		return c.p.ID + "@" + strings.ToLower(a.User)
+	}
+	return c.rest
+}
+
 // who is the key or account itself, however many the provider has on: a
 // provider's one key rests as the provider, and as itself once another
 // is added, and a conversation it answered stays with it all the same.
@@ -312,7 +322,7 @@ func asideOf(cs []candidate, q provider.Provider, fallback bool, from provider.P
 // restLast moves those resting after a recent failure behind the rest.
 func restLast(out []candidate, pl planned) ([]candidate, planned) {
 	if len(out) == 1 {
-		if r, ok := restOf(out[0].rest); ok {
+		if r, ok := restOf(out[0].restKey()); ok {
 			pl.order[0].Rest = &r // tried all the same: there is no other
 		}
 		return out, pl
@@ -320,7 +330,7 @@ func restLast(out []candidate, pl planned) ([]candidate, planned) {
 	var ready, resting []candidate
 	var wReady, wResting []Weighed
 	for i, c := range out {
-		if r, ok := restOf(c.rest); ok {
+		if r, ok := restOf(c.restKey()); ok {
 			pl.order[i].Rest = &r
 			resting, wResting = append(resting, c), append(wResting, pl.order[i])
 		} else {

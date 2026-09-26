@@ -438,11 +438,9 @@ func claudeAccount() (Provider, bool) {
 	if statusPlan != "" {
 		plan = statusPlan
 	}
-	if m, err := readClaudeProfile(); err == nil && user != "" {
-		if acct, ok := m["oauthAccount"].(map[string]any); ok {
-			if email, _ := acct["emailAddress"].(string); strings.EqualFold(email, user) {
-				user = claudeUser(user, plan, acct)
-			}
+	if acct, ok := claudeProfileAccount(); ok && user != "" {
+		if email, _ := acct["emailAddress"].(string); strings.EqualFold(email, user) {
+			user = claudeUser(user, plan, acct)
 		}
 	}
 	if user == "" {

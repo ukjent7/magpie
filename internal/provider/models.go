@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/yetone/magpie/internal/catalog"
+	"github.com/yetone/magpie/internal/settings"
 )
 
 func errorf(format string, a ...any) error { return fmt.Errorf(format, a...) }
@@ -307,9 +308,10 @@ func (p Provider) Chosen(id string) bool {
 
 // Entry is one model as the agents see it.
 type Entry struct {
-	ID         string   `json:"id"`    // what the agent sends magpie
-	Model      string   `json:"model"` // what magpie sends the vendor
-	Name       string   `json:"name"`
+	ID         string   `json:"id"`                // what the agent sends magpie
+	Model      string   `json:"model"`             // what magpie sends the vendor
+	Name       string   `json:"name"`              // the user's name for it, when they gave one (SetModelName)
+	Default    string   `json:"default,omitempty"` // the model's own name, when the user gave it another
 	Efforts    []string `json:"efforts,omitempty"`
 	Provider   Provider `json:"-"`                // a group's: its first member's
 	Group      string   `json:"group,omitempty"`  // set on a routing group (group.go)
@@ -349,6 +351,7 @@ func Served() []Entry {
 // providerEntries is the catalog without its groups.
 func providerEntries() []Entry {
 	var out []Entry
+	s := settings.Load()
 	for _, p := range All() {
 		if !p.Ready() {
 			continue
@@ -371,8 +374,13 @@ func providerEntries() []Entry {
 			if m.ImageInput != nil {
 				images = *m.ImageInput
 			}
-			out = append(out, Entry{ID: p.ID + "/" + m.ID, Model: m.ID, Family: p.Family, Name: m.Name, Efforts: effortsOf(m), Provider: p,
-				Images: images, ImageInput: m.ImageInput, Context: ctx, Output: output})
+			e := Entry{ID: p.ID + "/" + m.ID, Model: m.ID, Family: p.Family, Name: m.Name, Efforts: effortsOf(m), Provider: p,
+				Images: images, ImageInput: m.ImageInput, Context: ctx, Output: output}
+			if n, ok := modelNameIn(s.ModelNames, p.ID, m.ID); ok {
+				e.Name, e.Default = n, m.Name
+			}
+			e.Efforts = effortsKept(e.Efforts, s.ModelEfforts[e.ID])
+			out = append(out, e)
 		}
 	}
 	return out

@@ -148,11 +148,18 @@ func autoGroups(entries []Entry) []Group {
 		if len(es) < 2 {
 			continue
 		}
-		g := Group{ID: "auto-" + Slug(k), Name: es[0].Name, Auto: true}
+		// the model's own name: one a user gave it is that provider's alone
+		own := func(e Entry) string {
+			if e.Default != "" {
+				return e.Default
+			}
+			return e.Name
+		}
+		g := Group{ID: "auto-" + Slug(k), Name: own(es[0]), Auto: true}
 		for _, e := range es {
 			g.Members = append(g.Members, e.ID)
-			if g.Name == es[0].Model && e.Name != e.Model {
-				g.Name = e.Name // a vendor that names it, over one that only lists its id
+			if g.Name == es[0].Model && own(e) != e.Model {
+				g.Name = own(e) // a vendor that names it, over one that only lists its id
 			}
 		}
 		out = append(out, g)
@@ -188,16 +195,52 @@ func isDigit(c byte) bool { return c >= '0' && c <= '9' }
 // FindGroup looks a group up by its catalog id ("group/<id>") and resolves
 // its members; one not ready now is left out.
 func FindGroup(id string) (Group, []Member, bool) {
-	gid, ok := strings.CutPrefix(strings.TrimSpace(id), GroupPrefix)
-	if !ok {
+	return GroupFinder()(id)
+}
+
+// GroupFor is the group a model's id without a provider in it names, as
+// "group/<id>": the group of that id, else the group of that model however
+// a vendor spells it ("grok-4.7" is the group grok-4-7 or auto-grok-4-7).
+// A request for the model is the group's then, as it would be for the
+// group's own id; ok is false when no group has it. An id with a provider
+// in it ("a/m") names that provider's model, never a group.
+func GroupFor(id string) (string, bool) {
+	id = strings.TrimSuffix(strings.TrimSpace(id), "[1m]")
+	if id == "" || strings.Contains(id, "/") {
+		return "", false
+	}
+	all := Groups()
+	k := Slug(sameModel(id))
+	for _, gid := range []string{strings.ToLower(id), k, "auto-" + k} {
+		if g, ok := groupOf(all, gid); ok {
+			return GroupPrefix + g.ID, true
+		}
+	}
+	return "", false
+}
+
+// GroupFinder is FindGroup for looking up many: every provider's models
+// are read once, when the first group is looked up, not again for each.
+func GroupFinder() func(id string) (Group, []Member, bool) {
+	var (
+		entries []Entry
+		all     []Group
+		read    bool
+	)
+	return func(id string) (Group, []Member, bool) {
+		gid, ok := strings.CutPrefix(strings.TrimSpace(id), GroupPrefix)
+		if !ok {
+			return Group{}, nil, false
+		}
+		if !read {
+			entries, read = providerEntries(), true
+			all = groupsIn(entries)
+		}
+		if g, ok := groupOf(all, gid); ok {
+			return g, membersIn(entries, all, g), true
+		}
 		return Group{}, nil, false
 	}
-	entries := providerEntries()
-	all := groupsIn(entries)
-	if g, ok := groupOf(all, gid); ok {
-		return g, membersIn(entries, all, g), true
-	}
-	return Group{}, nil, false
 }
 
 // groupOf is the group of an id among all, unless it was removed.
