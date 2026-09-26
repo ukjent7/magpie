@@ -380,6 +380,12 @@ impl Agent {
         if self.spec.id == "commandcode" && field.key == "model" {
             return self.set_commandcode_model(value);
         }
+        if self.spec.id == "pi" && field.key == "model" {
+            return self.set_pi_model(value);
+        }
+        if self.spec.id == "pi" && field.key == "effort" {
+            return self.set_pi_effort(value);
+        }
         if self.spec.id == "gemini" && field.key == "model" {
             return self.set_gemini_model(value);
         }
@@ -623,6 +629,65 @@ impl Agent {
         config::set(&self.path, self.spec.format, "model", value)?;
         config::delete(&providers_path, ConfigFormat::Jsonc, "provider.magpie")
     }
+
+    fn set_pi_model(&self, value: &str) -> Result<()> {
+        let models_path = self.path.with_file_name("models.json");
+        if value.is_empty() {
+            config::delete_many(
+                &self.path,
+                self.spec.format,
+                &["defaultProvider", "defaultModel"],
+            )?;
+            return config::delete(&models_path, ConfigFormat::Jsonc, "providers.magpie");
+        }
+
+        if let Some(model) = value.strip_prefix("magpie/") {
+            ensure!(
+                is_gateway_model(model)?,
+                "{model:?} is not a model currently served by magpie"
+            );
+            config::set_jsonc_value(&models_path, "providers.magpie", &pi_provider()?)?;
+            return config::set_jsonc_values(
+                &self.path,
+                &[
+                    ("defaultProvider", Value::String("magpie".to_owned())),
+                    ("defaultModel", Value::String(model.to_owned())),
+                ],
+            );
+        }
+
+        let (provider, model) = value
+            .split_once('/')
+            .filter(|(provider, model)| !provider.is_empty() && !model.is_empty())
+            .with_context(|| format!("expected provider/model, got {value:?}"))?;
+        config::set_many(
+            &self.path,
+            self.spec.format,
+            &[("defaultProvider", provider), ("defaultModel", model)],
+        )?;
+        if provider != "magpie" {
+            config::delete(&models_path, ConfigFormat::Jsonc, "providers.magpie")?;
+        }
+        Ok(())
+    }
+
+    fn set_pi_effort(&self, value: &str) -> Result<()> {
+        if value.is_empty() {
+            config::delete(&self.path, self.spec.format, PI_EFFORT.path)?;
+        } else {
+            config::set(&self.path, self.spec.format, PI_EFFORT.path, value)?;
+        }
+        if config::get(&self.path, self.spec.format, "defaultProvider")?.as_deref()
+            == Some("magpie")
+        {
+            config::set_jsonc_value(
+                &self.path.with_file_name("models.json"),
+                "providers.magpie",
+                &pi_provider()?,
+            )?;
+        }
+        Ok(())
+    }
 }
 
 pub fn sync_catalog_models() -> Result<()> {
@@ -644,6 +709,16 @@ pub fn sync_catalog_models() -> Result<()> {
             &agent.path.with_file_name("providers.json"),
             "provider.magpie",
             &commandcode_provider()?,
+        )?;
+    }
+
+    if let Some(agent) = all().into_iter().find(|agent| agent.spec.id == "pi")
+        && pi_gateway_configured(&agent)?
+    {
+        config::set_jsonc_value(
+            &agent.path.with_file_name("models.json"),
+            "providers.magpie",
+            &pi_provider()?,
         )?;
     }
 
@@ -1187,6 +1262,108 @@ fn commandcode_model(name: &str, efforts: &[String]) -> Value {
     {
         fields.insert("reasoning".to_owned(), Value::Bool(true));
         fields.insert("reasoningEfforts".to_owned(), json!(efforts));
+    }
+    model
+}
+
+fn pi_gateway_configured(agent: &Agent) -> Result<bool> {
+    Ok(
+        config::get(&agent.path, agent.spec.format, "defaultProvider")?.as_deref()
+            == Some("magpie"),
+    )
+}
+
+fn pi_provider() -> Result<Value> {
+    let (groups, entries) = crate::provider::desktop_group_data()?;
+    let entries_by_id = entries
+        .iter()
+        .map(|entry| (entry.id.as_str(), entry))
+        .collect::<HashMap<_, _>>();
+    let mut models = Vec::with_capacity(entries.len() + groups.len());
+
+    for entry in &entries {
+        let name = if entry.model.name.is_empty() {
+            &entry.model.id
+        } else {
+            &entry.model.name
+        };
+        models.push(pi_model(
+            &entry.id,
+            &format!("{name} · {}", entry.provider_name),
+            &entry.model.efforts,
+            entry.model.images,
+            entry.model.context,
+        ));
+    }
+    for group in groups.into_iter().filter(|group| !group.hidden) {
+        let members = group
+            .members
+            .iter()
+            .filter_map(|member| entries_by_id.get(member.as_str()).copied())
+            .collect::<Vec<_>>();
+        let Some((first, rest)) = members.split_first() else {
+            continue;
+        };
+        let efforts = first
+            .model
+            .efforts
+            .iter()
+            .filter(|effort| {
+                rest.iter()
+                    .all(|member| member.model.efforts.contains(effort))
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let images = members.iter().all(|member| member.model.images);
+        let context = members
+            .iter()
+            .map(|member| member.model.context)
+            .filter(|context| *context > 0)
+            .min()
+            .unwrap_or_default();
+        models.push(pi_model(
+            &format!("group/{}", group.id),
+            &format!("{} · routing group", group.name),
+            &efforts,
+            images,
+            context,
+        ));
+    }
+
+    Ok(json!({
+        "name": "magpie",
+        "baseUrl": crate::gateway::v1_url(),
+        "api": "openai-completions",
+        "apiKey": crate::gateway::TOKEN,
+        "models": models,
+    }))
+}
+
+fn pi_model(id: &str, name: &str, efforts: &[String], images: bool, context: usize) -> Value {
+    let mut model = json!({
+        "id": id,
+        "name": name,
+        "reasoning": !efforts.is_empty(),
+    });
+    let Some(fields) = model.as_object_mut() else {
+        return model;
+    };
+    if images {
+        fields.insert("input".to_owned(), json!(["text", "image"]));
+    }
+    let thinking_levels = efforts
+        .iter()
+        .filter(|effort| matches!(effort.as_str(), "xhigh" | "max"))
+        .map(|effort| (effort.clone(), Value::String(effort.clone())))
+        .collect::<serde_json::Map<_, _>>();
+    if !thinking_levels.is_empty() {
+        fields.insert(
+            "thinkingLevelMap".to_owned(),
+            Value::Object(thinking_levels),
+        );
+    }
+    if context > 0 {
+        fields.insert("contextWindow".to_owned(), json!(context));
     }
     model
 }
