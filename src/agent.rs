@@ -34,6 +34,7 @@ pub(crate) struct MagpieModel {
     pub(crate) efforts: Vec<String>,
     pub(crate) images: bool,
     pub(crate) context: usize,
+    pub(crate) output: usize,
 }
 
 // magpie_models is the catalog: one entry per model of every provider the
@@ -63,6 +64,7 @@ pub(crate) fn magpie_models() -> Result<Vec<MagpieModel>> {
             efforts: entry.model.efforts.clone(),
             images: entry.model.images,
             context: entry.model.context,
+            output: entry.model.output,
         });
     }
     for group in groups.into_iter().filter(|group| !group.hidden) {
@@ -93,6 +95,12 @@ pub(crate) fn magpie_models() -> Result<Vec<MagpieModel>> {
                 .iter()
                 .map(|member| member.model.context)
                 .filter(|context| *context > 0)
+                .min()
+                .unwrap_or_default(),
+            output: members
+                .iter()
+                .map(|member| member.model.output)
+                .filter(|output| *output > 0)
                 .min()
                 .unwrap_or_default(),
         });
@@ -2331,6 +2339,7 @@ pub(crate) mod testing {
             efforts: Vec::new(),
             images: false,
             context: 0,
+            output: 0,
         }
     }
 

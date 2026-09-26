@@ -5,7 +5,7 @@ use std::{
 
 use anyhow::{Context, Result, ensure};
 
-use crate::{agent, config, provider};
+use crate::{agent, config};
 
 const MAGPIE_MARK: &str = "# magpie";
 const API_KEY_ENV: &str = "MAGPIE_API_KEY";
@@ -460,58 +460,26 @@ fn provider_lines(modern: bool, effort: &str) -> Result<Vec<String>> {
         format!("    reasoningEffort: {effort}"),
         "    models:".to_owned(),
     ];
-    let models = catalog_models()?;
+    let models = agent::magpie_models()?;
     if models.is_empty() {
         lines[6] = "    models: []".to_owned();
     }
-    for (id, name) in models {
-        lines.push(format!("      - id: {}", quote(&id)?));
-        lines.push(format!("        name: {}", quote(&name)?));
+    for model in models {
+        lines.push(format!("      - id: {}", quote(&model.id)?));
+        lines.push(format!("        name: {}", quote(&model.name)?));
+        // without these dsh takes every model for a million tokens of
+        // context, 256K out, and text only
+        if model.context > 0 {
+            lines.push(format!("        contextWindow: {}", model.context));
+        }
+        if model.output > 0 {
+            lines.push(format!("        maxTokens: {}", model.output));
+        }
+        if model.images {
+            lines.push("        inputModalities: [text, image]".to_owned());
+        }
     }
     Ok(lines)
-}
-
-fn catalog_models() -> Result<Vec<(String, String)>> {
-    let (groups, entries) = provider::desktop_group_data()?;
-    let mut models = entries
-        .iter()
-        .map(|entry| {
-            let name = if entry.model.name.is_empty() {
-                entry.model.id.as_str()
-            } else {
-                entry.model.name.as_str()
-            };
-            (
-                entry.id.clone(),
-                format!("{name} · {}", entry.provider_name),
-            )
-        })
-        .collect::<Vec<_>>();
-    models.extend(
-        groups
-            .into_iter()
-            .filter(|group| !group.hidden)
-            .filter(|group| {
-                group.members.iter().any(|member| {
-                    entries.iter().any(|entry| {
-                        entry.id == *member || entry.model.id == *member || {
-                            member.split_once('/').is_some_and(|(provider, model)| {
-                                !model.is_empty()
-                                    && (entry.provider_id == provider
-                                        || entry.provider_name.eq_ignore_ascii_case(provider))
-                            })
-                        }
-                    })
-                })
-            })
-            .map(|group| {
-                (
-                    format!("group/{}", group.id),
-                    format!("{} · routing group", group.name),
-                )
-            }),
-    );
-    Ok(models)
 }
 
 fn default_lines(model: &str) -> Result<Vec<String>> {

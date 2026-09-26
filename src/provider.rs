@@ -1875,7 +1875,7 @@ async fn models_command(id: &str, selected: &[String]) -> Result<()> {
 
     let provider = find(id)?;
     let count = refresh_models(&provider, true).await?;
-    println!("✓ fetched {count} models from {}", provider.host());
+    println!("✓ fetched {count} models from {}", provider.fetched_from());
     show(&provider.id).await
 }
 
@@ -3160,6 +3160,16 @@ impl Provider {
             .into_iter()
             .find_map(|url| Url::parse(url).ok()?.host_str().map(str::to_owned))
             .unwrap_or_default()
+    }
+
+    // fetched_from is where a provider's models were fetched: its API's
+    // host, or — for a subscription run through its own CLI (Kiro, Devin,
+    // Cursor …), which has none — its name.
+    fn fetched_from(&self) -> String {
+        match self.host() {
+            host if host.is_empty() => self.name.clone(),
+            host => host,
+        }
     }
 
     fn is_local(&self) -> bool {
