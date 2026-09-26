@@ -8,7 +8,10 @@ import (
 // A Zhipu plan read with a key of the account ZCode is signed in to is
 // shown once, on ZCode's card; another account's plan stays.
 func TestPlanOfASignedInAccountShownOnce(t *testing.T) {
-	at := func(h int) *time.Time { x := time.UnixMilli(1790000000000).Add(time.Duration(h) * time.Hour); return &x }
+	at := func(h int) *time.Time {
+		x := time.UnixMilli(1790000000000).Add(time.Duration(h) * time.Hour)
+		return &x
+	}
 	five, week := 5*time.Hour, 7*24*time.Hour
 	zcode := SubscriptionQuota{Provider: "zcode", Windows: []QuotaWindow{
 		{Name: "5 hours", Span: five, Used: 1, ResetsAt: at(2)},
