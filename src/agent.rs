@@ -187,6 +187,11 @@ const fn provider_model(
 }
 
 const CLAUDE_MODEL: FieldSpec = field("model", "model", "model");
+// the effort Claude Code starts with, as its /effort saves it; settings.json
+// keeps low to xhigh, since max lasts a session only
+const CLAUDE_EFFORT: FieldSpec =
+    choices_field("effort", "effort", "effortLevel", CLAUDE_EFFORTS);
+const CLAUDE_EFFORTS: &[&str] = &["low", "medium", "high", "xhigh"];
 const CLAUDE_GATEWAY_ENV: &[&str] = &[
     "env.ANTHROPIC_BASE_URL",
     "env.ANTHROPIC_AUTH_TOKEN",
@@ -218,8 +223,21 @@ const PI_EFFORT: FieldSpec = choices_field(
     &["off", "minimal", "low", "medium", "high", "xhigh", "max"],
 );
 const GOOSE_MODEL: FieldSpec = provider_model("model", "model", "GOOSE_PROVIDER", "GOOSE_MODEL");
+// GOOSE_THINKING_EFFORT, the effort goose asks of a model that thinks, for
+// every provider
+const GOOSE_EFFORT: FieldSpec = choices_field(
+    "effort",
+    "effort",
+    "GOOSE_THINKING_EFFORT",
+    &["off", "low", "medium", "high", "max"],
+);
 const CURSOR_MODEL: FieldSpec = field("model", "model", "model.modelId");
 const COPILOT_MODEL: FieldSpec = field("model", "model", "model");
+// effortLevel, which Copilot saves beside the model and clears when its own
+// /model changes the model; the levels are the model's, these when magpie's
+// copy of Copilot's list doesn't say
+const COPILOT_EFFORT: FieldSpec =
+    choices_field("effort", "effort", "effortLevel", &["low", "medium", "high", "xhigh"]);
 const CRUSH_LARGE: FieldSpec = provider_model(
     "model",
     "large",
@@ -232,11 +250,50 @@ const CRUSH_SMALL: FieldSpec = provider_model(
     "models.small.provider",
     "models.small.model",
 );
+// models.large.reasoning_effort, kept beside the large model it is for
+const CRUSH_EFFORT: FieldSpec = choices_field(
+    "effort",
+    "effort",
+    "models.large.reasoning_effort",
+    &["low", "medium", "high"],
+);
 const COMMAND_CODE_MODEL: FieldSpec = field("model", "model", "model");
+// reasoningEffort keeps an effort for each model (Command Code's /effort
+// saves it); this field is the current model's, so its path is read whole
+const COMMAND_CODE_EFFORT: FieldSpec = choices_field(
+    "effort",
+    "effort",
+    "reasoningEffort",
+    &["low", "medium", "high", "xhigh", "max"],
+);
 const OMP_MODEL: FieldSpec = field("model", "model", "modelRoles.default");
+// defaultThinkingLevel, the level sessions start with as omp's settings save
+// it; unset omp takes high, and it also knows auto, its own pick
+const OMP_EFFORT: FieldSpec = choices_field(
+    "effort",
+    "thinking",
+    "defaultThinkingLevel",
+    &["minimal", "low", "medium", "high", "xhigh", "max"],
+);
 const DEVIN_MODEL: FieldSpec = field("model", "model", "agent.model");
 const HERMES_MODEL: FieldSpec = provider_model("model", "model", "model.provider", "model.default");
+// agent.reasoning_effort, which Hermes's /reasoning saves; none turns
+// reasoning off, and unset Hermes asks for medium
+const HERMES_EFFORT: FieldSpec = choices_field(
+    "effort",
+    "effort",
+    "agent.reasoning_effort",
+    &["none", "minimal", "low", "medium", "high", "xhigh"],
+);
 const DSH_MODEL: FieldSpec = field("model", "model", "model");
+// llm-deepseek's reasoningEffort, written into magpie's own entry of dsh's
+// patch list, so the value is read and written with it
+const DSH_EFFORT: FieldSpec = choices_field(
+    "effort",
+    "thinking",
+    "reasoningEffort",
+    &["off", "high", "max"],
+);
 const GROK_MODEL: FieldSpec = field("model", "model", "models.default");
 const GROK_EFFORT: FieldSpec = field("effort", "effort", "models.default_reasoning_effort");
 const ZCODE_PROVIDER: FieldSpec = field("provider", "provider", "provider.magpie");
@@ -250,7 +307,7 @@ pub static ALL_AGENTS: &[AgentSpec] = &[
         executable: "claude",
         relative_path: ".claude/settings.json",
         format: ConfigFormat::Jsonc,
-        fields: &[CLAUDE_MODEL],
+        fields: &[CLAUDE_MODEL, CLAUDE_EFFORT],
     },
     AgentSpec {
         id: "codex",
@@ -295,7 +352,7 @@ pub static ALL_AGENTS: &[AgentSpec] = &[
         executable: "goose",
         relative_path: ".config/goose/config.yaml",
         format: ConfigFormat::Yaml,
-        fields: &[GOOSE_MODEL],
+        fields: &[GOOSE_MODEL, GOOSE_EFFORT],
     },
     AgentSpec {
         id: "cursor",
@@ -313,7 +370,7 @@ pub static ALL_AGENTS: &[AgentSpec] = &[
         executable: "copilot",
         relative_path: ".copilot/settings.json",
         format: ConfigFormat::Jsonc,
-        fields: &[COPILOT_MODEL],
+        fields: &[COPILOT_MODEL, COPILOT_EFFORT],
     },
     AgentSpec {
         id: "crush",
@@ -322,7 +379,7 @@ pub static ALL_AGENTS: &[AgentSpec] = &[
         executable: "crush",
         relative_path: ".config/crush/crush.json",
         format: ConfigFormat::Jsonc,
-        fields: &[CRUSH_LARGE, CRUSH_SMALL],
+        fields: &[CRUSH_LARGE, CRUSH_SMALL, CRUSH_EFFORT],
     },
     AgentSpec {
         id: "dsh",
@@ -331,7 +388,7 @@ pub static ALL_AGENTS: &[AgentSpec] = &[
         executable: "dsh",
         relative_path: ".dsh/config.yaml",
         format: ConfigFormat::Yaml,
-        fields: &[DSH_MODEL],
+        fields: &[DSH_MODEL, DSH_EFFORT],
     },
     AgentSpec {
         id: "commandcode",
@@ -340,7 +397,7 @@ pub static ALL_AGENTS: &[AgentSpec] = &[
         executable: "command-code",
         relative_path: ".commandcode/settings.json",
         format: ConfigFormat::Jsonc,
-        fields: &[COMMAND_CODE_MODEL],
+        fields: &[COMMAND_CODE_MODEL, COMMAND_CODE_EFFORT],
     },
     AgentSpec {
         id: "omp",
@@ -349,7 +406,7 @@ pub static ALL_AGENTS: &[AgentSpec] = &[
         executable: "omp",
         relative_path: ".omp/agent/config.yml",
         format: ConfigFormat::Yaml,
-        fields: &[OMP_MODEL],
+        fields: &[OMP_MODEL, OMP_EFFORT],
     },
     AgentSpec {
         id: "devin",
@@ -367,7 +424,7 @@ pub static ALL_AGENTS: &[AgentSpec] = &[
         executable: "hermes",
         relative_path: ".hermes/config.yaml",
         format: ConfigFormat::Yaml,
-        fields: &[HERMES_MODEL],
+        fields: &[HERMES_MODEL, HERMES_EFFORT],
     },
     AgentSpec {
         id: "grok",
@@ -460,7 +517,10 @@ impl Agent {
 
     pub fn values(&self) -> Result<Vec<(&'static str, String)>> {
         if self.spec.id == "dsh" {
-            return Ok(vec![("model", crate::dsh::get(&self.path)?)]);
+            return Ok(vec![
+                ("model", crate::dsh::get(&self.path)?),
+                ("effort", crate::dsh::get_effort(&self.path)?),
+            ]);
         }
         if self.spec.id == "zcode" {
             let wired = zcode::wired(&self.path)?;
@@ -481,6 +541,11 @@ impl Agent {
             .fields
             .iter()
             .map(|field| {
+                if self.spec.id == "commandcode" && field.key == "effort" {
+                    // Command Code keeps an effort for each model: the value
+                    // shown is the current model's, not the map's.
+                    return Ok((field.key, self.commandcode_effort()?));
+                }
                 let model =
                     config::get(&self.path, self.spec.format, field.path)?.unwrap_or_default();
                 let value = match field.provider_path {
@@ -552,6 +617,27 @@ impl Agent {
         }
         if self.spec.id == "codex" && field.key == "model" {
             return self.set_codex_model(value);
+        }
+        if self.spec.id == "dsh" && field.key == "effort" {
+            return crate::dsh::set_effort(&self.path, value);
+        }
+        if self.spec.id == "commandcode" && field.key == "effort" {
+            return self.set_commandcode_effort(value);
+        }
+        if self.spec.id == "crush" && field.key == "effort" {
+            let large = config::get(&self.path, self.spec.format, "models.large.model")?
+                .unwrap_or_default();
+            ensure!(
+                !large.is_empty(),
+                "pick Crush's large model first; the effort is kept with it"
+            );
+        }
+        if self.spec.id == "claude" && field.key == "effort" {
+            ensure!(
+                value.is_empty() || CLAUDE_EFFORTS.contains(&value),
+                "Claude Code keeps an effort of {}, not {value:?}",
+                CLAUDE_EFFORTS.join(", ")
+            );
         }
 
         if value.is_empty() {
@@ -848,6 +934,42 @@ impl Agent {
         }
         config::set(&self.path, self.spec.format, "model", value)?;
         config::delete(&providers_path, ConfigFormat::Jsonc, "provider.magpie")
+    }
+
+    // commandcode_effort is the effort kept for the model Command Code is on
+    // now, of the map its settings hold for every model.
+    fn commandcode_effort(&self) -> Result<String> {
+        let model = config::get(&self.path, self.spec.format, "model")?.unwrap_or_default();
+        Ok(cc_efforts(&self.path)?
+            .get(model.as_str())
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned())
+    }
+
+    fn set_commandcode_effort(&self, value: &str) -> Result<()> {
+        let model = config::get(&self.path, self.spec.format, "model")?.unwrap_or_default();
+        ensure!(
+            !model.is_empty(),
+            "pick Command Code's model first; it keeps an effort for each model"
+        );
+        let mut efforts = cc_efforts(&self.path)?;
+        if value.is_empty() {
+            efforts.remove(&model);
+        } else {
+            efforts.insert(model, Value::String(value.to_owned()));
+        }
+        if efforts.is_empty() {
+            return config::delete(&self.path, self.spec.format, COMMAND_CODE_EFFORT.path);
+        }
+        // written whole, as the model ids it keys hold dots
+        config::set_jsonc_values(
+            &self.path,
+            &[(
+                COMMAND_CODE_EFFORT.path,
+                Value::Object(efforts),
+            )],
+        )
     }
 
     fn set_pi_model(&self, value: &str) -> Result<()> {
@@ -1568,6 +1690,15 @@ fn opencode_provider() -> Result<Value> {
         },
         "models": models,
     }))
+}
+
+// cc_efforts is settings.json's reasoningEffort: the effort Command Code
+// starts a session with, kept for each model its /effort was used on.
+fn cc_efforts(path: &Path) -> Result<serde_json::Map<String, Value>> {
+    Ok(config::get(path, ConfigFormat::Jsonc, COMMAND_CODE_EFFORT.path)?
+        .and_then(|stored| serde_json::from_str::<Value>(&stored).ok())
+        .and_then(|value| value.as_object().cloned())
+        .unwrap_or_default())
 }
 
 fn commandcode_has_magpie_model(agent: &Agent) -> Result<bool> {

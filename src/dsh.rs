@@ -10,6 +10,9 @@ use crate::{agent, config, provider};
 const MAGPIE_MARK: &str = "# magpie";
 const API_KEY_ENV: &str = "MAGPIE_API_KEY";
 
+// EFFORTS are the thinking levels dsh knows; unset dsh starts on high.
+const EFFORTS: &[&str] = &["off", "high", "max"];
+
 #[derive(Default)]
 struct PatchFile {
     head: Vec<String>,
@@ -211,6 +214,76 @@ fn patch_model(line: &str) -> Option<String> {
     Some(value.trim_matches('\'').to_owned())
 }
 
+// files are the patch lists magpie writes: every profile's, else config.yaml.
+fn files(directory: &Path, config_path: &Path) -> Result<Vec<PathBuf>> {
+    let mut paths = profiles(directory)?;
+    if paths.is_empty() {
+        paths.push(config_path.to_owned());
+    }
+    Ok(paths)
+}
+
+// effort_in is the thinking effort the sessions magpie starts begin on, read
+// from magpie's own DeepSeek entry; another tool's entry is left alone.
+fn effort_in(patch: &PatchFile) -> Option<String> {
+    let entry = &patch.entries[patch.find("llm-deepseek")?];
+    if !entry.magpie {
+        return None;
+    }
+    entry.lines.iter().find_map(|line| {
+        let (key, value) = line.trim().split_once(':')?;
+        (key == "reasoningEffort").then(|| value.trim().trim_matches(|c| c == '\'' || c == '"').to_owned())
+    })
+}
+
+// get_effort is what the first patch list magpie writes keeps, if any.
+pub fn get_effort(config_path: &Path) -> Result<String> {
+    let directory = directory(config_path);
+    let path = profiles(directory)?
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| config_path.to_owned());
+    let patch = read_patch(&path)?;
+    Ok(patch.as_ref().and_then(effort_in).unwrap_or_default())
+}
+
+// set_effort writes the thinking effort into every DeepSeek entry magpie
+// wrote; dsh's own row is used whole when there is none, so the effort goes
+// with a model through magpie.
+pub fn set_effort(config_path: &Path, value: &str) -> Result<()> {
+    ensure!(
+        value.is_empty() || EFFORTS.contains(&value),
+        "DeepSeek Harness takes an effort of {}, not {value:?}",
+        EFFORTS.join(", ")
+    );
+
+    let directory = directory(config_path);
+    let mut done = false;
+    for path in files(directory, config_path)? {
+        let Some(mut patch) = read_patch(&path)? else {
+            continue;
+        };
+        let Some(index) = patch.find("llm-deepseek") else {
+            continue;
+        };
+        if !patch.entries[index].magpie {
+            continue;
+        }
+        let modern = patch.entries[index]
+            .lines
+            .iter()
+            .any(|line| line.trim_start().starts_with("apiKeyEnv:"));
+        patch.entries[index].lines = provider_lines(modern, value)?;
+        patch.write(&path)?;
+        done = true;
+    }
+    ensure!(
+        done || value.is_empty(),
+        "pick a model through magpie for DeepSeek Harness first; the effort is kept with magpie's DeepSeek entry"
+    );
+    Ok(())
+}
+
 pub fn set(config_path: &Path, value: &str) -> Result<()> {
     if let Some(model) = value.strip_prefix("magpie/") {
         ensure!(agent::is_gateway_model(model)?, "unknown model {value:?}");
@@ -256,6 +329,8 @@ pub fn set(config_path: &Path, value: &str) -> Result<()> {
 
 fn set_file(path: &Path, value: &str, modern: bool) -> Result<()> {
     let mut patch = read_patch(path)?.unwrap_or_default();
+    // a model through magpie keeps the effort its entry already holds
+    let effort = effort_in(&patch).unwrap_or_default();
     let model = value.strip_prefix("magpie/");
     match (value.is_empty(), modern, model) {
         (true, _, _) => {
@@ -265,7 +340,12 @@ fn set_file(path: &Path, value: &str, modern: bool) -> Result<()> {
             drop_entry(&mut patch, path, "llm-deepseek")?;
         }
         (false, true, Some(model)) => {
-            put_entry(&mut patch, path, "llm-deepseek", provider_lines(true)?)?;
+            put_entry(
+                &mut patch,
+                path,
+                "llm-deepseek",
+                provider_lines(true, &effort)?,
+            )?;
             put_entry(
                 &mut patch,
                 path,
@@ -283,7 +363,12 @@ fn set_file(path: &Path, value: &str, modern: bool) -> Result<()> {
             )?;
         }
         (false, false, Some(model)) => {
-            put_entry(&mut patch, path, "llm-deepseek", provider_lines(false)?)?;
+            put_entry(
+                &mut patch,
+                path,
+                "llm-deepseek",
+                provider_lines(false, &effort)?,
+            )?;
             put_entry(&mut patch, path, "agent-loop", loop_lines(model)?)?;
             put_entry(&mut patch, path, "api-gateway", route_lines(model)?)?;
         }
@@ -351,19 +436,23 @@ fn quote(value: &str) -> Result<String> {
     serde_json::to_string(value).context("quote YAML string")
 }
 
-fn provider_lines(modern: bool) -> Result<Vec<String>> {
+// provider_lines is the DeepSeek entry pointing dsh at the gateway, with the
+// catalog as the models its /model offers; effort is the thinking level
+// sessions start on, dsh's own default when empty.
+fn provider_lines(modern: bool, effort: &str) -> Result<Vec<String>> {
     let key = if modern {
         format!("    apiKeyEnv: {API_KEY_ENV}")
     } else {
         format!("    apiKey: {}", quote(crate::gateway::TOKEN)?)
     };
+    let effort = if effort.is_empty() { "high" } else { effort };
     let mut lines = vec![
         format!("- id: llm-deepseek {MAGPIE_MARK}"),
         "  config:".to_owned(),
         key,
         format!("    baseURL: {}", quote(&crate::gateway::v1_url())?),
         "    thinking: enabled".to_owned(),
-        "    reasoningEffort: high".to_owned(),
+        format!("    reasoningEffort: {effort}"),
         "    models:".to_owned(),
     ];
     let models = catalog_models()?;
@@ -452,12 +541,7 @@ fn route_lines(model: &str) -> Result<Vec<String>> {
 
 pub fn sync(config_path: &Path) -> Result<()> {
     let directory = directory(config_path);
-    let mut paths = profiles(directory)?;
-    if paths.is_empty() {
-        paths.push(config_path.to_owned());
-    }
-
-    for path in paths {
+    for path in files(directory, config_path)? {
         let Ok(Some(mut patch)) = read_patch(&path) else {
             continue;
         };
@@ -471,7 +555,9 @@ pub fn sync(config_path: &Path) -> Result<()> {
             .lines
             .iter()
             .any(|line| line.trim_start().starts_with("apiKeyEnv:"));
-        let lines = provider_lines(modern)?;
+        // rewriting the entry keeps the effort it was given
+        let effort = effort_in(&patch).unwrap_or_default();
+        let lines = provider_lines(modern, &effort)?;
         if patch.entries[index].lines == lines {
             continue;
         }
