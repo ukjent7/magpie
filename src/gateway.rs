@@ -803,6 +803,52 @@ async fn forward(
     move_resting_routes_last(&mut candidates);
     apply_affinity(&mut candidates, &affinity_context, rotate_affinity);
 
+    // a group's rules: as a turn begins, the first rule it matches sends
+    // the turn to its member, put ahead of the others for the failover
+    let mut rule_key = String::new();
+    if let Some(group) = group
+        && let Some(saved) = crate::provider::groups()
+            .ok()
+            .and_then(|groups| groups.into_iter().find(|saved| saved.id == group.id))
+    {
+        let rules = crate::grouprule::rules_of(&saved);
+        if !rules.is_empty() {
+            let request_view = crate::grouprule::parse(protocol, &body);
+            let contexts = crate::grouprule::member_contexts(&group.members);
+            rule_key = crate::grouprule::rule_key(&group.id, &parts.headers, &request_view);
+            let agent_id = crate::usage::agent_of(
+                parts
+                    .headers
+                    .get(header::USER_AGENT)
+                    .and_then(|value| value.to_str().ok())
+                    .unwrap_or_default(),
+            );
+            let hit = crate::grouprule::rule_for(
+                &rule_key,
+                &rules,
+                &crate::grouprule::classifier_of(&saved),
+                &request_view,
+                &agent_id,
+                &contexts,
+                Some(&crate::grouprule::classify::GatewayClassifier),
+            )
+            .await;
+            if let Some(hit) = hit
+                && hit.n > 0
+                && !hit.held
+                && !hit.waits
+                && !hit.unready
+                && let Some((member_provider, member_model)) = hit.use_.split_once('/')
+                && let Some(position) = candidates.iter().position(|candidate| {
+                    candidate.provider.id == member_provider && candidate.model == member_model
+                })
+            {
+                let member = candidates.remove(position);
+                candidates.insert(0, member);
+            }
+        }
+    }
+
     let mut selected = None;
     for (index, candidate) in candidates.iter().enumerate() {
         let is_last = index + 1 == candidates.len();

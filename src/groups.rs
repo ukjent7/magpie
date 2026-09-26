@@ -14,6 +14,7 @@ pub fn command(args: &[String]) -> Result<()> {
         [verb] if matches!(verb.as_str(), "list" | "ls") => list(),
         [verb, rest @ ..] if matches!(verb.as_str(), "add" | "new") => add(rest),
         [verb, rest @ ..] if matches!(verb.as_str(), "set" | "edit") => set(rest),
+        [verb, rest @ ..] if verb == "rule" => crate::grouprule::command(rest),
         [verb, reference] if matches!(verb.as_str(), "rm" | "remove" | "delete") => {
             remove(reference)
         }

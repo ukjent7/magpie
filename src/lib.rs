@@ -20,6 +20,7 @@ pub mod desktop;
 mod dsh;
 pub mod gateway;
 mod gemini;
+mod grouprule;
 pub mod groups;
 mod netproxy;
 pub mod profile;
