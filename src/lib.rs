@@ -9,6 +9,7 @@ mod affinity;
 pub mod agent;
 pub mod backup;
 pub mod catalog;
+mod claudebridge;
 pub mod cli;
 mod codex;
 mod codexcat;

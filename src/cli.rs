@@ -103,6 +103,9 @@ async fn run(cli: Cli) -> Result<()> {
         [command, rest @ ..] if command == "restore" => crate::backup::restore_command(rest),
         [command, rest @ ..] if command == "import" => crate::provider::import_command(rest).await,
         [command, rest @ ..] if command == "update" => crate::update::command(rest).await,
+        [command, rest @ ..] if command == "claude-mcp-helper" => {
+            crate::claudebridge::run(rest).await
+        }
         [command] if command == "ls" || command == "list" => list_agents(true),
         [command] if command == "providers" => crate::provider::list(),
         [command] if command == "models" => crate::provider::models().await,
