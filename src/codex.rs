@@ -94,7 +94,7 @@ fn home_directory() -> Option<PathBuf> {
 }
 
 pub(crate) fn signed_in_auth_file() -> Option<PathBuf> {
-    let path = codex_directory()?.join("auth.json");
+    let path = auth_file_path()?;
     let contents = std::fs::read(&path).ok()?;
     let auth: Value = serde_json::from_slice(&contents).ok()?;
     let auth_mode = auth
@@ -106,6 +106,10 @@ pub(crate) fn signed_in_auth_file() -> Option<PathBuf> {
         .and_then(Value::as_str)
         .unwrap_or_default();
     (auth_mode != "apikey" && !access_token.is_empty()).then_some(path)
+}
+
+pub(crate) fn auth_file_path() -> Option<PathBuf> {
+    codex_directory().map(|directory| directory.join("auth.json"))
 }
 
 pub(crate) fn signed_in_identity() -> Option<(String, String)> {

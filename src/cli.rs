@@ -269,6 +269,8 @@ fn usage() -> String {
         "  magpie import [-y] <link>       add a provider from a magpie:// link",
         "  magpie import apps [claude|codex] [-y] import configured providers",
         "  magpie accounts [agent] [--json] list subscription accounts",
+        "  magpie accounts switch codex <user> switch a remembered Codex account",
+        "  magpie accounts forget codex <user> forget a saved Codex account",
         "",
         "  magpie providers                list API providers",
         "  magpie models                   list exposed provider models",

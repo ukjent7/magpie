@@ -1,21 +1,27 @@
-use std::{fs, path::PathBuf};
+use std::{collections::BTreeMap, fs, path::PathBuf};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 use crate::{codex, copilot, settings};
 
-const USAGE: &str =
-    "usage: magpie accounts [claude|codex|grok|copilot|gemini|antigravity] [--json]";
+const USAGE: &str = "usage: magpie accounts [claude|codex|grok|copilot|gemini|antigravity] [--json] | magpie accounts switch|forget codex <user>";
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Clone, Default, Deserialize, Serialize)]
 #[serde(default)]
 struct SavedLogin {
     agent: String,
     user: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     plan: Option<String>,
+    seen: Option<Value>,
+    #[serde(skip_serializing_if = "is_false")]
     on: bool,
+    auth: Option<Value>,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
 }
 
 #[derive(Debug, Serialize)]
@@ -36,6 +42,13 @@ pub(crate) fn command(args: &[String]) -> Result<()> {
     {
         println!("{USAGE}");
         return Ok(());
+    }
+
+    if args
+        .first()
+        .is_some_and(|arg| arg.eq_ignore_ascii_case("switch") || arg.eq_ignore_ascii_case("forget"))
+    {
+        return mutate_account(args);
     }
 
     if let Some(subcommand) = args.first().filter(|arg| {
@@ -84,6 +97,31 @@ pub(crate) fn command(args: &[String]) -> Result<()> {
     Ok(())
 }
 
+fn mutate_account(args: &[String]) -> Result<()> {
+    let [action, agent, user] = args else {
+        bail!("{USAGE}");
+    };
+    let Some(agent) = canonical_agent(agent) else {
+        bail!("unknown agent {agent:?}\n{USAGE}");
+    };
+    ensure!(
+        agent == "codex",
+        "Rust account switching and forgetting currently support Codex only"
+    );
+
+    match action.to_ascii_lowercase().as_str() {
+        "switch" => switch_codex_account(user)?,
+        "forget" => forget_codex_account(user)?,
+        _ => unreachable!("mutate_account only handles switch and forget"),
+    }
+    if action.eq_ignore_ascii_case("switch") {
+        println!("✓ codex is now signed in as {user}");
+    } else {
+        println!("✓ forgot {user}");
+    }
+    Ok(())
+}
+
 fn canonical_agent(argument: &str) -> Option<&'static str> {
     match argument.to_ascii_lowercase().as_str() {
         "claude" | "cc" => Some("claude"),
@@ -108,6 +146,116 @@ fn read_saved_logins() -> Result<Vec<SavedLogin>> {
         Err(error) => return Err(error).with_context(|| format!("read {}", path.display())),
     };
     serde_json::from_slice(&contents).with_context(|| format!("parse {}", path.display()))
+}
+
+fn write_saved_logins(logins: &mut [SavedLogin]) -> Result<()> {
+    logins.sort_by_cached_key(|login| (login.agent.clone(), login.user.to_lowercase()));
+    let path = logins_path();
+    let mut contents = serde_json::to_vec_pretty(logins).context("serialize saved accounts")?;
+    contents.push(b'\n');
+    crate::config::atomic_write_secret_for_settings(&path, &contents)
+        .with_context(|| format!("write {}", path.display()))
+}
+
+fn switch_codex_account(user: &str) -> Result<()> {
+    let mut logins = read_saved_logins()?;
+    let index = logins
+        .iter()
+        .rposition(|login| login.agent == "codex" && login.user.eq_ignore_ascii_case(user))
+        .with_context(|| format!("no saved Codex account {user:?}"))?;
+    let target = logins[index].clone();
+    let target_user = target.user.clone();
+    let auth = target
+        .auth
+        .as_ref()
+        .context("the saved Codex sign-in has no credentials")?;
+    ensure!(
+        usable_codex_auth(auth),
+        "the saved Codex sign-in is unreadable"
+    );
+
+    if codex::signed_in_identity()
+        .is_some_and(|(active, _)| active.eq_ignore_ascii_case(&target.user))
+    {
+        return Ok(());
+    }
+
+    if let Some(mut current) = live_codex_login()? {
+        current.on = target.on;
+        upsert_login(&mut logins, current);
+        for login in &mut logins {
+            if login.agent == "codex" && login.user.eq_ignore_ascii_case(&target_user) {
+                login.on = target.on;
+            }
+        }
+        write_saved_logins(&mut logins)?;
+    }
+
+    let auth_file = codex::auth_file_path().context("cannot locate Codex auth.json")?;
+    let mut contents = serde_json::to_vec_pretty(auth).context("serialize saved Codex sign-in")?;
+    contents.push(b'\n');
+    crate::config::atomic_write_secret_for_settings(&auth_file, &contents)
+        .with_context(|| format!("install Codex sign-in at {}", auth_file.display()))
+}
+
+fn forget_codex_account(user: &str) -> Result<()> {
+    if codex::signed_in_identity().is_some_and(|(active, _)| active.eq_ignore_ascii_case(user)) {
+        bail!("Codex is signed in to {user} now; switch to another account first");
+    }
+
+    let mut logins = read_saved_logins()?;
+    let original_len = logins.len();
+    logins.retain(|login| !(login.agent == "codex" && login.user.eq_ignore_ascii_case(user)));
+    ensure!(
+        original_len != logins.len(),
+        "no saved Codex account {user:?}"
+    );
+    write_saved_logins(&mut logins)
+}
+
+fn live_codex_login() -> Result<Option<SavedLogin>> {
+    let Some(auth_file) = codex::signed_in_auth_file() else {
+        return Ok(None);
+    };
+    let contents = fs::read(&auth_file)
+        .with_context(|| format!("read active Codex sign-in at {}", auth_file.display()))?;
+    let auth: Value = serde_json::from_slice(&contents).context("parse active Codex sign-in")?;
+    let Some((user, plan)) = codex::signed_in_identity() else {
+        return Ok(None);
+    };
+    let seen = OffsetDateTime::now_utc()
+        .format(&Rfc3339)
+        .context("format account timestamp")?;
+    Ok(Some(SavedLogin {
+        agent: "codex".to_owned(),
+        user,
+        plan: nonempty(plan),
+        seen: Some(Value::String(seen)),
+        on: false,
+        auth: Some(auth),
+        extra: BTreeMap::new(),
+    }))
+}
+
+fn usable_codex_auth(auth: &Value) -> bool {
+    auth.get("auth_mode").and_then(Value::as_str) != Some("apikey")
+        && auth
+            .pointer("/tokens/access_token")
+            .and_then(Value::as_str)
+            .is_some_and(|token| !token.is_empty())
+}
+
+fn upsert_login(logins: &mut Vec<SavedLogin>, mut login: SavedLogin) {
+    if let Some(saved) = logins
+        .iter_mut()
+        .find(|saved| saved.agent == login.agent && saved.user.eq_ignore_ascii_case(&login.user))
+    {
+        login.on |= saved.on;
+        login.extra = std::mem::take(&mut saved.extra);
+        *saved = login;
+    } else {
+        logins.push(login);
+    }
 }
 
 fn account_row(login: SavedLogin) -> AccountRow {
@@ -147,9 +295,13 @@ fn nonempty(value: String) -> Option<String> {
     (!value.is_empty()).then_some(value)
 }
 
+fn is_false(value: &bool) -> bool {
+    !value
+}
+
 fn print_rows(rows: &[AccountRow]) {
     if rows.is_empty() {
-        println!("no accounts yet · add one: magpie accounts add <agent>");
+        println!("no accounts yet");
         return;
     }
 
