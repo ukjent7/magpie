@@ -34,6 +34,24 @@ type Server struct {
 // Remote reports whether the server is reached by URL.
 func (s *Server) Remote() bool { return s.Transport == "http" || s.Transport == "sse" }
 
+// ServerOf is a server as it is typed: a URL, or a command and its
+// arguments.
+func ServerOf(name string, cmd []string) (Server, error) {
+	s := Server{Name: name, Agents: []string{}}
+	switch {
+	case len(cmd) == 0:
+		return s, fmt.Errorf("a URL or a command is needed")
+	case strings.HasPrefix(cmd[0], "http://") || strings.HasPrefix(cmd[0], "https://"):
+		if len(cmd) > 1 {
+			return s, fmt.Errorf("a server by URL takes nothing after it")
+		}
+		s.Transport, s.URL = "http", cmd[0]
+	default:
+		s.Transport, s.Command, s.Args = "stdio", cmd[0], cmd[1:]
+	}
+	return s, nil
+}
+
 func (s *Server) check() error {
 	if err := checkName("server", s.Name); err != nil {
 		return err

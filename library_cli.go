@@ -73,27 +73,22 @@ func libraryCmd(args []string) error {
 	case "mcp":
 		switch {
 		case len(rest) >= 3 && rest[0] == "add":
-			s := library.Server{Name: rest[1], Agents: []string{}}
-			var cmd []string
+			var cmd, agents []string
 			for _, a := range rest[2:] {
 				if v, ok := strings.CutPrefix(a, "agents="); ok {
-					if s.Agents, err = libraryAgents(v, "mcp"); err != nil {
+					if agents, err = libraryAgents(v, "mcp"); err != nil {
 						return err
 					}
 				} else {
 					cmd = append(cmd, a)
 				}
 			}
-			switch {
-			case len(cmd) == 0:
-				return fmt.Errorf("a URL or a command is needed")
-			case strings.HasPrefix(cmd[0], "http://") || strings.HasPrefix(cmd[0], "https://"):
-				s.Transport, s.URL = "http", cmd[0]
-				if len(cmd) > 1 {
-					return fmt.Errorf("a server by URL takes nothing after it")
-				}
-			default:
-				s.Transport, s.Command, s.Args = "stdio", cmd[0], cmd[1:]
+			var s library.Server
+			if s, err = library.ServerOf(rest[1], cmd); err != nil {
+				return err
+			}
+			if agents != nil {
+				s.Agents = agents
 			}
 			res, err = library.SaveServer("", s)
 		case len(rest) == 3 && rest[0] == "agents":

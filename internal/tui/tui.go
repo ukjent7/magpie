@@ -1,7 +1,7 @@
 // Package tui is magpie in the terminal: one row per agent, arrow keys to pick
-// a field, enter to change it; and pages for providers, routing groups and
-// usage beside it (pages.go), the library (library.go), 1–5 to go between
-// them.
+// a field, enter to change it; and pages for providers and usage beside it
+// (pages.go), routing groups (routing.go) and the library (library.go), 1–5
+// to go between them.
 package tui
 
 import (
@@ -106,8 +106,9 @@ type model struct {
 	asked     bool // balances were asked for
 	groups    []provider.Group
 	grow      int
+	shown     int    // groups from here on were removed: listed last, to bring back
 	gid       string // the group open
-	gsel      int    // its member picked
+	gsel      int    // its member or rule picked: the members, then the rules
 	period    usage.Period
 	sum       usage.Summary
 	quotas    []provider.SubscriptionQuota // nil while the vendors are asked
@@ -159,7 +160,7 @@ func (m *model) reload() {
 			m.mode = modeList
 		}
 		if g, ok := m.group(); ok {
-			m.gsel = clamp(m.gsel, len(g.Members))
+			m.gsel = clamp(m.gsel, len(g.Members)+len(g.Rules))
 		}
 	case pageUsage:
 		m.sum = usage.Summarize(m.period)
@@ -222,6 +223,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case pickMsg:
 		m.openMemberPicker(msg)
+		return m, nil
+	case probedMsg:
+		m.flash = ""
+		m.openProbe(msg.p)
+		return m, nil
+	case renamedMsg:
+		if m.gid == msg.from {
+			m.gid = msg.to
+		}
+		m.flash, m.flashOK = "group/"+msg.from+" is group/"+msg.to+" now", true
+		m.reload()
 		return m, nil
 	case editedMsg:
 		if msg.err != nil {
@@ -624,10 +636,10 @@ func (m model) View() string {
 			footer = hints("↑↓", "provider", "↵", "models", "e", "key", "a", "add", "f", "family", "u", "list/groups only", "t", "test", "b", "balances", "d", "remove", "1–5", "pages")
 		case pageGroups:
 			body = m.viewGroups()
-			footer = hints("↑↓", "group", "↵", "open", "n", "new", "o", "routing", "d", "remove", "1–5", "pages", "q", "quit")
+			footer = hints("↑↓", "group", "↵", "open", "n", "new", "o", "routing", "d", "remove", "u", "bring back", "1–5", "pages", "q", "quit")
 		case pageLibrary:
 			body = m.viewLibrary()
-			footer = hints("↑↓", "item", "↵", "agents", "e", "edit instructions", "i", "bring in", "d", "remove", "r", "reload", "1–5", "pages", "q", "quit")
+			footer = hints("↑↓", "item", "↵", "agents", "a", "add", "e", "edit", "u", "update skill", "i", "bring in", "d", "remove", "s", "sync", "r", "reload", "1–5", "pages", "q", "quit")
 		case pageUsage:
 			body = m.viewUsage()
 			footer = hints("←→", "period", "t w m A", "today · 7 days · 30 days · all", "u", "used / left", "r", "reload", "1–5", "pages", "q", "quit")
@@ -650,7 +662,9 @@ func (m model) View() string {
 		footer = hints("↵", "save", "esc", "cancel")
 	case modeGroup:
 		body = m.viewGroup()
-		footer = hints("↑↓", "model", "J K", "move down / up", "a", "add", "d", "take out", "o", "routing", "f", "family", "esc", "back")
+		// two lines: there is more to do to a group than one holds
+		footer = hints("↑↓", "model / rule", "J K", "move", "a", "add model", "n", "new rule", "↵", "edit rule", "d", "take out", "esc", "back") + "\n" +
+			pad + hints("c", "classifier", "o", "routing", "s", "stays", "x", "context", "f", "family", "R", "rename")
 	case modeName:
 		body = m.viewName()
 		footer = hints("↵", "save", "esc", "cancel")
@@ -667,7 +681,7 @@ func (m model) View() string {
 	}
 
 	lines := strings.Count(body, "\n") + 1
-	fill := m.h - lines - 3
+	fill := m.h - lines - 3 - strings.Count(footer, "\n")
 	if fill < 1 {
 		fill = 1
 	}
