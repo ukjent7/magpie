@@ -825,16 +825,15 @@ fn codex_del(path: &Path, name: &str) -> Result<()> {
         .as_table_mut()
         .get_mut("mcp_servers")
         .and_then(Item::as_table_mut)
+        && let Some(removed) = servers.remove(name)
     {
-        if let Some(removed) = servers.remove(name) {
-            changed = true;
-            let sep = removed
-                .as_table()
-                .and_then(|t| t.decor().prefix())
-                .and_then(|p| p.as_str())
-                .unwrap_or_default();
-            opened = !sep.contains('\n');
-        }
+        changed = true;
+        let sep = removed
+            .as_table()
+            .and_then(|t| t.decor().prefix())
+            .and_then(|p| p.as_str())
+            .unwrap_or_default();
+        opened = !sep.contains('\n');
     }
     if !changed {
         return Ok(());
