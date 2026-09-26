@@ -3,7 +3,10 @@ use std::{collections::HashMap, env, fs, path::PathBuf};
 use anyhow::{Context, Result, bail, ensure};
 use serde_json::{Value, json};
 
-use crate::config::{self, ConfigFormat};
+use crate::{
+    config::{self, ConfigFormat},
+    settings,
+};
 
 #[derive(Clone, Copy, Debug)]
 pub struct FieldSpec {
