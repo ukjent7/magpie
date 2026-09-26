@@ -3,7 +3,7 @@ use std::{
     fs::{self, OpenOptions},
     io::{BufRead, BufReader, Write},
     path::PathBuf,
-    sync::{Mutex, PoisonError},
+    sync::{LazyLock, Mutex, PoisonError},
     time::Instant,
 };
 
@@ -406,7 +406,8 @@ fn path() -> PathBuf {
 
 // seen is when each agent's latest request reached the gateway in this
 // process — at its start, where a record is written only once it is answered.
-static SEEN: Mutex<HashMap<String, OffsetDateTime>> = Mutex::new(HashMap::new());
+static SEEN: LazyLock<Mutex<HashMap<String, OffsetDateTime>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 // Saw notes a request from an agent arriving now.
 pub(crate) fn saw(agent: &str) {
