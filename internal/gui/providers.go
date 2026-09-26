@@ -63,6 +63,7 @@ type providerJSON struct {
 	Models    []modelJSON        `json:"models"`   // everything the vendor lists, exposed ones flagged
 	Exposed   int                `json:"exposed"`  // how many reach the agents
 	Unlisted  bool               `json:"unlisted"` // its models serve only through routing groups
+	Contexts  map[string]int     `json:"contexts,omitempty"` // the windows the user set, "*" for all its models
 	Fetched   string             `json:"fetched"`  // "3h ago" when the list came from the vendor
 	Agents    []providerAgent    `json:"agents"`   // detected agents, current ones flagged
 	Sponsored bool               `json:"sponsored"`
@@ -152,7 +153,7 @@ func providerInfo(p provider.Provider, agents []*agent.Agent) providerJSON {
 		Catalog: p.Catalog, Website: p.Website, KeysURL: p.KeysURL,
 		Headers: p.Headers, BalanceURL: p.BalanceURL, BalancePath: p.BalancePath, ModelsURL: p.ModelsURL,
 		Ready: p.Ready(), Chosen: p.Models, Models: []modelJSON{}, Agents: []providerAgent{},
-		Fallback: p.Fallback, Routing: p.Routing, Affinity: p.Affinity, Unlisted: p.Unlisted,
+		Fallback: p.Fallback, Routing: p.Routing, Affinity: p.Affinity, Unlisted: p.Unlisted, Contexts: p.Contexts,
 	}
 	if out.Fallback == nil {
 		out.Fallback = []string{}
@@ -352,7 +353,7 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 			// a preset needs nothing but the key; a saved provider keeps
 			// its key when the form left it blank
 			if pr, err := provider.FromPreset(in.Preset); err == nil && in.Chat == "" && in.Responses == "" && in.Anthropic == "" {
-				pr.Key, pr.Models, pr.Fallback, pr.Headers, pr.BalanceToken = in.Key, in.Models, in.Fallback, in.Headers, in.BalanceToken
+				pr.Key, pr.Models, pr.Fallback, pr.Headers, pr.BalanceToken, pr.Contexts = in.Key, in.Models, in.Fallback, in.Headers, in.BalanceToken, in.Contexts
 				if in.Name != "" {
 					pr.Name = in.Name
 				}
@@ -384,7 +385,7 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 					in.Keys = old.Keys
 					in.Routing = old.Routing // set on its own, with route
 					if in.Contexts == nil {
-						in.Contexts = old.Contexts // set from the terminal
+						in.Contexts = old.Contexts // a save that doesn't say
 					}
 					if in.Key == old.Key {
 						in.KeyName, in.KeyProtocol = old.KeyName, old.KeyProtocol

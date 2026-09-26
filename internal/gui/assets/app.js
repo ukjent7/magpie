@@ -2105,7 +2105,7 @@ function renderEditor(p, presetID) {
   // more provider of it, under a name and id of its own
   const another = isNew && !!pr?.added;
   draft = draft || (p
-    ? { id: p.id, name: p.name, preset: p.preset, chat: p.chat, responses: p.responses, anthropic: p.anthropic, catalog: p.catalog, key: "", api: p.chat ? "openai" : p.anthropic ? "anthropic" : p.responses ? "responses" : "openai", chosen: p.models.filter((m) => m.on).map((m) => m.id), extra: [], headers: headerRows(p.headers), icon: p.icon || "", fallback: [...(p.fallback || [])], unlisted: !!p.unlisted, balanceURL: p.balanceURL || "", balancePath: p.balancePath || "", modelsURL: p.modelsURL || "" }
+    ? { id: p.id, name: p.name, preset: p.preset, chat: p.chat, responses: p.responses, anthropic: p.anthropic, catalog: p.catalog, key: "", api: p.chat ? "openai" : p.anthropic ? "anthropic" : p.responses ? "responses" : "openai", chosen: p.models.filter((m) => m.on).map((m) => m.id), extra: [], headers: headerRows(p.headers), icon: p.icon || "", fallback: [...(p.fallback || [])], unlisted: !!p.unlisted, balanceURL: p.balanceURL || "", balancePath: p.balancePath || "", modelsURL: p.modelsURL || "", contexts: contextsText(p.contexts) }
     : pr
       ? { id: pr.id, name: pr.name, preset: pr.id, key: "", chosen: [], extra: [], headers: [] }
       : { id: "", name: "", preset: "", chat: "", responses: "", anthropic: "", catalog: "", key: "", api: "openai", chosen: [], extra: [], headers: [], icon: "" });
@@ -2293,6 +2293,13 @@ function renderEditor(p, presetID) {
   }
 
   if (p) ed.append(...field(t("Models"), renderModels(p), ""));
+  {
+    // the window agents are told a model has, over what the vendor or
+    // models.dev says: one for all of them, and model=size for one
+    const cx = input(draft.contexts || "", t("e.g. 128k · or gpt-6=1m, comma separated"));
+    cx.oninput = () => { draft.contexts = cx.value; };
+    ed.append(...field(t("Context window"), cx, t("How long a request the models take, told to the agents; empty leaves it to the vendor and models.dev")));
+  }
   if (p) ed.append(...field(t("Fallback"), renderFallback(p), fallbackHint(p)));
   else if (custom) {
     const ex = input(draft.extra.join(", "), t("model ids, comma separated · e.g. gpt-5.5, claude-sonnet-5"));
@@ -2370,6 +2377,9 @@ function renderEditor(p, presetID) {
     const body = { id: draft.id, name: draft.name, preset: draft.preset, key: draft.key || "", chat: draft.chat, responses: draft.responses, anthropic: draft.anthropic, catalog: draft.catalog, models: p ? draft.chosen : draft.extra, headers: headersOf(draft.headers), new: isNew };
     if (custom) { body.icon = draft.icon || "generic"; body.balanceURL = (draft.balanceURL || "").trim(); body.balancePath = (draft.balancePath || "").trim(); body.modelsURL = (draft.modelsURL || "").trim(); }
     if (p) { body.fallback = draft.fallback; body.unlisted = draft.unlisted; }
+    const cx = parseContexts(draft.contexts || "");
+    if (cx.error) return editorError(t("Context window: {v} is not a length like 128k or 1m", { v: cx.error }), "warn");
+    body.contexts = cx.map;
     if (draft.balanceToken) body.balanceToken = draft.balanceToken;
     else if (draft.clearBalanceToken) body.clearBalanceToken = true;
     if (isNew && custom && !body.name) { name.focus(); return editorError(t("Give it a name"), "warn"); }
@@ -2383,6 +2393,31 @@ function renderEditor(p, presetID) {
   ed.append(bar);
   setTimeout(() => (isNew ? (custom || another ? name : key) : null)?.focus(), 0);
   return ed;
+}
+
+// contextsText is a provider's contexts as the editor shows them: the one
+// for all its models first, then model=size.
+function contextsText(cx) {
+  if (!cx) return "";
+  const size = (n) => n % 1e6 === 0 ? n / 1e6 + "m" : n % 1e3 === 0 ? n / 1e3 + "k" : String(n);
+  const out = cx["*"] ? [size(cx["*"])] : [];
+  for (const [id, n] of Object.entries(cx).sort()) if (id !== "*") out.push(id + "=" + size(n));
+  return out.join(", ");
+}
+
+// parseContexts reads "128k, gpt-6=1m" back: sizes by model id, "*" for
+// all; error is the first part that isn't a size.
+function parseContexts(text) {
+  const map = {};
+  for (const part of text.split(/[,，\n]/).map((x) => x.trim()).filter(Boolean)) {
+    const i = part.lastIndexOf("=");
+    const id = i < 0 ? "*" : part.slice(0, i).trim(), v = (i < 0 ? part : part.slice(i + 1)).trim().toLowerCase().replace(/_/g, "");
+    const m = /^(\d+(?:\.\d+)?)([km]?)$/.exec(v);
+    if (!m || !id) return { error: part };
+    const n = Math.round(parseFloat(m[1]) * (m[2] === "m" ? 1e6 : m[2] === "k" ? 1e3 : 1));
+    if (n > 0) map[id] = n;
+  }
+  return { map };
 }
 
 // fetchImportIcon asks the server to download the vendor's own logo, named
