@@ -27,9 +27,9 @@ func quotas(ctx context.Context) (subs, plans, balances []SubscriptionQuota) {
 // notShown is the plans not already on a subscription's card: a GLM
 // Coding plan read with a Zhipu or Z.ai key is the ZCode account's own
 // when ZCode is signed in to the same account, and shown once, on its
-// card, which counts the calls.
+// card, which counts the calls. plans, PlanQuotas' cache, is left as it is.
 func notShown(plans, subs []SubscriptionQuota) []SubscriptionQuota {
-	return slices.DeleteFunc(plans, func(p SubscriptionQuota) bool {
+	return slices.DeleteFunc(slices.Clone(plans), func(p SubscriptionQuota) bool {
 		return slices.ContainsFunc(subs, func(s SubscriptionQuota) bool { return sameAccount(p, s) })
 	})
 }

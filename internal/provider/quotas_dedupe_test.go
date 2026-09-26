@@ -34,3 +34,15 @@ func TestPlanOfASignedInAccountShownOnce(t *testing.T) {
 		t.Fatalf("%+v", got)
 	}
 }
+
+// Leaving a plan out doesn't touch the list it was left out of, which is
+// PlanQuotas' cache.
+func TestPlanLeftOutOfACopy(t *testing.T) {
+	r := time.Now()
+	w := []QuotaWindow{{Span: time.Hour, ResetsAt: &r}}
+	plans := []SubscriptionQuota{{Provider: "a", Windows: w}, {Provider: "b"}}
+	notShown(plans, []SubscriptionQuota{{Windows: w}})
+	if plans[0].Provider != "a" || plans[1].Provider != "b" {
+		t.Fatalf("%+v", plans)
+	}
+}
