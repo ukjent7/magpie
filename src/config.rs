@@ -225,6 +225,27 @@ pub fn set_jsonc_values(path: &Path, assignments: &[(&str, Value)]) -> Result<()
     write_atomic(path, updated.as_bytes())
 }
 
+pub fn set_yaml_values(path: &Path, assignments: &[(&str, Value)]) -> Result<()> {
+    let text = read_optional(path)?.unwrap_or_default();
+    let document = if text.trim().is_empty() {
+        Document::new_mapping()
+    } else {
+        Document::from_str(&text).context("parse YAML")?
+    };
+    for (key_path, value) in assignments {
+        let encoded = serde_json::to_string(value).context("serialize YAML value")?;
+        let source = Document::from_str(&format!("value: {encoded}\n"))
+            .context("parse structured YAML value")?;
+        let node = source
+            .get("value")
+            .context("structured YAML value has no root value")?;
+        document
+            .try_set_path(key_path, node)
+            .with_context(|| format!("set YAML field {key_path:?}"))?;
+    }
+    write_atomic(path, document.to_string().as_bytes())
+}
+
 pub fn delete(path: &Path, format: ConfigFormat, key_path: &str) -> Result<()> {
     delete_many(path, format, &[key_path])
 }

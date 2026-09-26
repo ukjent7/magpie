@@ -389,6 +389,9 @@ impl Agent {
         if self.spec.id == "crush" && field.provider_path.is_some() {
             return self.set_crush_model(field, value);
         }
+        if self.spec.id == "hermes" && field.key == "model" {
+            return self.set_hermes_model(value);
+        }
         if self.spec.id == "gemini" && field.key == "model" {
             return self.set_gemini_model(value);
         }
@@ -733,6 +736,37 @@ impl Agent {
         }
         Ok(())
     }
+
+    fn set_hermes_model(&self, value: &str) -> Result<()> {
+        let routed = hermes_gateway_configured(self)?;
+        if value.is_empty() {
+            if routed {
+                return restore_hermes_config(self);
+            }
+            return config::delete(&self.path, self.spec.format, HERMES_MODEL.path);
+        }
+
+        if let Some(model) = value.strip_prefix("magpie/") {
+            ensure!(
+                is_gateway_model(model)?,
+                "{model:?} is not a model currently served by magpie"
+            );
+            if !routed {
+                stash_hermes_config(self)?;
+            }
+            config::set_yaml_values(&self.path, &[("providers.magpie", hermes_provider()?)])?;
+            return config::set_many(
+                &self.path,
+                self.spec.format,
+                &[("model.provider", "magpie"), ("model.default", model)],
+            );
+        }
+
+        if routed {
+            restore_hermes_config(self)?;
+        }
+        config::set(&self.path, self.spec.format, HERMES_MODEL.path, value)
+    }
 }
 
 pub fn sync_catalog_models() -> Result<()> {
@@ -771,6 +805,12 @@ pub fn sync_catalog_models() -> Result<()> {
         && crush_has_magpie_model(&agent)?
     {
         config::set_jsonc_value(&agent.path, "providers.magpie", &crush_provider()?)?;
+    }
+
+    if let Some(agent) = all().into_iter().find(|agent| agent.spec.id == "hermes")
+        && hermes_gateway_configured(&agent)?
+    {
+        config::set_yaml_values(&agent.path, &[("providers.magpie", hermes_provider()?)])?;
     }
 
     let Some(agent) = all().into_iter().find(|agent| agent.spec.id == "opencode") else {
@@ -1500,6 +1540,88 @@ fn crush_model(id: &str, name: &str, context: usize, can_reason: bool) -> Value 
         "default_max_tokens": 16_384,
         "can_reason": can_reason,
     })
+}
+
+fn hermes_gateway_configured(agent: &Agent) -> Result<bool> {
+    Ok(config::get(&agent.path, agent.spec.format, "model.provider")?.as_deref() == Some("magpie"))
+}
+
+fn hermes_stash_key(agent: &Agent, key: &str) -> String {
+    format!("hermes:{}:{key}", agent.path.display())
+}
+
+fn stash_hermes_config(agent: &Agent) -> Result<()> {
+    let mut stash = read_agent_stash()?;
+    for path in ["model.provider", "model.default"] {
+        let key = hermes_stash_key(agent, path);
+        match config::get(&agent.path, agent.spec.format, path)? {
+            Some(value) if !value.is_empty() => {
+                stash.insert(key, value);
+            }
+            _ => {
+                stash.remove(&key);
+            }
+        }
+    }
+    write_agent_stash(&stash)
+}
+
+fn restore_hermes_config(agent: &Agent) -> Result<()> {
+    let mut stash = read_agent_stash()?;
+    let restored = ["model.provider", "model.default"]
+        .into_iter()
+        .filter_map(|path| {
+            stash
+                .remove(&hermes_stash_key(agent, path))
+                .map(|value| (path.to_owned(), value))
+        })
+        .collect::<Vec<_>>();
+    config::delete_many(
+        &agent.path,
+        agent.spec.format,
+        &["model.provider", "model.default", "providers.magpie"],
+    )?;
+    let assignments = restored
+        .iter()
+        .map(|(path, value)| (path.as_str(), value.as_str()))
+        .collect::<Vec<_>>();
+    if !assignments.is_empty() {
+        config::set_many(&agent.path, agent.spec.format, &assignments)?;
+    }
+    write_agent_stash(&stash)
+}
+
+fn hermes_provider() -> Result<Value> {
+    let (groups, entries) = crate::provider::desktop_group_data()?;
+    let mut models = entries
+        .iter()
+        .map(|entry| entry.id.clone())
+        .collect::<Vec<_>>();
+    let entries_by_id = entries
+        .iter()
+        .map(|entry| (entry.id.as_str(), entry))
+        .collect::<HashMap<_, _>>();
+    models.extend(
+        groups
+            .into_iter()
+            .filter(|group| !group.hidden)
+            .filter(|group| {
+                group
+                    .members
+                    .iter()
+                    .any(|member| entries_by_id.contains_key(member.as_str()))
+            })
+            .map(|group| format!("group/{}", group.id)),
+    );
+
+    Ok(json!({
+        "name": "magpie",
+        "base_url": crate::gateway::v1_url(),
+        "api_key": crate::gateway::TOKEN,
+        "api_mode": "chat_completions",
+        "extra_headers": {"User-Agent": "hermes-agent"},
+        "models": models,
+    }))
 }
 
 fn opencode_model(name: &str, images: bool) -> Value {
