@@ -9,6 +9,7 @@ use crate::{codex, copilot, settings};
 
 mod codex_oauth;
 mod codex_usage;
+mod copilot_usage;
 
 const USAGE: &str = "usage: magpie accounts [claude|codex|grok|copilot|gemini|antigravity] [--json] | magpie accounts add codex | magpie accounts switch|forget codex <user>";
 
@@ -22,6 +23,8 @@ struct SavedLogin {
     seen: Option<Value>,
     #[serde(skip_serializing_if = "is_false")]
     on: bool,
+    #[serde(skip_serializing_if = "is_false")]
+    first: bool,
     auth: Option<Value>,
     #[serde(flatten)]
     extra: BTreeMap<String, Value>,
@@ -40,6 +43,12 @@ struct AccountRow {
     error: Option<String>,
     #[serde(skip)]
     auth: Option<Value>,
+    #[serde(skip)]
+    first: bool,
+    #[serde(skip)]
+    copilot_token: Option<String>,
+    #[serde(skip)]
+    copilot_own: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -108,14 +117,16 @@ pub(crate) async fn command(args: &[String]) -> Result<()> {
     {
         merge_active(&mut rows, "codex", user, nonempty(plan), Some(auth));
     }
-    if let Some(account) = copilot::signed_in_account().filter(|account| !account.user.is_empty()) {
-        merge_active(&mut rows, "copilot", account.user, None, None);
+    if let Some(account) = copilot::signed_in_account() {
+        merge_copilot_account(&mut rows, account);
     }
+    select_copilot_account(&mut rows);
 
     if let Some(agent) = agent_filter {
         rows.retain(|row| row.agent == agent);
     }
     codex_usage::refresh(&mut rows).await;
+    copilot_usage::refresh(&mut rows).await;
     rows.sort_by_cached_key(|row| (row.agent.clone(), row.user.to_lowercase()));
 
     if as_json {
@@ -124,6 +135,59 @@ pub(crate) async fn command(args: &[String]) -> Result<()> {
         print_rows(&rows);
     }
     Ok(())
+}
+
+fn merge_copilot_account(rows: &mut Vec<AccountRow>, account: copilot::Account) {
+    let user = if account.user.is_empty() {
+        "GitHub".to_owned()
+    } else {
+        account.user
+    };
+    let has_own = rows
+        .iter()
+        .any(|row| row.agent == "copilot" && row.copilot_own);
+    if has_own {
+        for row in rows
+            .iter_mut()
+            .filter(|row| row.agent == "copilot" && row.copilot_own)
+        {
+            row.user.clone_from(&user);
+            row.copilot_token = Some(account.github_token.clone());
+        }
+    } else {
+        rows.push(AccountRow {
+            agent: "copilot".to_owned(),
+            user: user.clone(),
+            plan: None,
+            active: false,
+            on: false,
+            windows: Vec::new(),
+            error: None,
+            auth: None,
+            first: false,
+            copilot_token: Some(account.github_token),
+            copilot_own: true,
+        });
+    }
+}
+
+fn select_copilot_account(rows: &mut Vec<AccountRow>) {
+    rows.retain(|row| row.agent != "copilot" || row.copilot_token.is_some());
+    let active = rows
+        .iter()
+        .rposition(|row| row.agent == "copilot" && row.first)
+        .or_else(|| {
+            rows.iter()
+                .position(|row| row.agent == "copilot" && row.copilot_own)
+        })
+        .or_else(|| rows.iter().position(|row| row.agent == "copilot"));
+    for row in rows.iter_mut().filter(|row| row.agent == "copilot") {
+        row.active = false;
+    }
+    if let Some(active) = active {
+        rows[active].active = true;
+        rows[active].on = true;
+    }
 }
 
 fn mutate_account(args: &[String]) -> Result<()> {
@@ -263,6 +327,7 @@ fn live_codex_login() -> Result<Option<SavedLogin>> {
         plan: nonempty(plan),
         seen: Some(Value::String(seen)),
         on: false,
+        first: false,
         auth: Some(auth),
         extra: BTreeMap::new(),
     }))
@@ -303,15 +368,36 @@ fn same_login(left: &SavedLogin, right: &SavedLogin) -> bool {
 }
 
 fn account_row(login: SavedLogin) -> AccountRow {
+    let is_copilot = login.agent == "copilot";
+    let copilot_own = is_copilot && login.auth.is_none();
+    let user = if is_copilot && login.user.is_empty() {
+        "GitHub".to_owned()
+    } else {
+        login.user
+    };
+    let copilot_token = if is_copilot {
+        login
+            .auth
+            .as_ref()
+            .and_then(|auth| auth.get("oauth_token"))
+            .and_then(Value::as_str)
+            .filter(|token| !token.is_empty())
+            .map(str::to_owned)
+    } else {
+        None
+    };
     AccountRow {
         agent: login.agent,
-        user: login.user,
+        user,
         plan: login.plan.filter(|plan| !plan.is_empty()),
         active: false,
         on: login.on,
         windows: Vec::new(),
         error: None,
         auth: login.auth,
+        first: login.first,
+        copilot_token,
+        copilot_own,
     }
 }
 
@@ -355,6 +441,9 @@ fn merge_active(
         windows: Vec::new(),
         error: None,
         auth,
+        first: false,
+        copilot_token: None,
+        copilot_own: false,
     });
 }
 
