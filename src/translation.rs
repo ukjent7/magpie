@@ -1977,7 +1977,96 @@ fn chat_to_anthropic(body: &Value, model: &str) -> Result<Value> {
             result["tool_choice"] = choice;
         }
     }
+    // how hard the model thinks: Claude 4.6 and later think adaptively
+    if let Some(effort) = body
+        .get("reasoning_effort")
+        .and_then(Value::as_str)
+        .and_then(effort_of)
+    {
+        if adaptive_only(model) {
+            result["thinking"] = json!({"type":"adaptive"});
+            let effort = if effort == "xhigh" { "max" } else { effort };
+            result["output_config"] = json!({"effort": effort});
+        } else {
+            let budget = budget_of(effort);
+            // the reply's allowance must hold the thinking too
+            if max_tokens < budget + 4096 {
+                result["max_tokens"] = json!(budget + 4096);
+            }
+            result["thinking"] = json!({"type":"enabled","budget_tokens":budget});
+        }
+    }
     Ok(result)
+}
+
+// effort_of normalises the reasoning effort names the APIs use.
+fn effort_of(effort: &str) -> Option<&'static str> {
+    match effort.trim().to_ascii_lowercase().as_str() {
+        "minimal" | "none" => Some("low"),
+        "low" => Some("low"),
+        "medium" => Some("medium"),
+        "high" => Some("high"),
+        "xhigh" => Some("xhigh"),
+        "max" => Some("max"),
+        _ => None,
+    }
+}
+
+// budget_of is the Anthropic thinking budget for an effort level.
+fn budget_of(effort: &str) -> u64 {
+    match effort {
+        "low" => 4096,
+        "medium" => 10000,
+        "high" => 24000,
+        "xhigh" | "max" => 32000,
+        _ => 10000,
+    }
+}
+
+// effort_of_budget goes the other way, for Anthropic clients asking others.
+fn effort_of_budget(budget: u64) -> &'static str {
+    match budget {
+        0 => "",
+        1..=4096 => "low",
+        4097..=12000 => "medium",
+        12001..=24000 => "high",
+        _ => "xhigh",
+    }
+}
+
+// adaptive_only is a Claude model from 4.6 on, which thinks adaptively:
+// claude-opus-5-5 refuses thinking.type=enabled with a budget ("requires
+// adaptive thinking"), so how hard it thinks goes in output_config.effort.
+fn adaptive_only(model: &str) -> bool {
+    let model = model.to_ascii_lowercase();
+    let Some(at) = model.find("claude-") else {
+        return false;
+    };
+    let rest = &model[at + "claude-".len()..];
+    let rest = rest
+        .strip_prefix("opus-")
+        .or_else(|| rest.strip_prefix("sonnet-"))
+        .or_else(|| rest.strip_prefix("haiku-"))
+        .or_else(|| rest.strip_prefix("opus."))
+        .or_else(|| rest.strip_prefix("sonnet."))
+        .or_else(|| rest.strip_prefix("haiku."));
+    let Some(rest) = rest else {
+        return false;
+    };
+    let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+    let major: u32 = match digits.parse() {
+        Ok(major) => major,
+        Err(_) => return false,
+    };
+    let after = &rest[digits.len()..];
+    let minor: u32 =
+        if let Some(after) = after.strip_prefix('-').or_else(|| after.strip_prefix('.')) {
+            let minor_digits: String = after.chars().take_while(|c| c.is_ascii_digit()).collect();
+            minor_digits.parse().unwrap_or(0)
+        } else {
+            0
+        };
+    major > 4 || (major == 4 && minor >= 6)
 }
 
 fn anthropic_to_chat(body: &Value, model: &str) -> Result<Value> {
@@ -2087,6 +2176,32 @@ fn anthropic_to_chat(body: &Value, model: &str) -> Result<Value> {
             }
             _ => Value::Null,
         };
+    }
+    // output_config's effort sets how hard the model thinks only when it
+    // was asked to think: Claude Code's title requests carry effort but no
+    // thinking, and reasoning_effort would turn it on upstream
+    if let Some(thinking) = body.get("thinking").filter(|thinking| {
+        thinking
+            .get("type")
+            .and_then(Value::as_str)
+            .is_some_and(|kind| kind == "enabled" || kind == "adaptive")
+    }) {
+        let mut effort = effort_of_budget(
+            thinking
+                .get("budget_tokens")
+                .and_then(Value::as_u64)
+                .unwrap_or(0),
+        );
+        if let Some(asked) = body
+            .pointer("/output_config/effort")
+            .and_then(Value::as_str)
+            .and_then(effort_of)
+        {
+            effort = asked;
+        }
+        if !effort.is_empty() {
+            result["reasoning_effort"] = json!(effort);
+        }
     }
     Ok(result)
 }

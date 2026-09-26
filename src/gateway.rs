@@ -853,6 +853,7 @@ async fn forward(
     let mut selected = None;
     let mut body = body;
     let mut floored = false;
+    let mut unthinking = false;
     let mut index = 0usize;
     while index < candidates.len() {
         let candidate = &candidates[index];
@@ -924,7 +925,8 @@ async fn forward(
                 }
                 bytes.extend_from_slice(&chunk);
             }
-            if let Some(floor) = token_floor(&String::from_utf8_lossy(&bytes))
+            let error_text = String::from_utf8_lossy(&bytes).to_string();
+            if let Some(floor) = token_floor(&error_text)
                 && let Some(raised) = with_token_floor(&body, floor)
             {
                 floored = true;
@@ -934,6 +936,28 @@ async fn forward(
                     candidate.label()
                 );
                 continue;
+            }
+            // a model that always thinks (GLM-5.3 answers 1210 to thinking
+            // turned off) is asked again with thinking left to it
+            if !unthinking && always_thinks(&error_text) {
+                let raised = body.as_object().and_then(|object| {
+                    let thinking = object.get("thinking")?;
+                    thinking.get("type").and_then(Value::as_str)
+                        == Some("disabled").then(|| {
+                            let mut without = object.clone();
+                            without.remove("thinking");
+                            Value::Object(without)
+                        })
+                });
+                if let Some(raised) = raised {
+                    unthinking = true;
+                    body = raised;
+                    eprintln!(
+                        "magpie: {} always thinks; asking again with thinking left to it",
+                        candidate.label()
+                    );
+                    continue;
+                }
             }
             let usage_request = path_override.is_none().then(|| {
                 crate::usage::Request::new(
@@ -1225,6 +1249,12 @@ async fn send_upstream(
             .as_object_mut()
             .context("request body must be a JSON object")?;
         object.insert("model".to_owned(), json!(model));
+        if upstream_protocol == ApiProtocol::Anthropic && !object.contains_key("thinking") {
+            // thinking off unless asked: Anthropic's API assumes that, but
+            // DeepSeek's and other vendors' Anthropic endpoints think by
+            // default, so the title requests spent their tokens thinking
+            object.insert("thinking".to_owned(), json!({"type":"disabled"}));
+        }
         body
     };
     if matches!(
@@ -2245,6 +2275,18 @@ fn token_floor(message: &str) -> Option<u64> {
         }
     }
     None
+}
+
+// always_thinks is a vendor refusing to turn a model's thinking off:
+// Z.ai's GLM-5.3 answers 1210, "…always engages in thinking…".
+fn always_thinks(message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+    message.contains("always engages in thinking")
+        || message.contains("cannot be disabled")
+        || message.contains("can not be disabled")
+        || message.contains("can't be disabled")
+        || message.contains("cannot be turned off")
+        || message.contains("can't be turned off")
 }
 
 // with_token_floor raises the reply's length the request asks for to floor,
