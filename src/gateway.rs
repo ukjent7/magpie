@@ -28,6 +28,7 @@ use crate::{
 };
 
 pub mod ir;
+pub mod prompt;
 
 const DEFAULT_ADDR: &str = "127.0.0.1:3425";
 pub const TOKEN: &str = "magpie";
