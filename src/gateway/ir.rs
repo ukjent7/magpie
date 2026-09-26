@@ -49,7 +49,7 @@ pub struct Message {
 }
 
 // Tool is a function the model may call.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
 pub struct Tool {
     pub name: String,
     pub description: String,

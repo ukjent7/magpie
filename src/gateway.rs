@@ -27,6 +27,7 @@ use crate::{
     provider::{self, GatewayCatalog, GatewayProvider},
 };
 
+pub mod bridge;
 pub mod ir;
 pub mod parse;
 pub mod prompt;
