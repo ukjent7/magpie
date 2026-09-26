@@ -38,6 +38,7 @@ impl TokenUsage {
 pub(crate) struct Request {
     agent: String,
     provider: String,
+    host: String,
     model: String,
     started: Instant,
 }
@@ -46,12 +47,14 @@ impl Request {
     pub(crate) fn new(
         user_agent: Option<&str>,
         provider: &str,
+        host: &str,
         model: &str,
         started: Instant,
     ) -> Self {
         Self {
             agent: agent_of(user_agent.unwrap_or_default()),
             provider: provider.to_owned(),
+            host: host.to_owned(),
             model: model.to_owned(),
             started,
         }
@@ -65,6 +68,8 @@ struct Record {
     time: String,
     agent: String,
     provider: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    host: String,
     model: String,
     #[serde(rename = "in")]
     input: usize,
@@ -188,6 +193,7 @@ pub(crate) fn record(request: Request, status: u16, usage: TokenUsage) {
         time,
         agent: request.agent,
         provider: request.provider,
+        host: request.host,
         model: request.model,
         input: usage.input,
         out: usage.output,
@@ -279,6 +285,27 @@ pub(crate) fn report(period: Period) -> UsageReport {
     let mut agents = HashMap::<String, Totals>::new();
     let mut models = HashMap::<String, Totals>::new();
     let mut prices = HashMap::<(String, String), Option<crate::catalog::Price>>::new();
+    // the places each provider id went in the period, and goes now
+    let mut hosts = HashMap::<String, Vec<String>>::new();
+    for record in &records {
+        if record.host.is_empty() {
+            continue;
+        }
+        let places = hosts.entry(record.provider.clone()).or_default();
+        if !places.iter().any(|place| place == &record.host) {
+            places.push(record.host.clone());
+        }
+    }
+    let goes_now = crate::provider::gateway_catalog()
+        .map(|catalog| {
+            catalog
+                .providers
+                .iter()
+                .filter(|provider| !provider.id.is_empty())
+                .map(|provider| (provider.id.clone(), provider.where_()))
+                .collect::<HashMap<String, String>>()
+        })
+        .unwrap_or_default();
     for record in &records {
         let price = *prices
             .entry((record.provider.clone(), record.model.clone()))
@@ -291,10 +318,16 @@ pub(crate) fn report(period: Period) -> UsageReport {
             .entry(record.agent.clone())
             .or_default()
             .add(record, price);
-        models
-            .entry(format!("{}/{}", record.provider, record.model))
-            .or_default()
-            .add(record, price);
+        let mut key = format!("{}/{}", record.provider, record.model);
+        if !record.host.is_empty()
+            && (hosts
+                .get(&record.provider)
+                .is_some_and(|places| places.len() > 1)
+                || record.host != goes_now.get(&record.provider).map_or("", String::as_str))
+        {
+            key = format!("{key} @ {}", record.host);
+        }
+        models.entry(key).or_default().add(record, price);
     }
 
     let total_tokens = totals.tokens();
@@ -369,7 +402,54 @@ fn path() -> PathBuf {
     settings::providers_path().with_file_name("usage.jsonl")
 }
 
-fn agent_of(user_agent: &str) -> String {
+// ---- last seen --------------------------------------------------------------
+
+// seen is when each agent's latest request reached the gateway in this
+// process — at its start, where a record is written only once it is answered.
+static SEEN: Mutex<HashMap<String, OffsetDateTime>> = Mutex::new(HashMap::new());
+
+// Saw notes a request from an agent arriving now.
+pub(crate) fn saw(agent: &str) {
+    SEEN.lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .insert(agent.to_owned(), OffsetDateTime::now_utc());
+}
+
+// LastSeen is when a request from the agent last reached the gateway: this
+// process's own, else the newest in the log's last stretch. None if none.
+pub(crate) fn last_seen(agent: &str) -> Option<OffsetDateTime> {
+    let mut last = SEEN
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .get(agent)
+        .copied();
+    let file = fs::File::open(path()).ok()?;
+    const TAIL: u64 = 256 << 10;
+    let start = file
+        .metadata()
+        .ok()
+        .map_or(0, |meta| meta.len().saturating_sub(TAIL));
+    let mut file = file;
+    use std::io::Seek;
+    file.seek(std::io::SeekFrom::Start(start)).ok()?;
+    let reader = BufReader::new(file);
+    for line in reader.lines().map_while(std::result::Result::ok) {
+        let Ok(record) = serde_json::from_str::<Record>(&line) else {
+            continue;
+        };
+        if record.agent != agent {
+            continue;
+        }
+        if let Ok(time) = OffsetDateTime::parse(&record.time, &Rfc3339)
+            && last.is_none_or(|seen| time > seen)
+        {
+            last = Some(time);
+        }
+    }
+    last
+}
+
+pub(crate) fn agent_of(user_agent: &str) -> String {
     let product = user_agent
         .trim()
         .split(['/', ' '])

@@ -557,6 +557,15 @@ async fn forward(
 ) -> Response {
     let request_started = Instant::now();
     let (parts, body) = request.into_parts();
+    if path_override.is_none() {
+        crate::usage::saw(&crate::usage::agent_of(
+            parts
+                .headers
+                .get(header::USER_AGENT)
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or_default(),
+        ));
+    }
     let bytes = match to_bytes(body, MAX_REQUEST_BYTES).await {
         Ok(bytes) => bytes,
         Err(error) => {
@@ -790,6 +799,7 @@ async fn forward(
                 .get(header::USER_AGENT)
                 .and_then(|value| value.to_str().ok()),
             &candidate.provider.id,
+            &candidate.provider.where_(),
             candidate.model,
             request_started,
         )

@@ -639,6 +639,46 @@ fn account_label(account: &ProviderAccount) -> String {
     }
 }
 
+fn host_of(url: &str) -> String {
+    let url = url.trim();
+    let rest = url.split_once("://").map_or(url, |(_, rest)| rest);
+    rest.split(['/', '?', '#'])
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+}
+
+impl GatewayProvider {
+    pub(crate) fn host(&self) -> String {
+        for url in [&self.chat, &self.responses, &self.anthropic] {
+            if !url.is_empty() {
+                return host_of(url);
+            }
+        }
+        String::new()
+    }
+
+    // Where is what the provider's calls go to, as usage keeps it: the API's
+    // host, and for a subscription who is signed in there too. The id alone
+    // can't tell: it can be given to another vendor or account later.
+    pub(crate) fn where_(&self) -> String {
+        let host = self.host();
+        let user = match self.account.as_ref() {
+            Some(ProviderAccount::Codex { .. }) => {
+                crate::codex::signed_in_identity().map_or_else(String::new, |(user, _)| user)
+            }
+            Some(ProviderAccount::Copilot { account }) => account.user.clone(),
+            None => String::new(),
+        };
+        match (host.is_empty(), user.is_empty()) {
+            (true, true) => String::new(),
+            (true, false) => user,
+            (false, true) => host,
+            (false, false) => format!("{host} as {user}"),
+        }
+    }
+}
+
 pub(crate) struct GatewayGroup {
     pub(crate) id: String,
     pub(crate) name: String,
