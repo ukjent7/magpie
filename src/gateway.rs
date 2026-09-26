@@ -829,6 +829,7 @@ async fn forward(
                     .and_then(|value| value.to_str().ok())
                     .unwrap_or_default(),
             );
+            let rule_key = crate::grouprule::rule_key(&group.id, &parts.headers, &request_view);
             let hit = crate::grouprule::rule_for(
                 &rule_key,
                 &rules,
