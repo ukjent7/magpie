@@ -214,7 +214,10 @@ async fn fetch_quota(client: &reqwest::Client, token: &str) -> AccountQuota {
         })
         .collect();
     AccountQuota {
-        plan: data.copilot_plan.filter(|plan| !plan.is_empty()),
+        plan: data
+            .copilot_plan
+            .filter(|plan| !plan.is_empty())
+            .map(|plan| super::copilot_oauth::copilot_plan_label(&plan)),
         windows,
         error: None,
     }

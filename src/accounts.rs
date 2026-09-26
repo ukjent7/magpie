@@ -12,10 +12,11 @@ mod claude_oauth;
 mod claude_usage;
 mod codex_oauth;
 mod codex_usage;
+mod copilot_oauth;
 mod copilot_usage;
 mod oauth;
 
-const USAGE: &str = "usage: magpie accounts [claude|codex|grok|copilot|gemini|antigravity] [--json] | magpie accounts add claude|codex | magpie accounts switch|forget claude|codex <user>";
+const USAGE: &str = "usage: magpie accounts [claude|codex|grok|copilot|gemini|antigravity] [--json] | magpie accounts add claude|codex|copilot | magpie accounts switch|forget claude|codex|copilot <user>";
 
 #[derive(Clone, Default, Deserialize, Serialize)]
 #[serde(default)]
@@ -96,7 +97,10 @@ pub(crate) async fn command(args: &[String]) -> Result<()> {
                 claude_oauth::command(args).await
             }
             Some(agent) if agent.eq_ignore_ascii_case("codex") => codex_oauth::command(args).await,
-            _ => bail!("usage: magpie accounts add claude|codex"),
+            Some(agent) if agent.eq_ignore_ascii_case("copilot") => {
+                copilot_oauth::command(args).await
+            }
+            _ => bail!("usage: magpie accounts add claude|codex|copilot"),
         };
     }
 
@@ -228,8 +232,8 @@ async fn mutate_account(args: &[String]) -> Result<()> {
         bail!("unknown agent {agent:?}\n{USAGE}");
     };
     ensure!(
-        matches!(agent, "claude" | "codex"),
-        "Rust account switching and forgetting currently support Claude Code and Codex"
+        matches!(agent, "claude" | "codex" | "copilot"),
+        "Rust account switching and forgetting currently support Claude Code, Codex, and Copilot"
     );
 
     match (action.to_ascii_lowercase().as_str(), agent) {
@@ -237,6 +241,8 @@ async fn mutate_account(args: &[String]) -> Result<()> {
         ("forget", "codex") => forget_codex_account(user)?,
         ("switch", "claude") => switch_claude_account(user).await?,
         ("forget", "claude") => forget_claude_account(user).await?,
+        ("switch", "copilot") => switch_copilot_account(user)?,
+        ("forget", "copilot") => forget_copilot_account(user)?,
         _ => unreachable!("mutate_account only handles switch and forget"),
     }
     if action.eq_ignore_ascii_case("switch") {
@@ -280,6 +286,153 @@ fn write_saved_logins(logins: &mut [SavedLogin]) -> Result<()> {
     contents.push(b'\n');
     crate::config::atomic_write_secret_for_settings(&path, &contents)
         .with_context(|| format!("write {}", path.display()))
+}
+
+fn switch_copilot_account(user: &str) -> Result<()> {
+    let mut logins = read_saved_logins()?;
+    let own_user = copilot_live_user();
+    let own_target = own_user
+        .as_deref()
+        .is_some_and(|own| own.eq_ignore_ascii_case(user));
+    let target_index = logins.iter().position(|login| {
+        login.agent == "copilot"
+            && login.user.eq_ignore_ascii_case(user)
+            && login
+                .auth
+                .as_ref()
+                .and_then(|auth| auth.get("oauth_token"))
+                .and_then(Value::as_str)
+                .is_some_and(|token| !token.is_empty())
+    });
+    ensure!(
+        target_index.is_some() || own_target,
+        "no saved Copilot account {user:?}"
+    );
+    let active_user = copilot_active_user(&logins, own_user.as_deref());
+    if let Some(active) = active_user.filter(|active| !active.eq_ignore_ascii_case(user)) {
+        if own_user
+            .as_deref()
+            .is_some_and(|own| own.eq_ignore_ascii_case(&active))
+        {
+            remember_copilot_own(&mut logins, &active, true, true)?;
+        } else if let Some(login) = logins
+            .iter_mut()
+            .find(|login| login.agent == "copilot" && login.user.eq_ignore_ascii_case(&active))
+        {
+            login.on = true;
+        }
+    }
+    for login in logins.iter_mut().filter(|login| login.agent == "copilot") {
+        login.first = false;
+    }
+    if own_target {
+        remember_copilot_own(&mut logins, user, true, true)?;
+    } else if let Some(index) = target_index {
+        logins[index].first = true;
+        logins[index].on = true;
+    }
+    write_saved_logins(&mut logins)
+}
+
+fn forget_copilot_account(user: &str) -> Result<()> {
+    if copilot_live_user().is_some_and(|own| own.eq_ignore_ascii_case(user)) {
+        bail!("{user} is signed in to the Copilot editor or CLI; sign out there");
+    }
+    let mut logins = read_saved_logins()?;
+    let own_user = copilot_live_user();
+    let active = copilot_active_user(&logins, own_user.as_deref());
+    ensure!(
+        !active
+            .as_deref()
+            .is_some_and(|active| active.eq_ignore_ascii_case(user)),
+        "magpie uses {user} first; put another account first"
+    );
+    let original_len = logins.len();
+    logins.retain(|login| {
+        !(login.agent == "copilot"
+            && login.user.eq_ignore_ascii_case(user)
+            && login
+                .auth
+                .as_ref()
+                .and_then(|auth| auth.get("oauth_token"))
+                .and_then(Value::as_str)
+                .is_some_and(|token| !token.is_empty()))
+    });
+    ensure!(
+        original_len != logins.len(),
+        "no saved Copilot account {user:?}"
+    );
+    write_saved_logins(&mut logins)
+}
+
+fn copilot_active_user(logins: &[SavedLogin], own_user: Option<&str>) -> Option<String> {
+    logins
+        .iter()
+        .rfind(|login| login.first && copilot_login_usable(login, own_user))
+        .map(|login| login.user.clone())
+        .or_else(|| own_user.map(str::to_owned))
+        .or_else(|| {
+            logins
+                .iter()
+                .find(|login| copilot_login_usable(login, own_user))
+                .map(|login| login.user.clone())
+        })
+}
+
+fn copilot_login_usable(login: &SavedLogin, own_user: Option<&str>) -> bool {
+    login.agent == "copilot"
+        && (login
+            .auth
+            .as_ref()
+            .and_then(|auth| auth.get("oauth_token"))
+            .and_then(Value::as_str)
+            .is_some_and(|token| !token.is_empty())
+            || own_user.is_some_and(|user| login.user.eq_ignore_ascii_case(user)))
+}
+
+fn copilot_live_user() -> Option<String> {
+    copilot::signed_in_account().map(|account| {
+        if account.user.is_empty() {
+            "GitHub".to_owned()
+        } else {
+            account.user
+        }
+    })
+}
+
+fn remember_copilot_own(
+    logins: &mut Vec<SavedLogin>,
+    user: &str,
+    on: bool,
+    first: bool,
+) -> Result<()> {
+    if let Some(login) = logins.iter_mut().find(|login| {
+        login.agent == "copilot" && login.user.eq_ignore_ascii_case(user) && login.auth.is_none()
+    }) {
+        login.on |= on;
+        login.first = first;
+        return Ok(());
+    }
+    if logins
+        .iter()
+        .any(|login| login.agent == "copilot" && login.user.eq_ignore_ascii_case(user))
+    {
+        return Ok(());
+    }
+    let seen = Value::String(
+        OffsetDateTime::now_utc()
+            .format(&Rfc3339)
+            .context("format account timestamp")?,
+    );
+    logins.push(SavedLogin {
+        agent: "copilot".to_owned(),
+        user: user.to_owned(),
+        seen: Some(seen),
+        on,
+        first,
+        ..SavedLogin::default()
+    });
+    Ok(())
 }
 
 fn switch_codex_account(user: &str) -> Result<()> {
