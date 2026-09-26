@@ -1670,6 +1670,8 @@ fn opencode_provider() -> Result<Value> {
             opencode_model(
                 &format!("{name} · {}", entry.provider_name),
                 entry.model.images,
+                entry.model.context,
+                entry.model.output,
             ),
         );
     }
@@ -1685,11 +1687,25 @@ fn opencode_provider() -> Result<Value> {
         if members.is_empty() {
             continue;
         }
+        let context = members
+            .iter()
+            .map(|member| member.model.context)
+            .filter(|context| *context > 0)
+            .min()
+            .unwrap_or_default();
+        let output = members
+            .iter()
+            .map(|member| member.model.output)
+            .filter(|output| *output > 0)
+            .min()
+            .unwrap_or_default();
         models.insert(
             format!("group/{}", group.id),
             opencode_model(
                 &format!("{} · routing group", group.name),
                 members.iter().all(|member| member.model.images),
+                context,
+                output,
             ),
         );
     }
@@ -1807,6 +1823,7 @@ fn pi_provider() -> Result<Value> {
             &entry.model.efforts,
             entry.model.images,
             entry.model.context,
+            entry.model.output,
         ));
     }
     for group in groups.into_iter().filter(|group| !group.hidden) {
@@ -1835,12 +1852,19 @@ fn pi_provider() -> Result<Value> {
             .filter(|context| *context > 0)
             .min()
             .unwrap_or_default();
+        let output = members
+            .iter()
+            .map(|member| member.model.output)
+            .filter(|output| *output > 0)
+            .min()
+            .unwrap_or_default();
         models.push(pi_model(
             &format!("group/{}", group.id),
             &format!("{} · routing group", group.name),
             &efforts,
             images,
             context,
+            output,
         ));
     }
 
@@ -1853,7 +1877,14 @@ fn pi_provider() -> Result<Value> {
     }))
 }
 
-fn pi_model(id: &str, name: &str, efforts: &[String], images: bool, context: usize) -> Value {
+fn pi_model(
+    id: &str,
+    name: &str,
+    efforts: &[String],
+    images: bool,
+    context: usize,
+    output: usize,
+) -> Value {
     let mut model = json!({
         "id": id,
         "name": name,
@@ -1878,6 +1909,11 @@ fn pi_model(id: &str, name: &str, efforts: &[String], images: bool, context: usi
     }
     if context > 0 {
         fields.insert("contextWindow".to_owned(), json!(context));
+    }
+    if output > 0 {
+        // without it Pi caps every reply at 16384 tokens, a model that can
+        // write 128K included
+        fields.insert("maxTokens".to_owned(), json!(output));
     }
     model
 }
@@ -2178,8 +2214,8 @@ fn omp_model(
     model
 }
 
-fn opencode_model(name: &str, images: bool) -> Value {
-    if images {
+fn opencode_model(name: &str, images: bool, context: usize, output: usize) -> Value {
+    let mut model = if images {
         json!({
             "name": name,
             "attachment": true,
@@ -2187,7 +2223,13 @@ fn opencode_model(name: &str, images: bool) -> Value {
         })
     } else {
         json!({"name": name})
+    };
+    // without it OpenCode doesn't know when to compact, and a group's context
+    // never reaches it; an output of 0 is OpenCode's own default
+    if context > 0 {
+        model["limit"] = json!({"context": context, "output": output});
     }
+    model
 }
 
 fn resolve_path(spec: &AgentSpec) -> PathBuf {

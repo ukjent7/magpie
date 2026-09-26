@@ -120,16 +120,69 @@ fn models_json() -> Result<Map<String, Value>> {
         if model.images {
             input.push(json!("image"));
         }
-        models.insert(
-            model.id.clone(),
-            json!({
-                "name": &model.name,
-                "limit": {"context": window},
-                "modalities": {"input": input, "output": ["text"]},
-            }),
-        );
+        let mut limit = json!({"context": window});
+        let levels = levels_of(&model.efforts);
+        if let Some(output) = output_of(&model) {
+            // without it ZCode caps every reply at 32000 tokens
+            limit["output"] = json!(output);
+        }
+        let mut entry = json!({
+            "name": &model.name,
+            "limit": limit,
+            "modalities": {"input": input, "output": ["text"]},
+        });
+        if !levels.is_empty() {
+            entry["reasoning"] = json!({
+                "enabled": true,
+                "variants": levels,
+                "defaultVariant": default_level(&levels),
+            });
+        }
+        models.insert(model.id.clone(), entry);
     }
     Ok(models)
+}
+
+// MAX_OUTPUT caps a model's output limit: some vendors report their context
+// window there (grok's 500000), and ZCode would offer that much.
+const MAX_OUTPUT: usize = 128_000;
+
+fn output_of(model: &crate::agent::MagpieModel) -> Option<usize> {
+    (model.output > 0).then(|| model.output.min(MAX_OUTPUT))
+}
+
+// levels_of are a model's reasoning levels as ZCode names them: "disabled"
+// turns thinking off, any other is sent as the effort.
+fn levels_of(efforts: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for effort in efforts {
+        let level = if effort == "none" {
+            "disabled".to_owned()
+        } else {
+            effort.clone()
+        };
+        if !out.contains(&level) {
+            out.push(level);
+        }
+    }
+    out
+}
+
+// default_level is medium where the model has it, else its middle level that
+// thinks.
+fn default_level(levels: &[String]) -> String {
+    if levels.iter().any(|level| level == "medium") {
+        return "medium".to_owned();
+    }
+    let thinking = levels
+        .iter()
+        .filter(|level| *level != "disabled")
+        .cloned()
+        .collect::<Vec<_>>();
+    match thinking.is_empty() {
+        true => levels.first().cloned().unwrap_or_default(),
+        false => thinking[thinking.len() / 2].clone(),
+    }
 }
 
 // rules_write puts magpie's provider and its models' rules into ZCode's
@@ -221,10 +274,24 @@ fn rules_write(path: &Path, on: bool) -> Result<()> {
             if model.context > 0 {
                 properties["contextWindow"] = json!(model.context);
             }
+            // ZCode's own rules give a model it doesn't know 32000 tokens out
+            // and thinking only on or off
+            let levels = levels_of(&model.efforts);
+            let mut specs = Map::new();
+            if let Some(output) = output_of(&model) {
+                specs.insert("maxOutputTokens".to_owned(), json!({"max": output}));
+            }
+            if !levels.is_empty() {
+                specs.insert("reasoningLevel".to_owned(), json!({"values": levels}));
+            }
+            let mut config = json!({"properties": properties});
+            if !specs.is_empty() {
+                config["optionSpecs"] = Value::Object(specs);
+            }
             models.push(json!({
                 "providerId": MAGPIE_ID,
                 "modelId": &model.id,
-                "config": {"properties": properties},
+                "config": config,
             }));
         }
         let mut rule = json!({
