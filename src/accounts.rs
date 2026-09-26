@@ -7,11 +7,12 @@ use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 use crate::{codex, copilot, settings};
 
+mod claude_identity;
 mod codex_oauth;
 mod codex_usage;
 mod copilot_usage;
 
-const USAGE: &str = "usage: magpie accounts [claude|codex|grok|copilot|gemini|antigravity] [--json] | magpie accounts add codex | magpie accounts switch|forget codex <user>";
+const USAGE: &str = "usage: magpie accounts [claude|codex|grok|copilot|gemini|antigravity] [--json] | magpie accounts add codex | magpie accounts switch|forget claude|codex <user>";
 
 #[derive(Clone, Default, Deserialize, Serialize)]
 #[serde(default)]
@@ -20,6 +21,8 @@ struct SavedLogin {
     user: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     plan: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    profile: Option<Value>,
     seen: Option<Value>,
     #[serde(skip_serializing_if = "is_false")]
     on: bool,
@@ -43,6 +46,8 @@ struct AccountRow {
     error: Option<String>,
     #[serde(skip)]
     auth: Option<Value>,
+    #[serde(skip)]
+    profile: Option<Value>,
     #[serde(skip)]
     first: bool,
     #[serde(skip)]
@@ -76,7 +81,7 @@ pub(crate) async fn command(args: &[String]) -> Result<()> {
         .first()
         .is_some_and(|arg| arg.eq_ignore_ascii_case("switch") || arg.eq_ignore_ascii_case("forget"))
     {
-        return mutate_account(args);
+        return mutate_account(args).await;
     }
 
     if args
@@ -112,12 +117,26 @@ pub(crate) async fn command(args: &[String]) -> Result<()> {
         .into_iter()
         .map(account_row)
         .collect::<Vec<_>>();
+    if (agent_filter.is_none() || agent_filter == Some("claude"))
+        && let Some(login) = claude_identity::live_login().await
+    {
+        merge_active(
+            &mut rows,
+            "claude",
+            login.user,
+            login.plan,
+            login.auth,
+            login.profile,
+        );
+    }
     if let Some(auth) = codex::signed_in_auth()
         && let Some((user, plan)) = codex::identity_from_auth(&auth)
     {
-        merge_active(&mut rows, "codex", user, nonempty(plan), Some(auth));
+        merge_active(&mut rows, "codex", user, nonempty(plan), Some(auth), None);
     }
-    if let Some(account) = copilot::signed_in_account() {
+    if (agent_filter.is_none() || agent_filter == Some("copilot"))
+        && let Some(account) = copilot::signed_in_account()
+    {
         merge_copilot_account(&mut rows, account);
     }
     select_copilot_account(&mut rows);
@@ -164,6 +183,7 @@ fn merge_copilot_account(rows: &mut Vec<AccountRow>, account: copilot::Account) 
             windows: Vec::new(),
             error: None,
             auth: None,
+            profile: None,
             first: false,
             copilot_token: Some(account.github_token),
             copilot_own: true,
@@ -190,7 +210,7 @@ fn select_copilot_account(rows: &mut Vec<AccountRow>) {
     }
 }
 
-fn mutate_account(args: &[String]) -> Result<()> {
+async fn mutate_account(args: &[String]) -> Result<()> {
     let [action, agent, user] = args else {
         bail!("{USAGE}");
     };
@@ -198,17 +218,19 @@ fn mutate_account(args: &[String]) -> Result<()> {
         bail!("unknown agent {agent:?}\n{USAGE}");
     };
     ensure!(
-        agent == "codex",
-        "Rust account switching and forgetting currently support Codex only"
+        matches!(agent, "claude" | "codex"),
+        "Rust account switching and forgetting currently support Claude Code and Codex"
     );
 
-    match action.to_ascii_lowercase().as_str() {
-        "switch" => switch_codex_account(user)?,
-        "forget" => forget_codex_account(user)?,
+    match (action.to_ascii_lowercase().as_str(), agent) {
+        ("switch", "codex") => switch_codex_account(user)?,
+        ("forget", "codex") => forget_codex_account(user)?,
+        ("switch", "claude") => switch_claude_account(user).await?,
+        ("forget", "claude") => forget_claude_account(user).await?,
         _ => unreachable!("mutate_account only handles switch and forget"),
     }
     if action.eq_ignore_ascii_case("switch") {
-        println!("✓ codex is now signed in as {user}");
+        println!("✓ {agent} is now signed in as {user}");
     } else {
         println!("✓ forgot {user}");
     }
@@ -308,6 +330,68 @@ fn forget_codex_account(user: &str) -> Result<()> {
     write_saved_logins(&mut logins)
 }
 
+async fn switch_claude_account(user: &str) -> Result<()> {
+    let mut logins = read_saved_logins()?;
+    let index = logins
+        .iter()
+        .rposition(|login| login.agent == "claude" && login.user.eq_ignore_ascii_case(user))
+        .with_context(|| format!("no saved Claude account {user:?}"))?;
+    let target = logins[index].clone();
+    let auth = target
+        .auth
+        .as_ref()
+        .context("the saved Claude Code sign-in has no credentials")?;
+    ensure!(
+        claude_identity::usable_auth(auth),
+        "the saved Claude Code sign-in is unreadable"
+    );
+
+    let current = claude_identity::live_login().await;
+    if current
+        .as_ref()
+        .is_some_and(|current| same_login(current, &target))
+    {
+        return Ok(());
+    }
+
+    if let Some(mut current) = current {
+        current.on = target.on;
+        current.seen = Some(Value::String(
+            OffsetDateTime::now_utc()
+                .format(&Rfc3339)
+                .context("format account timestamp")?,
+        ));
+        let current_user = current.user.clone();
+        upsert_login(&mut logins, current);
+        for login in &mut logins {
+            if login.agent == "claude" && login.user.eq_ignore_ascii_case(&current_user) {
+                login.on = target.on;
+            }
+        }
+        write_saved_logins(&mut logins)?;
+    }
+
+    claude_identity::install_login(auth, target.profile.as_ref())
+}
+
+async fn forget_claude_account(user: &str) -> Result<()> {
+    if claude_identity::live_login()
+        .await
+        .is_some_and(|active| active.user.eq_ignore_ascii_case(user))
+    {
+        bail!("Claude is signed in to {user} now; switch to another account first");
+    }
+
+    let mut logins = read_saved_logins()?;
+    let original_len = logins.len();
+    logins.retain(|login| !(login.agent == "claude" && login.user.eq_ignore_ascii_case(user)));
+    ensure!(
+        original_len != logins.len(),
+        "no saved Claude account {user:?}"
+    );
+    write_saved_logins(&mut logins)
+}
+
 fn live_codex_login() -> Result<Option<SavedLogin>> {
     let Some(auth_file) = codex::signed_in_auth_file() else {
         return Ok(None);
@@ -329,6 +413,7 @@ fn live_codex_login() -> Result<Option<SavedLogin>> {
         on: false,
         first: false,
         auth: Some(auth),
+        profile: None,
         extra: BTreeMap::new(),
     }))
 }
@@ -364,6 +449,12 @@ fn same_login(left: &SavedLogin, right: &SavedLogin) -> bool {
     {
         return left_id == right_id;
     }
+    if left.agent == "claude"
+        && let (Some(left_profile), Some(right_profile)) = (&left.profile, &right.profile)
+        && let Some(same) = claude_identity::same_account(left_profile, right_profile)
+    {
+        return same;
+    }
     left.user.eq_ignore_ascii_case(&right.user)
 }
 
@@ -395,6 +486,7 @@ fn account_row(login: SavedLogin) -> AccountRow {
         windows: Vec::new(),
         error: None,
         auth: login.auth,
+        profile: login.profile,
         first: login.first,
         copilot_token,
         copilot_own,
@@ -407,6 +499,7 @@ fn merge_active(
     user: String,
     plan: Option<String>,
     auth: Option<Value>,
+    profile: Option<Value>,
 ) {
     if let Some(row) = rows.iter_mut().find(|row| {
         row.agent == agent
@@ -418,17 +511,25 @@ fn merge_active(
                 )
             {
                 left_id == right_id
+            } else if agent == "claude"
+                && let (Some(left), Some(right)) = (&row.profile, &profile)
+                && let Some(same) = claude_identity::same_account(left, right)
+            {
+                same
             } else {
                 row.user.eq_ignore_ascii_case(&user)
             }
     }) {
         row.active = true;
         row.on = true;
-        if row.plan.is_none() {
+        if plan.is_some() {
             row.plan = plan;
         }
         if let Some(auth) = auth {
             row.auth = Some(auth);
+        }
+        if let Some(profile) = profile {
+            row.profile = Some(profile);
         }
         return;
     }
@@ -441,6 +542,7 @@ fn merge_active(
         windows: Vec::new(),
         error: None,
         auth,
+        profile,
         first: false,
         copilot_token: None,
         copilot_own: false,
