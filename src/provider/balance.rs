@@ -294,6 +294,14 @@ fn read_balance_one(value: &Value, path: &str) -> Result<String> {
         bail!("{path:?} in the reply is not an amount");
     }
     let amount = expression.sum().map_err(|error| anyhow!("{error}"))?;
+    expression.space();
+    ensure!(
+        expression.index >= expression.source.len(),
+        "the balance path has {} it can't read",
+        expression.source[expression.index..]
+            .iter()
+            .collect::<String>()
+    );
     ensure!(amount.is_finite(), "the balance path divides by nothing");
     Ok(balance_amount(sign, amount, percent))
 }
@@ -345,10 +353,12 @@ impl<'a> BalanceExpression<'a> {
 
     fn sum(&mut self) -> std::result::Result<f64, String> {
         let mut value = self.product()?;
-        while let Some(operator) = self.peek() {
-            if operator != '+' && operator != '-' {
-                break;
-            }
+        loop {
+            self.space();
+            let operator = match self.peek() {
+                Some(operator @ ('+' | '-')) => operator,
+                _ => break,
+            };
             self.index += 1;
             let operand = self.product()?;
             if operator == '+' {
@@ -362,10 +372,12 @@ impl<'a> BalanceExpression<'a> {
 
     fn product(&mut self) -> std::result::Result<f64, String> {
         let mut value = self.unary()?;
-        while let Some(operator) = self.peek() {
-            if operator != '*' && operator != '/' {
-                break;
-            }
+        loop {
+            self.space();
+            let operator = match self.peek() {
+                Some(operator @ ('*' | '/')) => operator,
+                _ => break,
+            };
             self.index += 1;
             let operand = self.unary()?;
             if operator == '*' {

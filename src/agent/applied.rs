@@ -356,10 +356,10 @@ pub(crate) fn wiring_off(
 pub(crate) fn host_of(url: &str) -> String {
     let rest = url.trim();
     let rest = rest.split_once("://").map_or(rest, |(_, rest)| rest);
-    rest.split(['/', '?', '#'])
-        .next()
-        .unwrap_or_default()
-        .to_ascii_lowercase()
+    let rest = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    // the port is the server's business, not the server's name
+    let host = rest.split_once(':').map_or(rest, |(host, _)| host);
+    host.to_ascii_lowercase()
 }
 
 // same_host: two URLs name the same server.
