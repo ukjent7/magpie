@@ -1,6 +1,7 @@
 package gui
 
 import (
+	"cmp"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -22,7 +23,9 @@ import (
 
 type modelJSON struct {
 	ID      string   `json:"id"`
-	Name    string   `json:"name"`
+	Name    string   `json:"name"`              // the user's name for it, if they gave one
+	Default string   `json:"default,omitempty"` // its own name, when the user gave it another
+	Kept    []string `json:"kept,omitempty"`    // the reasoning levels the user keeps of Efforts, when not all
 	Efforts []string `json:"efforts,omitempty"`
 	On      bool     `json:"on"` // exposed to agents
 }
@@ -56,16 +59,16 @@ type providerJSON struct {
 		Optional bool   `json:"optional"`
 	} `json:"key"`
 	Ready     bool               `json:"ready"`
-	Chosen    []string           `json:"chosen"`   // the user's explicit picks, if any
-	Fallback  []string           `json:"fallback"` // where requests go when this one can't take them
-	Routing   string             `json:"routing"`  // how requests spread over its keys or accounts
-	Affinity  string             `json:"affinity"` // how long a conversation stays with who answered it
-	Models    []modelJSON        `json:"models"`   // everything the vendor lists, exposed ones flagged
-	Exposed   int                `json:"exposed"`  // how many reach the agents
-	Unlisted  bool               `json:"unlisted"` // its models serve only through routing groups
+	Chosen    []string           `json:"chosen"`             // the user's explicit picks, if any
+	Fallback  []string           `json:"fallback"`           // where requests go when this one can't take them
+	Routing   string             `json:"routing"`            // how requests spread over its keys or accounts
+	Affinity  string             `json:"affinity"`           // how long a conversation stays with who answered it
+	Models    []modelJSON        `json:"models"`             // everything the vendor lists, exposed ones flagged
+	Exposed   int                `json:"exposed"`            // how many reach the agents
+	Unlisted  bool               `json:"unlisted"`           // its models serve only through routing groups
 	Contexts  map[string]int     `json:"contexts,omitempty"` // the windows the user set, "*" for all its models
-	Fetched   string             `json:"fetched"`  // "3h ago" when the list came from the vendor
-	Agents    []providerAgent    `json:"agents"`   // detected agents, current ones flagged
+	Fetched   string             `json:"fetched"`            // "3h ago" when the list came from the vendor
+	Agents    []providerAgent    `json:"agents"`             // detected agents, current ones flagged
 	Sponsored bool               `json:"sponsored"`
 	KeyList   []provider.KeyInfo `json:"keyList"`           // its keys, in the order requests try them
 	Account   *accountJSON       `json:"account,omitempty"` // a signed-in agent, see provider.Account
@@ -205,14 +208,26 @@ func providerInfo(p provider.Provider, agents []agentUse) providerJSON {
 		exposed[m.ID] = true
 	}
 	seen := map[string]bool{}
+	names, kept := p.ModelNames(), p.ModelEfforts()
+	named := func(m catalog.Model, on bool) modelJSON {
+		j := modelJSON{ID: m.ID, Name: m.Name, Efforts: provider.EffortsOf(m), On: on}
+		if n, ok := names[m.ID]; ok {
+			j.Default = cmp.Or(m.Name, m.ID)
+			j.Name = n
+		}
+		if k, ok := kept[m.ID]; ok {
+			j.Kept = slices.DeleteFunc(slices.Clone(j.Efforts), func(e string) bool { return !slices.Contains(k, e) })
+		}
+		return j
+	}
 	for _, m := range p.Available() {
 		seen[m.ID] = true
-		out.Models = append(out.Models, modelJSON{ID: m.ID, Name: m.Name, Efforts: m.Efforts, On: exposed[m.ID]})
+		out.Models = append(out.Models, named(m, exposed[m.ID]))
 	}
 	// picks the vendor list does not know go first, so they are visible
 	for _, m := range p.Exposed() {
 		if !seen[m.ID] {
-			out.Models = append([]modelJSON{{ID: m.ID, Name: m.Name, Efforts: m.Efforts, On: true}}, out.Models...)
+			out.Models = append([]modelJSON{named(m, true)}, out.Models...)
 		}
 	}
 	out.Exposed = len(exposed)
@@ -352,6 +367,13 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 			ClearBalanceToken bool `json:"clearBalanceToken"`
 			// From is the id the provider had: another is a rename
 			From string `json:"from"`
+			// Model and ModelName, for name: the name the user gives one
+			// of its models, "" for its own again
+			Model     string `json:"model"`
+			ModelName string `json:"modelName"`
+			// Efforts, for efforts: the reasoning levels it offers, none
+			// for all it has
+			Efforts []string `json:"efforts"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			fail(rw, err)
@@ -449,6 +471,17 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 			}
 			writeJSON(rw, map[string]string{"key": p.Key})
 			return
+		case "name":
+			// the agents' own model lists follow, through catalog.Changed
+			if err := provider.SetModelName(in.ID+"/"+req.Model, req.ModelName); err != nil {
+				fail(rw, err)
+				return
+			}
+		case "efforts":
+			if err := provider.SetModelEfforts(in.ID+"/"+req.Model, req.Efforts); err != nil {
+				fail(rw, err)
+				return
+			}
 		case "route":
 			if err := provider.SetRouting(in.ID, in.Routing); err != nil {
 				fail(rw, err)

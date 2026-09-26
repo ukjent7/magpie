@@ -73,11 +73,7 @@ func magpieModels(agent string) []catalog.Model {
 	var out []catalog.Model
 	shown, _ := provider.CatalogFor(agent)
 	for _, e := range shown {
-		by := e.Provider.Name
-		if e.Group != "" {
-			by = "routing group"
-		}
-		out = append(out, catalog.Model{ID: e.ID, Name: e.Name + " · " + by, Provider: firstOf(e.Provider.Catalogs()), Efforts: e.Efforts, Images: e.Images, Context: e.Context, Output: e.Output})
+		out = append(out, catalog.Model{ID: e.ID, Name: e.Label(), Provider: firstOf(e.Provider.Catalogs()), Efforts: e.Efforts, Images: e.Images, Context: e.Context, Output: e.Output})
 	}
 	return out
 }

@@ -223,6 +223,7 @@ func modelOptions(id string) []agent.Option {
 	}
 	var out []agent.Option
 	seen := map[string]bool{}
+	names := p.ModelNames()
 	add := func(id, name string) {
 		if seen[id] {
 			return
@@ -231,6 +232,9 @@ func modelOptions(id string) []agent.Option {
 		note := "○ off"
 		if on[id] {
 			note = "● on"
+		}
+		if n, ok := names[id]; ok {
+			name = n // the user's (magpie model name)
 		}
 		if name != "" && name != id {
 			note += " · " + name

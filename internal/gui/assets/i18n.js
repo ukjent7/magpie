@@ -375,6 +375,18 @@ const I18N = {
     "vendor list · {when}": "供应商列表 · {when}",
     "from models.dev · Refresh asks the vendor": "来自 models.dev · 刷新可向供应商获取",
     "magpie's list · Refresh asks the vendor": "magpie 内置列表 · 刷新可向供应商获取",
+    "Names & levels": "名称与推理档位",
+    "Rename the models agents see, or offer fewer of their reasoning levels": "重命名 Agent 看到的模型，或只提供部分推理档位",
+    "Pick a model first.": "请先选择模型。",
+    "The name agents and magpie show for {id}; empty for its own": "Agent 和 magpie 为 {id} 显示的名称；留空则用默认名称",
+    "{id} is called {name}": "{id} 已改名为 {name}",
+    "{id} has its own name again": "{id} 已恢复默认名称",
+    "Reasoning levels agents are offered": "提供给 Agent 的推理档位",
+    "Keep at least one level": "至少保留一个档位",
+    "{id}: {levels}": "{id}：{levels}",
+    "Restore default": "恢复默认",
+    "Its own name and every reasoning level it has": "恢复默认名称和全部推理档位",
+    "{id} is as its provider has it again": "{id} 已恢复为供应商的默认设置",
 
     // gateway
     "running": "运行中",

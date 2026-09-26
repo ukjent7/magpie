@@ -12,8 +12,8 @@ import (
 
 	"github.com/yetone/magpie/internal/agent"
 	"github.com/yetone/magpie/internal/catalog"
-	"github.com/yetone/magpie/internal/davsync"
 	"github.com/yetone/magpie/internal/claudebridge"
+	"github.com/yetone/magpie/internal/davsync"
 	"github.com/yetone/magpie/internal/gateway"
 	"github.com/yetone/magpie/internal/netproxy"
 	"github.com/yetone/magpie/internal/profile"
@@ -54,6 +54,8 @@ const usage = `magpie — one place to pick every agent's model
   magpie provider fallback <id> <provider/model>…   use these when it's out of quota or down
   magpie import [-y] <link>       add the provider a magpie://import?… link describes
   magpie models [<agent>]         every model agents can pick, as provider/model; an agent's, and why others aren't
+  magpie model name <provider/model> <name>|--reset       the name a model goes by, everywhere
+  magpie model efforts <provider/model> <l>,<l>|--reset   the reasoning levels a model offers (magpie model help)
   magpie visible [<agent> <family|provider|group>,… | all]
                                   which models an agent is shown: families (magpie provider/group set <id> family=…)
   magpie groups                   routing groups: several models agents pick as one, group/<id>
@@ -159,6 +161,8 @@ func run(args []string) error {
 		return providerCmd(args)
 	case "models":
 		return models(args[1:])
+	case "model":
+		return modelCmd(args[1:])
 	case "visible":
 		return visibleCmd(args[1:])
 	case "groups":

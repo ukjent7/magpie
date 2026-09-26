@@ -148,11 +148,18 @@ func autoGroups(entries []Entry) []Group {
 		if len(es) < 2 {
 			continue
 		}
-		g := Group{ID: "auto-" + Slug(k), Name: es[0].Name, Auto: true}
+		// the model's own name: one a user gave it is that provider's alone
+		own := func(e Entry) string {
+			if e.Default != "" {
+				return e.Default
+			}
+			return e.Name
+		}
+		g := Group{ID: "auto-" + Slug(k), Name: own(es[0]), Auto: true}
 		for _, e := range es {
 			g.Members = append(g.Members, e.ID)
-			if g.Name == es[0].Model && e.Name != e.Model {
-				g.Name = e.Name // a vendor that names it, over one that only lists its id
+			if g.Name == es[0].Model && own(e) != e.Model {
+				g.Name = own(e) // a vendor that names it, over one that only lists its id
 			}
 		}
 		out = append(out, g)

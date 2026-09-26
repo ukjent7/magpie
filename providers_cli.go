@@ -548,12 +548,16 @@ func showProvider(p provider.Provider) error {
 		src = p.Host() + " · fetched " + ago(t)
 	}
 	kv("models", fmt.Sprintf("%d exposed of %d %s", len(ms), len(p.Available()), muted.Render("from "+src)))
+	names := p.ModelNames()
 	for i, m := range ms {
 		if i == 12 {
 			fmt.Println(faint.Render(fmt.Sprintf("             … %d more", len(ms)-12)))
 			break
 		}
 		line := "             " + p.ID + "/" + m.ID
+		if n, ok := names[m.ID]; ok {
+			m.Name = n
+		}
 		if m.Name != "" && m.Name != m.ID {
 			line += muted.Render("  " + m.Name)
 		}

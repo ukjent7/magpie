@@ -77,7 +77,7 @@ func Rename(from, to string) error {
 		return err
 	}
 	s := settings.Load()
-	changed := false
+	changed := renameModelPrefs(&s, from, to)
 	for a, names := range s.Visible {
 		for k, n := range names {
 			if strings.EqualFold(n, from) {
