@@ -131,7 +131,8 @@ func libraryRoutes(mux *http.ServeMux, w Windows) {
 		}
 		writeJSON(rw, p)
 	})
-	// RTK: which agents have its hook, and switching one on or off
+	// RTK: which agents have its hook, switching one on or off, and
+	// installing rtk when the page is asked to
 	mux.HandleFunc("GET /api/library/rtk", func(rw http.ResponseWriter, r *http.Request) {
 		writeJSON(rw, library.ReadRTK())
 	})
@@ -145,6 +146,14 @@ func libraryRoutes(mux *http.ServeMux, w Windows) {
 			return
 		}
 		v, err := library.SetRTK(in.Agent, in.On)
+		if err != nil {
+			fail(rw, err)
+			return
+		}
+		writeJSON(rw, v)
+	})
+	mux.HandleFunc("POST /api/library/rtk/install", func(rw http.ResponseWriter, r *http.Request) {
+		v, err := library.InstallRTK()
 		if err != nil {
 			fail(rw, err)
 			return

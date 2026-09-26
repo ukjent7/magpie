@@ -276,7 +276,8 @@
 
   // RTK (rtk-ai.app) cuts down what the shell commands an agent runs print,
   // so their output costs fewer tokens. magpie runs rtk's own installer for
-  // each agent switched on, and reads the agents' files for which have it.
+  // each agent switched on, takes out what it wrote for one switched off
+  // (with or without rtk), and reads the agents' files for which have it.
   let rtk = null;          // /api/library/rtk
   const rtkBusy = new Set(); // agents being switched
   let rtkLoading = false;
@@ -310,10 +311,17 @@
         : t("Nothing saved yet: the agents' commands go through RTK once it's switched on and the agent is restarted.")));
     } else {
       card.append(ttl);
-      const p = el("p", "lib-rtk-gain", t("RTK isn't installed. Install it (brew install rtk, or see its site), then come back here."));
-      card.append(p);
+      card.append(el("p", "lib-rtk-gain", rtkInstalling
+        ? t("Installing RTK… this can take a minute.")
+        : t("RTK isn't installed. magpie can install it for you, or get it from its site.")));
+      if (rtk.install) card.append(el("p", "lib-rtk-cmd", rtk.install));
       const acts = el("div", "lib-acts");
-      acts.append(button(t("Get RTK"), "action", () => browse(rtk.url)), button(t("Check again"), "", () => { rtk = null; render(); }));
+      if (rtk.install) {
+        const ib = button(rtkInstalling ? t("Installing…") : t("Install RTK"), "action", installRTK);
+        ib.disabled = rtkInstalling;
+        acts.append(ib);
+      }
+      acts.append(button(t("Get RTK"), rtk.install ? "" : "action", () => browse(rtk.url)), button(t("Check again"), "", () => { rtk = null; render(); }));
       card.append(acts);
     }
     body.append(card);
@@ -327,8 +335,10 @@
       const who = el("div", "who");
       who.append(el("div", "name", a.name));
       row.append(icon(a.icon), who, el("span", "grow"));
+      // its hook calls an rtk that isn't there: switching it off still works
+      if (a.on && !rtk.path) row.append(tag(t("RTK missing"), "warn", t("{agent}'s hook calls rtk, which isn't installed, so its shell commands fail. Install RTK, or switch this off.", { agent: a.name })));
       const sw = toggle(a.on, t("{agent} runs its commands through RTK", { agent: a.name }), (on) => setRTK(a, on));
-      if (!rtk.path || rtkBusy.has(a.id)) sw.disabled = true;
+      if ((!rtk.path && !a.on) || rtkBusy.has(a.id) || rtkInstalling) sw.disabled = true;
       row.append(sw);
       list.append(row);
     }
@@ -346,6 +356,19 @@
       status(e.message, "err", 8000);
     }
     rtkBusy.delete(a.id);
+    render();
+  }
+  let rtkInstalling = false;
+  async function installRTK() {
+    rtkInstalling = true;
+    render();
+    try {
+      rtk = await api("library/rtk/install", {});
+      status(t("RTK is installed — switch it on for your agents below"), "ok", 6000);
+    } catch (e) {
+      status(e.message, "err", 10000);
+    }
+    rtkInstalling = false;
     render();
   }
   function tokens(n) {

@@ -275,3 +275,4 @@ body.window .lib-head { top: -2px; margin: -2px -16px 0; padding: 8px 16px 4px; 
 .mk-sheet .bar .mk-id { margin-left: 2px; }
 .lib-rtk-gain { margin: 6px 12px 10px; font-size: 12px; line-height: 1.5; color: var(--muted); }
 .lib-card > .lib-acts { padding: 0 12px 12px; }
+.lib-rtk-cmd { margin: -4px 12px 10px; font: 11.5px var(--code); color: var(--muted); user-select: text; }
