@@ -4,8 +4,10 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
+	"github.com/yetone/magpie/internal/catalog"
 	"github.com/yetone/magpie/internal/provider"
 )
 
@@ -189,5 +191,71 @@ func TestZCodeKeepsUserChoices(t *testing.T) {
 	}
 	if got, _ := ids(); len(got) != 1 {
 		t.Fatalf("magpie put back: %v", got)
+	}
+}
+
+// ZCode is told how long a reply may be and which reasoning levels a model
+// takes, in both files; without them its model dialog shows 32000 tokens
+// and thinking only on or off. A vendor's output that is really its window
+// is capped, and a model whose output and levels aren't known gets neither.
+func TestZCodeOutputAndReasoning(t *testing.T) {
+	home := syncHome(t)
+	os.WriteFile(catalog.CachePath(), []byte(`{"zai":{"models":{"glm-4.6":{"id":"glm-4.6","name":"GLM-4.6","limit":{"context":204800,"output":500000},
+	  "reasoning_options":[{"type":"effort","values":["none","low","high","max"]}]}}}}`), 0o644)
+	catalog.Reset()
+	path := filepath.Join(home, ".zcode", "v2", "config.json")
+	rules := filepath.Join(home, ".zcode", "v2", "provider_config.json")
+	os.MkdirAll(filepath.Dir(path), 0o755)
+	os.WriteFile(path, []byte(`{"provider":{"builtin:zai":{"models":{"GLM-5-Turbo":{"reasoning":{"enabled":true,"variants":["enabled","off"],"defaultVariant":"enabled"},"limit":{"context":200000,"output":64000}}}}}}`), 0o644)
+	os.WriteFile(rules, []byte(`{"schemaVersion":1,"config":{"providerConfigRules":{"providerRules":[]},"modelConfigRules":{"providerModelRules":[{"providerId":"mine","modelId":"x","config":{"optionSpecs":{"maxOutputTokens":{"max":7}}}}],"manualProviderModelRules":[]}}}`), 0o600)
+	if err := zcode(home).Field("provider").Set("magpie"); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := os.ReadFile(path)
+	for _, want := range []string{
+		`"limit":{"context":204800,"output":128000}`,
+		`"reasoning":{"defaultVariant":"high","enabled":true,"variants":["disabled","low","high","max"]}`,
+		`"GLM-5-Turbo":{"reasoning":{"enabled":true,"variants":["enabled","off"],"defaultVariant":"enabled"},"limit":{"context":200000,"output":64000}}`,
+	} {
+		if !strings.Contains(string(b), want) {
+			t.Fatalf("config.json lacks %s: %s", want, b)
+		}
+	}
+	b, _ = os.ReadFile(rules)
+	for _, want := range []string{
+		`"optionSpecs":{"maxOutputTokens":{"max":128000},"reasoningLevel":{"values":["disabled","low","high","max"]}}`,
+		`{"config":{"optionSpecs":{"maxOutputTokens":{"max":7}}},"modelId":"x","providerId":"mine"}`,
+	} {
+		if !strings.Contains(string(b), want) {
+			t.Fatalf("provider_config.json lacks %s: %s", want, b)
+		}
+	}
+
+	os.WriteFile(catalog.CachePath(), []byte(`{"zai":{"models":{"glm-4.6":{"id":"glm-4.6","name":"GLM-4.6","limit":{"context":204800}}}}}`), 0o644)
+	catalog.Reset()
+	if err := zcode(home).Sync(); err != nil {
+		t.Fatal(err)
+	}
+	b, _ = os.ReadFile(path)
+	c, _ := os.ReadFile(rules)
+	if strings.Contains(string(b), "128000") || strings.Contains(string(b), `"disabled"`) ||
+		strings.Contains(string(c), "128000") || strings.Contains(string(c), "reasoningLevel") {
+		t.Fatalf("unknown output or levels written:\n%s\n%s", b, c)
+	}
+}
+
+func TestZCodeDefaultLevel(t *testing.T) {
+	for _, c := range []struct {
+		in   []string
+		want string
+	}{
+		{[]string{"low", "medium", "high"}, "medium"},
+		{[]string{"disabled", "low", "high", "max"}, "high"},
+		{[]string{"low", "high"}, "high"},
+		{[]string{"disabled"}, "disabled"},
+	} {
+		if got := zcodeDefaultLevel(c.in); got != c.want {
+			t.Errorf("%v: %q, want %q", c.in, got, c.want)
+		}
 	}
 }
