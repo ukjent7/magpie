@@ -157,14 +157,14 @@ fn rename_group(group: &mut Group, from: &str, to: &str) -> Result<()> {
     let mut value = serde_json::to_value(&*group).context("read the group's saved fields")?;
     if let Some(rules) = value.get_mut("rules").and_then(Value::as_array_mut) {
         for rule in rules {
-            let Some(used) = rule.get_mut("use").and_then(Value::as_str_mut) else {
+            let Some(Value::String(used)) = rule.get_mut("use") else {
                 continue;
             };
             let moved = renamed_in(used, from, to);
             *used = moved;
         }
     }
-    if let Some(classifier) = value.get_mut("classifier").and_then(Value::as_str_mut) {
+    if let Some(Value::String(classifier)) = value.get_mut("classifier") {
         let moved = renamed_in(classifier, from, to);
         *classifier = moved;
     }

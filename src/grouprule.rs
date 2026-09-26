@@ -2031,7 +2031,7 @@ mod tests {
                 .contains("was of kind 1")
         );
 
-        let effort = classify_body("cls", "low", &["x".to_owned()], "t");
+        let effort = classify_body("cls", "low", &["x".to_owned()], "", "t");
         assert_eq!(effort["reasoning_effort"], "low");
     }
 

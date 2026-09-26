@@ -21,7 +21,6 @@ mod import_apps;
 pub mod modelprefs;
 pub(crate) mod planquota;
 pub mod rename;
-pub mod rename;
 mod test;
 pub(crate) mod zcode;
 pub(crate) use import::command as import_command;
