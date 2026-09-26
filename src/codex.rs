@@ -113,9 +113,12 @@ pub(crate) fn auth_file_path() -> Option<PathBuf> {
 }
 
 pub(crate) fn signed_in_identity() -> Option<(String, String)> {
+    identity_from_auth(&signed_in_auth()?)
+}
+
+pub(crate) fn signed_in_auth() -> Option<Value> {
     let contents = std::fs::read(signed_in_auth_file()?).ok()?;
-    let auth: Value = serde_json::from_slice(&contents).ok()?;
-    identity_from_auth(&auth)
+    serde_json::from_slice(&contents).ok()
 }
 
 pub(crate) fn identity_from_auth(auth: &Value) -> Option<(String, String)> {
@@ -188,38 +191,63 @@ pub(crate) fn cached_models() -> Vec<String> {
 pub(crate) async fn credentials(client: &Client, auth_file: &Path) -> Result<Credentials> {
     let _guard = REFRESH_LOCK.lock().await;
     let mut auth = read_auth(auth_file).await?;
+    let (credentials, refreshed) = credentials_from_auth_inner(client, &mut auth).await?;
+    if refreshed {
+        let mut bytes =
+            serde_json::to_vec_pretty(&auth).context("serialize refreshed Codex sign-in")?;
+        bytes.push(b'\n');
+        let path = auth_file.to_owned();
+        tokio::task::spawn_blocking(move || {
+            crate::config::atomic_write_secret_for_settings(&path, &bytes)
+        })
+        .await
+        .context("save refreshed Codex sign-in")??;
+    }
+    Ok(credentials)
+}
+
+pub(crate) async fn credentials_from_auth(
+    client: &Client,
+    auth: &mut Value,
+) -> Result<(Credentials, bool)> {
+    let _guard = REFRESH_LOCK.lock().await;
+    credentials_from_auth_inner(client, auth).await
+}
+
+async fn credentials_from_auth_inner(
+    client: &Client,
+    auth: &mut Value,
+) -> Result<(Credentials, bool)> {
+    ensure!(
+        auth.get("auth_mode").and_then(Value::as_str) != Some("apikey"),
+        "Codex is signed out; run codex login"
+    );
     let mut access_token = auth
         .pointer("/tokens/access_token")
         .and_then(Value::as_str)
         .filter(|token| !token.is_empty())
         .map(str::to_owned)
         .context("Codex is signed out; run codex login")?;
-    let id_token = auth
-        .pointer("/tokens/id_token")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_owned();
-    let account_id = auth
-        .pointer("/tokens/account_id")
-        .and_then(Value::as_str)
-        .filter(|id| !id.is_empty())
-        .map(str::to_owned)
-        .or_else(|| account_id_from_id_token(&id_token));
+    let account_id = account_id_from_auth(auth);
 
-    if token_needs_refresh(&access_token) {
+    let refreshed = token_needs_refresh(&access_token);
+    if refreshed {
         let refresh_token = auth
             .pointer("/tokens/refresh_token")
             .and_then(Value::as_str)
             .filter(|token| !token.is_empty())
             .map(str::to_owned)
             .context("Codex is signed out; run codex login")?;
-        access_token = refresh(client, auth_file, &mut auth, &refresh_token).await?;
+        access_token = refresh(client, auth, &refresh_token).await?;
     }
 
-    Ok(Credentials {
-        access_token,
-        account_id: account_id.unwrap_or_default(),
-    })
+    Ok((
+        Credentials {
+            access_token,
+            account_id: account_id.unwrap_or_default(),
+        },
+        refreshed,
+    ))
 }
 
 async fn read_auth(path: &Path) -> Result<Value> {
@@ -237,12 +265,7 @@ async fn read_auth(path: &Path) -> Result<Value> {
     Ok(auth)
 }
 
-async fn refresh(
-    client: &Client,
-    auth_file: &Path,
-    auth: &mut Value,
-    refresh_token: &str,
-) -> Result<String> {
+async fn refresh(client: &Client, auth: &mut Value, refresh_token: &str) -> Result<String> {
     let body = serde_json::to_vec(&json!({
         "client_id": CLIENT_ID,
         "grant_type": "refresh_token",
@@ -292,18 +315,13 @@ async fn refresh(
             ),
         );
     }
-    let mut bytes = serde_json::to_vec_pretty(auth).context("serialize refreshed Codex sign-in")?;
-    bytes.push(b'\n');
-    let path = auth_file.to_owned();
-    tokio::task::spawn_blocking(move || {
-        crate::config::atomic_write_secret_for_settings(&path, &bytes)
-    })
-    .await
-    .context("save refreshed Codex sign-in")??;
     Ok(fresh.access_token)
 }
 
-async fn read_limited(response: &mut reqwest::Response, limit: usize) -> Result<Vec<u8>> {
+pub(crate) async fn read_limited(
+    response: &mut reqwest::Response,
+    limit: usize,
+) -> Result<Vec<u8>> {
     let mut contents = Vec::new();
     while let Some(chunk) = response.chunk().await.context("read Codex response")? {
         ensure!(

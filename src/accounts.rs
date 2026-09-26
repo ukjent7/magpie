@@ -8,6 +8,7 @@ use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use crate::{codex, copilot, settings};
 
 mod codex_oauth;
+mod codex_usage;
 
 const USAGE: &str = "usage: magpie accounts [claude|codex|grok|copilot|gemini|antigravity] [--json] | magpie accounts add codex | magpie accounts switch|forget codex <user>";
 
@@ -26,7 +27,7 @@ struct SavedLogin {
     extra: BTreeMap<String, Value>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Serialize)]
 struct AccountRow {
     agent: String,
     user: String,
@@ -34,7 +35,23 @@ struct AccountRow {
     plan: Option<String>,
     active: bool,
     on: bool,
-    windows: Vec<Value>,
+    windows: Vec<AccountWindow>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+    #[serde(skip)]
+    auth: Option<Value>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AccountWindow {
+    name: String,
+    used: f64,
+    remaining: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    resets_at: Option<String>,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    display: String,
 }
 
 pub(crate) async fn command(args: &[String]) -> Result<()> {
@@ -86,16 +103,19 @@ pub(crate) async fn command(args: &[String]) -> Result<()> {
         .into_iter()
         .map(account_row)
         .collect::<Vec<_>>();
-    if let Some((user, plan)) = codex::signed_in_identity() {
-        merge_active(&mut rows, "codex", user, nonempty(plan));
+    if let Some(auth) = codex::signed_in_auth()
+        && let Some((user, plan)) = codex::identity_from_auth(&auth)
+    {
+        merge_active(&mut rows, "codex", user, nonempty(plan), Some(auth));
     }
     if let Some(account) = copilot::signed_in_account().filter(|account| !account.user.is_empty()) {
-        merge_active(&mut rows, "copilot", account.user, None);
+        merge_active(&mut rows, "copilot", account.user, None, None);
     }
 
     if let Some(agent) = agent_filter {
         rows.retain(|row| row.agent == agent);
     }
+    codex_usage::refresh(&mut rows).await;
     rows.sort_by_cached_key(|row| (row.agent.clone(), row.user.to_lowercase()));
 
     if as_json {
@@ -290,18 +310,39 @@ fn account_row(login: SavedLogin) -> AccountRow {
         active: false,
         on: login.on,
         windows: Vec::new(),
+        error: None,
+        auth: login.auth,
     }
 }
 
-fn merge_active(rows: &mut Vec<AccountRow>, agent: &str, user: String, plan: Option<String>) {
-    if let Some(row) = rows
-        .iter_mut()
-        .find(|row| row.agent == agent && row.user.eq_ignore_ascii_case(&user))
-    {
+fn merge_active(
+    rows: &mut Vec<AccountRow>,
+    agent: &str,
+    user: String,
+    plan: Option<String>,
+    auth: Option<Value>,
+) {
+    if let Some(row) = rows.iter_mut().find(|row| {
+        row.agent == agent
+            && if agent == "codex"
+                && let (Some(left), Some(right)) = (&row.auth, &auth)
+                && let (Some(left_id), Some(right_id)) = (
+                    codex::account_id_from_auth(left),
+                    codex::account_id_from_auth(right),
+                )
+            {
+                left_id == right_id
+            } else {
+                row.user.eq_ignore_ascii_case(&user)
+            }
+    }) {
         row.active = true;
         row.on = true;
         if row.plan.is_none() {
             row.plan = plan;
+        }
+        if let Some(auth) = auth {
+            row.auth = Some(auth);
         }
         return;
     }
@@ -312,6 +353,8 @@ fn merge_active(rows: &mut Vec<AccountRow>, agent: &str, user: String, plan: Opt
         active: true,
         on: true,
         windows: Vec::new(),
+        error: None,
+        auth,
     });
 }
 
@@ -342,7 +385,38 @@ fn print_rows(rows: &[AccountRow]) {
             .as_deref()
             .map(|plan| format!(" · {plan}"))
             .unwrap_or_default();
-        println!("{mark} {:9} {}{plan}", row.agent, row.user);
+        let mut line = format!("{mark} {:9} {}{plan}", row.agent, row.user);
+        for window in &row.windows {
+            let name = window
+                .name
+                .replace(" hours", "h")
+                .replace(" hour", "h")
+                .replace(" days", "d")
+                .replace(" day", "d");
+            line.push_str(&format!("  {name} {:.0}%", window.used));
+            if !window.display.is_empty() {
+                line.push_str(&format!(" ({})", window.display));
+            }
+            if let Some(reset) = window.resets_at.as_deref().and_then(short_until) {
+                line.push_str(&format!(" ↻{reset}"));
+            }
+        }
+        if let Some(error) = &row.error {
+            line.push_str(&format!("  {error}"));
+        }
+        println!("{line}");
     }
     println!("● signed in · ○ in use when the signed-in account runs out");
+}
+
+fn short_until(reset_at: &str) -> Option<String> {
+    let reset_at = OffsetDateTime::parse(reset_at, &Rfc3339).ok()?;
+    let seconds = (reset_at - OffsetDateTime::now_utc()).whole_seconds();
+    let remaining = match seconds {
+        value if value <= 0 => return Some("now".to_owned()),
+        value if value < 3600 => format!("{}m", value / 60),
+        value if value < 48 * 3600 => format!("{}h{}m", value / 3600, (value % 3600) / 60),
+        value => format!("{}d{}h", value / 86400, (value % 86400) / 3600),
+    };
+    Some(remaining)
 }
