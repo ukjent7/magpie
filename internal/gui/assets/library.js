@@ -162,6 +162,7 @@
 
   async function load() {
     if (!lib) renderLoading();
+    rtk = null; // asked again when its tab is drawn: an agent may have been installed since
     try {
       lib = await api("library");
       render();
@@ -224,6 +225,7 @@
       ["instructions", t("Instructions")],
       ["mcp", t("MCP servers") + (counts.mcp ? " · " + counts.mcp : "")],
       ["skills", t("Skills") + (counts.skills ? " · " + counts.skills : "")],
+      ["rtk", "RTK"],
     ], tab, (id) => { tab = id; try { localStorage.setItem("magpie.libTab", id); } catch {} render(); page.scrollTop = 0; });
     tabs.classList.add("lib-tabs");
     head.append(tabs, el("span", "grow"));
@@ -243,6 +245,7 @@
     shown = tab;
     if (tab === "instructions") renderInstructions(body);
     else if (tab === "mcp") renderServers(body);
+    else if (tab === "rtk") renderRTK(body);
     else renderSkills(body);
     page.append(body);
     for (const n of body.querySelectorAll(".row-head .note")) n.title = n.textContent;
@@ -268,6 +271,88 @@
   }
 
   function intro(text) { return el("p", "lib-intro", text); }
+
+  // ---------- RTK ----------
+
+  // RTK (rtk-ai.app) cuts down what the shell commands an agent runs print,
+  // so their output costs fewer tokens. magpie runs rtk's own installer for
+  // each agent switched on, and reads the agents' files for which have it.
+  let rtk = null;          // /api/library/rtk
+  const rtkBusy = new Set(); // agents being switched
+  let rtkLoading = false;
+  async function loadRTK() {
+    if (rtkLoading) return;
+    rtkLoading = true;
+    try {
+      rtk = await api("library/rtk");
+    } catch (e) {
+      status(e.message, "err");
+    }
+    rtkLoading = false;
+    if (tab === "rtk" && rtk) render();
+  }
+  function renderRTK(body) {
+    body.append(intro(t("RTK rewrites the shell commands an agent runs — git status, cargo test, ls… — to print only what the model needs, so they cost fewer tokens. Switch it on for an agent and magpie runs RTK's own installer for it.")));
+    if (!rtk) {
+      body.append(el("div", "row skeleton"));
+      loadRTK();
+      return;
+    }
+    const card = el("div", "list lib-card");
+    const ttl = el("div", "lib-cardhead");
+    ttl.append(glyph(GLYPH.cmd), el("b", "", "RTK"), el("span", "grow"));
+    if (rtk.path) {
+      ttl.append(el("span", "note mono", rtk.version ? "v" + rtk.version : tilde(rtk.path)));
+      card.append(ttl);
+      const g = rtk.gain;
+      card.append(el("p", "lib-rtk-gain", g
+        ? t("{saved} tokens saved over {n} commands — {pct}% on average", { saved: tokens(g.saved), n: g.commands.toLocaleString(), pct: Math.round(g.pct) })
+        : t("Nothing saved yet: the agents' commands go through RTK once it's switched on and the agent is restarted.")));
+    } else {
+      card.append(ttl);
+      const p = el("p", "lib-rtk-gain", t("RTK isn't installed. Install it (brew install rtk, or see its site), then come back here."));
+      card.append(p);
+      const acts = el("div", "lib-acts");
+      acts.append(button(t("Get RTK"), "action", () => browse(rtk.url)), button(t("Check again"), "", () => { rtk = null; render(); }));
+      card.append(acts);
+    }
+    body.append(card);
+    const rh = el("div", "row-head");
+    rh.append(el("span", "label", t("Agents")), el("span", "grow"), el("span", "note", t("restart an agent after switching it")));
+    body.append(rh);
+    const list = el("div", "list lib-list");
+    const rows = rtk.agents.filter((a) => !isHidden(a));
+    for (const a of rows) {
+      const row = el("div", "row lib-row");
+      const who = el("div", "who");
+      who.append(el("div", "name", a.name));
+      row.append(icon(a.icon), who, el("span", "grow"));
+      const sw = toggle(a.on, t("{agent} runs its commands through RTK", { agent: a.name }), (on) => setRTK(a, on));
+      if (!rtk.path || rtkBusy.has(a.id)) sw.disabled = true;
+      row.append(sw);
+      list.append(row);
+    }
+    if (!rows.length) list.append(el("div", "lib-none", t("None of your agents is one RTK has a hook for.")));
+    body.append(list);
+  }
+  async function setRTK(a, on) {
+    rtkBusy.add(a.id);
+    render();
+    try {
+      rtk = await api("library/rtk", { agent: a.id, on });
+      const names = (rtk.restart || [a.id]).map((id) => rtk.agents.find((x) => x.id === id)?.name || id).join(", ");
+      status(on ? t("RTK is on for {agent} — restart it to use it", { agent: names }) : t("RTK is off for {agent} — restart it to see it", { agent: names }), "ok", 6000);
+    } catch (e) {
+      status(e.message, "err", 8000);
+    }
+    rtkBusy.delete(a.id);
+    render();
+  }
+  function tokens(n) {
+    if (n >= 1e6) return (n / 1e6).toFixed(1) + "M";
+    if (n >= 1e3) return (n / 1e3).toFixed(1) + "k";
+    return String(n);
+  }
 
   // ---------- instructions ----------
 

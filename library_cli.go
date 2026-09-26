@@ -19,6 +19,8 @@ const libraryUsage = `magpie library                     what the library gives 
   magpie library mcp rm <name>
   magpie library skill agents <name> <a,b…|none>
   magpie library skill rm <name>     (skills are installed from the app's Library page)
+  magpie library rtk                 which agents run their shell commands through RTK (rtk-ai.app), to save tokens
+  magpie library rtk on|off <agent>  switch it, with RTK's own installer
 `
 
 // libraryCmd is magpie library …: the instructions, MCP servers and skills
@@ -115,6 +117,8 @@ func libraryCmd(args []string) error {
 		default:
 			return fmt.Errorf("usage:\n  %s", libraryUsage)
 		}
+	case "rtk":
+		return rtkCmd(rest)
 	case "help", "-h", "--help":
 		fmt.Print("  " + libraryUsage)
 		return nil
@@ -237,5 +241,49 @@ func libraryStatus() error {
 		}
 	}
 	fmt.Println(muted.Render("  kept in " + v.Dir + " · magpie library help"))
+	return nil
+}
+
+// rtkCmd is magpie library rtk …: RTK's hook in each agent.
+func rtkCmd(args []string) error {
+	var v *library.RTKView
+	switch {
+	case len(args) == 0:
+		v = library.ReadRTK()
+	case len(args) == 2 && (args[0] == "on" || args[0] == "off"):
+		id, err := library.RTKTakes(args[1])
+		if err != nil {
+			return err
+		}
+		if v, err = library.SetRTK(id, args[0] == "on"); err != nil {
+			return err
+		}
+	default:
+		return fmt.Errorf("usage:\n  %s", libraryUsage)
+	}
+	if v.Path == "" {
+		fmt.Println(amber.Render("!"), "rtk isn't installed —", v.URL)
+	} else {
+		fmt.Println(bold.Render("RTK"), muted.Render(v.Version+" · "+v.Path))
+		if g := v.Gain; g != nil {
+			fmt.Printf("  %d tokens saved over %d commands (%.0f%% on average)\n", g.Saved, g.Commands, g.Pct)
+		}
+	}
+	for _, a := range v.Agents {
+		mark := muted.Render("off")
+		if a.On {
+			mark = green.Render("on ")
+		}
+		fmt.Println(" ", mark, a.Name)
+	}
+	if len(v.Agents) == 0 {
+		fmt.Println(" ", muted.Render("none of the agents here is one RTK has a hook for"))
+	}
+	if len(v.Restart) > 0 {
+		fmt.Println(muted.Render("  restart " + strings.Join(v.Restart, ", ") + " for it to take effect"))
+	}
+	if v.Backup != "" {
+		fmt.Println(muted.Render("  what was there before is kept in " + v.Backup))
+	}
 	return nil
 }
