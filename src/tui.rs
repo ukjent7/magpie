@@ -877,7 +877,7 @@ fn add_model_options(field: &agent::FieldSpec, items: &mut Vec<PickerOption>) ->
         .iter()
         .map(|entry| entry.id.as_str())
         .collect::<HashSet<_>>();
-    for entry in entries {
+    for entry in &entries {
         let value = format!("{}{}", field.catalog_prefix, entry.id);
         if seen.insert(value.clone()) {
             items.push(PickerOption {

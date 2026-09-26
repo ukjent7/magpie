@@ -113,7 +113,6 @@ pub(crate) async fn start_background() -> Result<Option<BackgroundGateway>> {
     let listener = tokio::net::TcpListener::bind(&addr)
         .await
         .with_context(|| format!("bind gateway to {addr}"))?;
-    let address = listener.local_addr().context("read gateway address")?;
     let app = router()?;
     let (shutdown, shutdown_receiver) = oneshot::channel();
     let task = tokio::spawn(async move {
