@@ -788,7 +788,7 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.
 				return res.StatusCode, msg, false
 			}
 		}
-		keepRetry(w.Header(), res.Header)
+		keepRetry(w.Header(), res.Header, b)
 		return writeError(w, proto, res.StatusCode, msg), msg, true
 	}
 	rd, sse := eventStream(res)
@@ -976,7 +976,7 @@ func (s *Server) translate(w http.ResponseWriter, r *http.Request, p provider.Pr
 	if res.StatusCode >= 400 {
 		b, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
 		msg := p.Name + ": " + provider.APIError(b, res.Status)
-		keepRetry(w.Header(), res.Header)
+		keepRetry(w.Header(), res.Header, b)
 		return writeError(w, from, res.StatusCode, msg), msg
 	}
 	dec := decoder(actual)

@@ -76,6 +76,10 @@ func (s *Server) codexBackend(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		body, _ = codexInput(body, false)
+		if id, ok := codexAccounts(r.Header, modelOf(body)); ok {
+			s.serve(w, r, provider.Responses, withModel(body, id))
+			return
+		}
 	}
 	s.codexUpstream(w, r, rest, body)
 }
@@ -118,6 +122,37 @@ func isCatalogID(model string) bool {
 		}
 	}
 	return false
+}
+
+// codexAccounts is what a request for one of Codex's own models is served
+// as when Codex is signed in to ChatGPT and more of its accounts are on in
+// magpie: the codex subscription's model (codex/<model>), which goes to the
+// account Codex is signed in to and, when that one is out of its allowance
+// or rate limited, on to the next — as it can't when relayed as it came.
+func codexAccounts(h http.Header, model string) (string, bool) {
+	if model == "" || strings.Contains(model, "/") || apiKey(h) {
+		return "", false
+	}
+	id := "codex/" + model
+	p, _, ok := provider.Resolve(id)
+	if !ok || p.Account == nil || p.Account.Agent != "codex" || len(p.AlsoOn()) == 0 {
+		return "", false
+	}
+	return id, true
+}
+
+// withModel is a request body asking for another model.
+func withModel(body []byte, model string) []byte {
+	var q map[string]json.RawMessage
+	if json.Unmarshal(body, &q) != nil {
+		return body
+	}
+	q["model"], _ = json.Marshal(model)
+	b, err := json.Marshal(q)
+	if err != nil {
+		return body
+	}
+	return b
 }
 
 // codexUpstream relays a request as it came, the sign-in included, to where

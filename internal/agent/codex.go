@@ -91,6 +91,25 @@ func codex(home string) *Agent {
 		}
 		return edit.DelTOMLKey(path, "agents", "default_subagent_model")
 	}
+	// Codex on one of its own models goes through magpie too while more of
+	// its ChatGPT accounts are on there, so one out of its allowance hands
+	// the turn to the next; with none, it goes straight to OpenAI again
+	failover := func() error {
+		if isMagpie(get("model")) || asProvider() {
+			return nil
+		}
+		if p := get("model_provider"); p != "" && p != "openai" {
+			return nil
+		}
+		on := codexFailover()
+		switch {
+		case on && !viaBase():
+			return edit.SetTOMLTop(path, edit.KV{Path: "openai_base_url", Value: codexGatewayURL()})
+		case !on && viaBase():
+			return dropBase()
+		}
+		return nil
+	}
 	modelOptions := func(withMagpie bool) []Option {
 		var own []Option
 		if p := get("model_provider"); p != "" && p != magpieID {
@@ -200,6 +219,9 @@ func codex(home string) *Agent {
 		if err := edit.SetTOMLTop(path, edit.KV{Path: "model", Value: v}); err != nil {
 			return err
 		}
+		if err := failover(); err != nil {
+			return err
+		}
 		return settle()
 	}
 
@@ -207,6 +229,9 @@ func codex(home string) *Agent {
 		ID: "codex", Name: "Codex", Icon: "codex-color", Bin: "codex", Dir: dir, Path: path,
 		UA: []string{"codex"},
 		Sync: func() error {
+			if err := failover(); err != nil {
+				return err
+			}
 			switch {
 			case asProvider() && get("model_catalog_json") == catalogPath:
 				b := codexcat.Catalog(magpieModels("codex"))
@@ -415,6 +440,17 @@ var codexUsedUp = func() bool {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	return provider.CodexUsedUp(ctx)
+}
+
+// codexFailover reports whether Codex is signed in to a ChatGPT account
+// with more of its accounts on in magpie, behind it.
+func codexFailover() bool {
+	for _, p := range provider.Accounts() {
+		if p.Account != nil && p.Account.Agent == "codex" {
+			return len(p.AlsoOn()) > 0
+		}
+	}
+	return false
 }
 
 // codexSignedIn reports whether Codex has a sign-in of its own, a ChatGPT

@@ -523,6 +523,9 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 			fail(rw, err)
 			return
 		}
+		// an agent on its own models goes through magpie while more of
+		// its accounts are on, and straight to its vendor again once not
+		agent.SyncCatalog()
 		writeJSON(rw, providersState())
 	})
 	// A provider's several keys: add one, put one in use, name or remove it.
