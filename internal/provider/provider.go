@@ -271,11 +271,17 @@ func Save(p Provider) error {
 	if p.Name == "" {
 		p.Name = p.ID
 	}
-	if a, ok := find(Accounts(), p.ID); ok {
+	if _, ok := find(Accounts(), p.ID); ok || p.ID == "kiro" && (p.Key != "" && KiroExecutable() != "" || stored(p.ID)) {
 		// an account keeps only the user's model picks; the rest is the
 		// agent's own sign-in. One the user removed stays removed: only
-		// ShowAccount brings it back.
-		p = Provider{ID: a.ID, Models: p.Models, Unlisted: p.Unlisted, Fallback: p.Fallback, Routing: p.Routing, Affinity: p.Affinity, Contexts: p.Contexts, Family: p.Family, Hidden: hiddenAccount(a.ID)}
+		// ShowAccount brings it back. Kiro's alone also keeps a key, which
+		// its CLI takes in place of a sign-in — so saving one is how a Kiro
+		// that isn't signed in is added.
+		key := ""
+		if p.ID == "kiro" {
+			key = p.Key
+		}
+		p = Provider{ID: p.ID, Key: key, Models: p.Models, Unlisted: p.Unlisted, Fallback: p.Fallback, Routing: p.Routing, Affinity: p.Affinity, Contexts: p.Contexts, Family: p.Family, Hidden: hiddenAccount(p.ID)}
 	} else {
 		if slices.Contains(accountIDs, p.ID) && !stored(p.ID) {
 			// taken, it would hide that subscription once signed in
@@ -343,7 +349,7 @@ func freeName(name string) string {
 }
 
 // accountIDs are the ids of the subscriptions magpie can list (account.go).
-var accountIDs = []string{"antigravity", "claude", "codex", "copilot", "cursor", "devin", "gemini", "grok", "zcode"}
+var accountIDs = []string{"antigravity", "claude", "codex", "copilot", "cursor", "devin", "gemini", "grok", "kiro", "zcode"}
 
 func stored(id string) bool {
 	for _, p := range load().Providers {
