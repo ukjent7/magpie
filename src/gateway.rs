@@ -28,6 +28,18 @@ use crate::{
 
 const DEFAULT_ADDR: &str = "127.0.0.1:3425";
 pub const TOKEN: &str = "magpie";
+const CHAT_COMPLETIONS_PATH: &str = "/v1/chat/completions";
+const RESPONSES_PATH: &str = "/v1/responses";
+const MESSAGES_PATH: &str = "/v1/messages";
+const MESSAGE_COUNT_PATH: &str = "/v1/messages/count_tokens";
+const MODELS_PATH: &str = "/v1/models";
+pub(crate) const API_ROUTES: [(&str, &str, &str); 5] = [
+    ("OpenAI Chat Completions", "POST", CHAT_COMPLETIONS_PATH),
+    ("OpenAI Responses", "POST", RESPONSES_PATH),
+    ("Anthropic Messages", "POST", MESSAGES_PATH),
+    ("Anthropic token count", "POST", MESSAGE_COUNT_PATH),
+    ("Model catalog", "GET", MODELS_PATH),
+];
 const MAX_REQUEST_BYTES: usize = 64 * 1024 * 1024;
 const MAX_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
 const UPSTREAM_TIMEOUT: Duration = Duration::from_secs(600);
@@ -173,15 +185,15 @@ fn router() -> Result<Router> {
     };
     Ok(Router::new()
         .route("/", get(info))
-        .route("/v1/models", get(models))
+        .route(MODELS_PATH, get(models))
         .route("/models", get(models))
-        .route("/v1/chat/completions", post(chat_completions))
+        .route(CHAT_COMPLETIONS_PATH, post(chat_completions))
         .route("/chat/completions", post(chat_completions))
-        .route("/v1/responses", post(responses))
+        .route(RESPONSES_PATH, post(responses))
         .route("/responses", post(responses))
-        .route("/v1/messages", post(messages))
+        .route(MESSAGES_PATH, post(messages))
         .route("/messages", post(messages))
-        .route("/v1/messages/count_tokens", post(count_tokens))
+        .route(MESSAGE_COUNT_PATH, post(count_tokens))
         .fallback(not_found)
         .with_state(state))
 }
@@ -307,7 +319,7 @@ async fn count_tokens(State(state): State<GatewayState>, request: Request<Body>)
         &state,
         request,
         ApiProtocol::Anthropic,
-        Some("/v1/messages/count_tokens"),
+        Some(MESSAGE_COUNT_PATH),
     )
     .await
 }

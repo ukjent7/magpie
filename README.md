@@ -64,8 +64,8 @@ The terminal UI (`magpie tui`) looks like this:
   them back in one move.
 - **Groups and usage.** Combine provider models into routing groups, then
   review gateway usage by period, agent and model.
-- **Five desktop pages.** Manage Agents, Providers, Profiles, Groups and Usage
-  in the native app.
+- **Six desktop pages.** Manage Agents, Providers, Profiles, Groups, Gateway
+  and Usage in the native app.
 
 ## Agents
 
@@ -247,9 +247,10 @@ it:
 | Anthropic   | `http://127.0.0.1:3425`    | `ANTHROPIC_BASE_URL`, `ANTHROPIC_API_KEY=magpie` |
 | Gemini      | `http://127.0.0.1:3425`    | `GOOGLE_GEMINI_BASE_URL`, `GEMINI_API_KEY=magpie` |
 
-The desktop app starts the local gateway with the window. Run `magpie serve`
-to start it without the app. `MAGPIE_DEBUG=1` logs gateway calls to the
-terminal.
+The Gateway page shows copy-ready client settings, supported routes and the
+models exposed by the local API. The desktop app starts the gateway with the
+window; run `magpie serve` to start it without the app. `MAGPIE_DEBUG=1` logs
+gateway calls to the terminal.
 
 **Claude Code** gets `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN` and the
 model variables in the `env` block of `settings.json`; picking a native
@@ -364,10 +365,11 @@ magpie rm work
 magpie sync                     # refresh the models.dev catalog and every live model list
 ```
 
-The desktop app has Agents, Providers, Profiles, Groups and Usage pages. Use
-them to edit agent settings, manage provider keys and model exposure, configure
-routing, switch saved profiles, and inspect usage. The keyboard-driven
-terminal interface is available separately with `magpie tui`.
+The desktop app has Agents, Providers, Profiles, Groups, Gateway and Usage
+pages. Use them to edit agent settings, manage provider keys and model
+exposure, configure routing, copy client connection settings, switch saved
+profiles, and inspect usage. The keyboard-driven terminal interface is
+available separately with `magpie tui`.
 
 Keys in the terminal version:
 

@@ -45,6 +45,7 @@ enum Page {
     Providers,
     Profiles,
     Groups,
+    Gateway,
     Usage,
 }
 
@@ -418,6 +419,12 @@ impl App {
                 .clicked()
             {
                 self.page = Page::Groups;
+            }
+            if ui
+                .selectable_label(self.page == Page::Gateway, "Gateway")
+                .clicked()
+            {
+                self.page = Page::Gateway;
             }
             if ui
                 .selectable_label(self.page == Page::Usage, "Usage")
@@ -1025,6 +1032,109 @@ impl App {
                 }
             }
         });
+    }
+
+    fn render_gateway_sidebar(&self, ui: &mut egui::Ui) {
+        ui.heading("Local gateway");
+        ui.add_space(8.0);
+        ui.label("Listening");
+        ui.monospace(crate::gateway::url());
+        ui.add_space(12.0);
+        ui.label(format!("{} model IDs", self.model_choices.len()));
+        ui.label("OpenAI and Anthropic APIs");
+    }
+
+    fn render_gateway_details(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Gateway");
+        ui.label("The local API runs while the desktop app is open.");
+        ui.add_space(12.0);
+
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Base URL").strong());
+            ui.monospace(crate::gateway::url());
+            if ui.button("Copy").clicked() {
+                self.copy_to_clipboard(ui.ctx(), crate::gateway::url(), "gateway URL");
+            }
+        });
+        ui.add_space(12.0);
+
+        ui.heading("Connect a client");
+        ui.label("OpenAI-compatible clients");
+        let openai_settings = format!(
+            "OPENAI_BASE_URL={}\nOPENAI_API_KEY={}",
+            crate::gateway::v1_url(),
+            crate::gateway::TOKEN
+        );
+        ui.horizontal(|ui| {
+            ui.monospace(openai_settings.as_str());
+            if ui.button("Copy OpenAI settings").clicked() {
+                self.copy_to_clipboard(ui.ctx(), openai_settings.clone(), "OpenAI settings");
+            }
+        });
+        ui.add_space(6.0);
+        ui.label("Anthropic-compatible clients");
+        let anthropic_settings = format!(
+            "ANTHROPIC_BASE_URL={}\nANTHROPIC_API_KEY={}",
+            crate::gateway::url(),
+            crate::gateway::TOKEN
+        );
+        ui.horizontal(|ui| {
+            ui.monospace(anthropic_settings.as_str());
+            if ui.button("Copy Anthropic settings").clicked() {
+                self.copy_to_clipboard(ui.ctx(), anthropic_settings.clone(), "Anthropic settings");
+            }
+        });
+        ui.add_space(12.0);
+
+        ui.heading("API routes");
+        egui::Grid::new("gateway-routes")
+            .striped(true)
+            .show(ui, |ui| {
+                for (protocol, method, path) in crate::gateway::API_ROUTES {
+                    ui.label(protocol);
+                    ui.monospace(method);
+                    ui.monospace(path);
+                    ui.end_row();
+                }
+            });
+
+        ui.add_space(12.0);
+        ui.horizontal(|ui| {
+            ui.heading(format!("Available models · {}", self.model_choices.len()));
+            if ui
+                .add_enabled(
+                    !self.model_choices.is_empty(),
+                    egui::Button::new("Copy IDs"),
+                )
+                .clicked()
+            {
+                let model_ids = self
+                    .model_choices
+                    .iter()
+                    .map(|choice| choice.value.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                self.copy_to_clipboard(ui.ctx(), model_ids, "model IDs");
+            }
+        });
+        if self.model_choices.is_empty() {
+            ui.label("No models are exposed yet. Add a provider and refresh its model list.");
+            return;
+        }
+        egui::ScrollArea::vertical()
+            .max_height(180.0)
+            .show(ui, |ui| {
+                for choice in &self.model_choices {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.monospace(choice.value.as_str());
+                        ui.label(
+                            RichText::new(format!("{} · {}", choice.label, choice.provider))
+                                .small()
+                                .color(ui.visuals().weak_text_color()),
+                        );
+                    });
+                }
+            });
     }
 
     fn render_usage_sidebar(&self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
@@ -2260,6 +2370,11 @@ impl App {
         self.status = message.to_owned();
         self.status_ok = ok;
     }
+
+    fn copy_to_clipboard(&mut self, ctx: &egui::Context, text: String, label: &str) {
+        ctx.copy_text(text);
+        self.set_status(&format!("Copied {label}"), true);
+    }
 }
 
 impl eframe::App for App {
@@ -2288,6 +2403,7 @@ impl eframe::App for App {
                         Page::Providers => self.selected_provider,
                         Page::Profiles => self.selected_profile,
                         Page::Groups => self.selected_group,
+                        Page::Gateway => 0,
                         Page::Usage => 0,
                     };
                     ui.allocate_ui_with_layout(
@@ -2298,6 +2414,7 @@ impl eframe::App for App {
                             Page::Providers => self.render_provider_sidebar(ui, &mut actions),
                             Page::Profiles => self.render_profile_sidebar(ui, &mut actions),
                             Page::Groups => self.render_group_sidebar(ui, &mut actions),
+                            Page::Gateway => self.render_gateway_sidebar(ui),
                             Page::Usage => self.render_usage_sidebar(ui, &mut actions),
                         },
                     );
@@ -2306,6 +2423,7 @@ impl eframe::App for App {
                         Page::Providers => self.selected_provider = selected,
                         Page::Profiles => self.selected_profile = selected,
                         Page::Groups => self.selected_group = selected,
+                        Page::Gateway => {}
                         Page::Usage => {}
                     }
                     ui.separator();
@@ -2317,6 +2435,7 @@ impl eframe::App for App {
                             Page::Providers => self.render_provider_details(ui, &mut actions),
                             Page::Profiles => self.render_profile_details(ui, &mut actions),
                             Page::Groups => self.render_group_details(ui, &mut actions),
+                            Page::Gateway => self.render_gateway_details(ui),
                             Page::Usage => self.render_usage_details(ui),
                         },
                     );
