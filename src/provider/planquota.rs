@@ -331,7 +331,7 @@ pub(crate) async fn plan_quotas() -> Vec<crate::quota::Quota> {
                 });
             };
             match plan_windows(&client, &job.source, &job.key).await {
-                Ok((plan, windows)) if windows.is_empty() => None, // a key with no plan
+                Ok((_, windows)) if windows.is_empty() => None, // a key with no plan
                 Ok((plan, windows)) => Some(PlanQuota {
                     provider: job.id.clone(),
                     name: job.name.clone(),
@@ -340,7 +340,7 @@ pub(crate) async fn plan_quotas() -> Vec<crate::quota::Quota> {
                     windows,
                     error: None,
                 }),
-                Err(error) if !job.source.sure => None, // a key with no plan
+                Err(_) if !job.source.sure => None, // a key with no plan
                 Err(error) => Some(PlanQuota {
                     provider: job.id.clone(),
                     name: job.name.clone(),

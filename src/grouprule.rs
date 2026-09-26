@@ -190,7 +190,7 @@ pub fn intents(rules: &[Rule], q: &RuleRequest) -> Vec<String> {
         }
         if !out
             .iter()
-            .any(|intent| intent.eq_ignore_ascii_case(rule.intent.as_str()))
+            .any(|intent: &String| intent.eq_ignore_ascii_case(rule.intent.as_str()))
         {
             out.push(rule.intent.clone());
         }
@@ -450,7 +450,9 @@ fn string_or_text(value: Option<&Value>) -> String {
 }
 
 fn json_len(value: Option<&Value>) -> usize {
-    value.map_or(0, |value| serde_json::to_string(value).map_or(0, str::len))
+    value.map_or(0, |value| {
+        serde_json::to_string(value).map_or(0, |text| text.len())
+    })
 }
 
 fn chat_parts(content: Option<&Value>) -> Vec<Part> {
@@ -2195,7 +2197,7 @@ mod tests {
             {"role": "user", "content": "hi"},
             {"role": "tool", "tool_call_id": "c1", "content": "abcd".repeat(61000)}
         ]});
-        let hit = rule_for(key, &rules, "", &chat(round), "", &contexts, None)
+        let hit = rule_for(key, &rules, "", &chat(round.clone()), "", &contexts, None)
             .await
             .unwrap();
         assert!(hit.grown);

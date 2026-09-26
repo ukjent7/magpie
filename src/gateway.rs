@@ -813,7 +813,6 @@ async fn forward(
 
     // a group's rules: as a turn begins, the first rule it matches sends
     // the turn to its member, put ahead of the others for the failover
-    let mut rule_key = String::new();
     if let Some(group) = group
         && let Some(saved) = crate::provider::groups()
             .ok()
@@ -823,7 +822,6 @@ async fn forward(
         if !rules.is_empty() {
             let request_view = crate::grouprule::parse(protocol, &body);
             let contexts = crate::grouprule::member_contexts(&group.members);
-            rule_key = crate::grouprule::rule_key(&group.id, &parts.headers, &request_view);
             let agent_id = crate::usage::agent_of(
                 parts
                     .headers
@@ -865,7 +863,7 @@ async fn forward(
     while index < candidates.len() {
         let candidate = &candidates[index];
         let is_last = index + 1 == candidates.len();
-        let response = match send_upstream(
+        let mut response = match send_upstream(
             state,
             UpstreamRequest {
                 provider: candidate.provider,
