@@ -25,7 +25,7 @@ mod test;
 pub(crate) mod zcode;
 pub(crate) use import::command as import_command;
 
-const USAGE: &str = "usage: magpie presets | magpie providers | magpie models | magpie provider <id> | magpie provider add <preset> [key] | magpie provider add <name> id=<id> url=<url> key=<key> | magpie provider models <id> [ids…] | magpie provider test <id> | magpie provider icon <id> <file|name> | magpie provider key <id> <key> | magpie provider keys <id> [add <key> [name=<name>] [protocol=<protocol>] | use|on|off|rm <key-id> | rename <key-id> <name> | protocol <key-id> <protocol|any>] | magpie provider routing <id> [smart|order|rotate|usage] | magpie provider affinity <id> [auto|session|turn|off] | magpie provider fallback <id> [provider/model… | none] | magpie provider rm <id>";
+const USAGE: &str = "usage: magpie presets | magpie providers | magpie models | magpie provider <id> | magpie provider add <preset> [key] | magpie provider add <name> id=<id> url=<url> key=<key> | magpie provider models <id> [ids…] | magpie provider set <id> k=v… (id=… renames it, and the groups and agents on its models follow) | magpie provider test <id> | magpie provider icon <id> <file|name> | magpie provider key <id> <key> | magpie provider keys <id> [add <key> [name=<name>] [protocol=<protocol>] | use|on|off|rm <key-id> | rename <key-id> <name> | protocol <key-id> <protocol|any>] | magpie provider routing <id> [smart|order|rotate|usage] | magpie provider affinity <id> [auto|session|turn|off] | magpie provider fallback <id> [provider/model… | none] | magpie provider rm <id>";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum PresetKind {
