@@ -148,6 +148,7 @@ const COMMAND_CODE_MODEL: FieldSpec = field("model", "model", "model");
 const OMP_MODEL: FieldSpec = field("model", "model", "modelRoles.default");
 const DEVIN_MODEL: FieldSpec = field("model", "model", "agent.model");
 const HERMES_MODEL: FieldSpec = provider_model("model", "model", "model.provider", "model.default");
+const DSH_MODEL: FieldSpec = field("model", "model", "model");
 
 pub static ALL_AGENTS: &[AgentSpec] = &[
     AgentSpec {
@@ -238,7 +239,7 @@ pub static ALL_AGENTS: &[AgentSpec] = &[
         executable: "dsh",
         relative_path: ".dsh/config.yaml",
         format: ConfigFormat::Yaml,
-        fields: &[],
+        fields: &[DSH_MODEL],
     },
     AgentSpec {
         id: "commandcode",
@@ -334,6 +335,10 @@ impl Agent {
     }
 
     pub fn values(&self) -> Result<Vec<(&'static str, String)>> {
+        if self.spec.id == "dsh" {
+            return Ok(vec![("model", crate::dsh::get(&self.path)?)]);
+        }
+
         self.spec
             .fields
             .iter()
@@ -378,6 +383,9 @@ impl Agent {
                 )
             })?;
 
+        if self.spec.id == "dsh" && field.key == "model" {
+            return crate::dsh::set(&self.path, value);
+        }
         if self.spec.id == "opencode" && !field.catalog_prefix.is_empty() {
             return self.set_opencode_model(field, value);
         }
@@ -872,6 +880,10 @@ pub fn sync_catalog_models() -> Result<()> {
         config::set_yaml_values(&models_path, &[("providers.magpie", omp_provider()?)])?;
     }
 
+    if let Some(agent) = all().into_iter().find(|agent| agent.spec.id == "dsh") {
+        crate::dsh::sync(&agent.path)?;
+    }
+
     let Some(agent) = all().into_iter().find(|agent| agent.spec.id == "opencode") else {
         return Ok(());
     };
@@ -881,7 +893,7 @@ pub fn sync_catalog_models() -> Result<()> {
     Ok(())
 }
 
-fn is_gateway_model(value: &str) -> Result<bool> {
+pub(crate) fn is_gateway_model(value: &str) -> Result<bool> {
     let (groups, entries) = crate::provider::desktop_group_data()?;
     Ok(entries.iter().any(|entry| entry.id == value)
         || groups
@@ -1271,7 +1283,7 @@ fn agent_stash_path() -> PathBuf {
     settings::providers_path().with_file_name("stash.json")
 }
 
-fn read_agent_stash() -> Result<HashMap<String, String>> {
+pub(crate) fn read_agent_stash() -> Result<HashMap<String, String>> {
     let path = agent_stash_path();
     match fs::read_to_string(&path) {
         Ok(contents) => serde_json::from_str(&contents)
@@ -1283,7 +1295,7 @@ fn read_agent_stash() -> Result<HashMap<String, String>> {
     }
 }
 
-fn write_agent_stash(stash: &HashMap<String, String>) -> Result<()> {
+pub(crate) fn write_agent_stash(stash: &HashMap<String, String>) -> Result<()> {
     settings::write_json(&agent_stash_path(), stash)
 }
 

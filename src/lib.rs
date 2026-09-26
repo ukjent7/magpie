@@ -15,6 +15,7 @@ mod codexcat;
 pub mod config;
 mod copilot;
 pub mod desktop;
+mod dsh;
 pub mod gateway;
 mod gemini;
 pub mod groups;
