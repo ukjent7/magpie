@@ -77,6 +77,10 @@ pub(super) fn usable_auth(auth: &Value) -> bool {
         .is_some_and(|token| !token.is_empty())
 }
 
+pub(super) fn latest_auth() -> Option<Value> {
+    read_credentials().map(|(auth, _)| auth)
+}
+
 pub(super) fn install_login(auth: &Value, profile: Option<&Value>) -> Result<()> {
     if !usable_auth(auth) {
         bail!("the saved Claude Code sign-in is unreadable");

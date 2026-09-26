@@ -8,6 +8,7 @@ use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use crate::{codex, copilot, settings};
 
 mod claude_identity;
+mod claude_usage;
 mod codex_oauth;
 mod codex_usage;
 mod copilot_usage;
@@ -144,6 +145,7 @@ pub(crate) async fn command(args: &[String]) -> Result<()> {
     if let Some(agent) = agent_filter {
         rows.retain(|row| row.agent == agent);
     }
+    claude_usage::refresh(&mut rows).await;
     codex_usage::refresh(&mut rows).await;
     copilot_usage::refresh(&mut rows).await;
     rows.sort_by_cached_key(|row| (row.agent.clone(), row.user.to_lowercase()));
