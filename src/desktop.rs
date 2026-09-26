@@ -15,7 +15,7 @@ use tray_icon::{
     menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem},
 };
 
-use crate::{agent, catalog, provider, settings};
+use crate::{agent, catalog, profile, provider, settings};
 
 type SyncResult = std::result::Result<Option<usize>, String>;
 
@@ -43,6 +43,7 @@ struct ModelChoice {
 enum Page {
     Agents,
     Providers,
+    Profiles,
 }
 
 #[derive(Clone, Default)]
@@ -79,6 +80,13 @@ enum Action {
     ConfirmProviderRemoval(String),
     RemoveProvider(String),
     RefreshProvider(String),
+    SelectProfile(usize),
+    OpenProfileForm,
+    SaveProfile(String),
+    ConfirmProfileApply(String),
+    ApplyProfile(String),
+    ConfirmProfileRemoval(String),
+    RemoveProfile(String),
     Quit,
 }
 
@@ -128,6 +136,12 @@ struct App {
     confirm_remove: Option<String>,
     provider_refreshing: bool,
     provider_receiver: Option<Receiver<(String, std::result::Result<usize, String>)>>,
+    profiles: Vec<(String, String)>,
+    selected_profile: usize,
+    profile_form_open: bool,
+    profile_name_draft: String,
+    confirm_profile_apply: Option<String>,
+    confirm_profile_removal: Option<String>,
     model_choices: Vec<ModelChoice>,
     signals: Signals,
     _tray: Option<TrayIcon>,
@@ -216,6 +230,14 @@ impl App {
                 Vec::new()
             }
         };
+        let profiles = match profile::list_entries() {
+            Ok(profiles) => profiles,
+            Err(error) => {
+                status = format!("Could not load profiles: {error:#}");
+                status_ok = false;
+                Vec::new()
+            }
+        };
         let mut app = Self {
             rows,
             selected: 0,
@@ -230,6 +252,12 @@ impl App {
             confirm_remove: None,
             provider_refreshing: false,
             provider_receiver: None,
+            profiles,
+            selected_profile: 0,
+            profile_form_open: false,
+            profile_name_draft: String::new(),
+            confirm_profile_apply: None,
+            confirm_profile_removal: None,
             model_choices,
             signals,
             _tray: tray,
@@ -292,6 +320,12 @@ impl App {
                 .clicked()
             {
                 self.page = Page::Providers;
+            }
+            if ui
+                .selectable_label(self.page == Page::Profiles, "Profiles")
+                .clicked()
+            {
+                self.page = Page::Profiles;
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.button("Quit").clicked() {
@@ -378,6 +412,43 @@ impl App {
                     .clicked()
                 {
                     actions.push(Action::SelectProvider(index));
+                }
+            }
+        });
+    }
+
+    fn render_profile_sidebar(&self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
+        ui.horizontal(|ui| {
+            ui.heading("Profiles");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .small_button("+")
+                    .on_hover_text("Save current agent settings as a profile")
+                    .clicked()
+                {
+                    actions.push(Action::OpenProfileForm);
+                }
+            });
+        });
+        ui.add_space(8.0);
+        if self.profiles.is_empty() {
+            ui.label("No profiles saved yet.");
+            ui.add_space(8.0);
+            if ui.button("Save current settings").clicked() {
+                actions.push(Action::OpenProfileForm);
+            }
+            return;
+        }
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            for (index, (name, description)) in self.profiles.iter().enumerate() {
+                if ui
+                    .selectable_label(
+                        self.selected_profile == index,
+                        format!("{name}\n{description}"),
+                    )
+                    .clicked()
+                {
+                    actions.push(Action::SelectProfile(index));
                 }
             }
         });
@@ -511,6 +582,39 @@ impl App {
         }
     }
 
+    fn render_profile_details(&self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
+        let Some((name, description)) = self.profiles.get(self.selected_profile) else {
+            ui.vertical_centered(|ui| {
+                ui.add_space(80.0);
+                ui.heading("Save an agent profile");
+                ui.label("Profiles keep reusable model and behavior settings for your agents.");
+                if ui.button("Save current settings").clicked() {
+                    actions.push(Action::OpenProfileForm);
+                }
+            });
+            return;
+        };
+
+        ui.heading(name);
+        ui.label(
+            RichText::new(description)
+                .small()
+                .color(ui.visuals().weak_text_color()),
+        );
+        ui.add_space(12.0);
+        ui.label("A profile can set model and behavior fields for detected agents.");
+        ui.label("Settings not included in the profile keep their current values.");
+        ui.add_space(20.0);
+        ui.horizontal(|ui| {
+            if ui.button("Apply profile").clicked() {
+                actions.push(Action::ConfirmProfileApply(name.clone()));
+            }
+            if ui.button("Delete profile").clicked() {
+                actions.push(Action::ConfirmProfileRemoval(name.clone()));
+            }
+        });
+    }
+
     fn render_provider_form(&mut self, ctx: &egui::Context, actions: &mut Vec<Action>) {
         if !self.provider_form_open {
             return;
@@ -637,6 +741,97 @@ impl App {
             });
         if !open {
             self.confirm_remove = None;
+        }
+    }
+
+    fn render_profile_dialogs(&mut self, ctx: &egui::Context, actions: &mut Vec<Action>) {
+        if self.profile_form_open {
+            let mut open = true;
+            let mut should_close = false;
+            egui::Window::new("Save profile")
+                .collapsible(false)
+                .resizable(false)
+                .open(&mut open)
+                .show(ctx, |ui| {
+                    ui.label("Save the current settings from detected agents.");
+                    ui.add_space(8.0);
+                    ui.label("Profile name");
+                    ui.text_edit_singleline(&mut self.profile_name_draft);
+                    let name = self.profile_name_draft.trim();
+                    let replaces =
+                        !name.is_empty() && self.profiles.iter().any(|(saved, _)| saved == name);
+                    if replaces {
+                        ui.label("Saving will update the profile with this name.");
+                    }
+                    ui.add_space(12.0);
+                    ui.horizontal(|ui| {
+                        if ui
+                            .add_enabled(!name.is_empty(), egui::Button::new("Save profile"))
+                            .clicked()
+                        {
+                            actions.push(Action::SaveProfile(name.to_owned()));
+                        }
+                        if ui.button("Cancel").clicked() {
+                            should_close = true;
+                        }
+                    });
+                });
+            if should_close {
+                open = false;
+            }
+            self.profile_form_open = open;
+            if !open {
+                self.profile_name_draft.clear();
+            }
+        }
+
+        if let Some(name) = self.confirm_profile_apply.clone() {
+            let mut open = true;
+            let mut should_close = false;
+            egui::Window::new("Apply profile?")
+                .collapsible(false)
+                .resizable(false)
+                .open(&mut open)
+                .show(ctx, |ui| {
+                    ui.label(format!("Apply {name} to the detected agent settings?"));
+                    ui.label("This updates the agents' local configuration files.");
+                    ui.add_space(12.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("Apply profile").clicked() {
+                            actions.push(Action::ApplyProfile(name.clone()));
+                        }
+                        if ui.button("Cancel").clicked() {
+                            should_close = true;
+                        }
+                    });
+                });
+            if !open || should_close {
+                self.confirm_profile_apply = None;
+            }
+        }
+
+        if let Some(name) = self.confirm_profile_removal.clone() {
+            let mut open = true;
+            let mut should_close = false;
+            egui::Window::new("Delete profile?")
+                .collapsible(false)
+                .resizable(false)
+                .open(&mut open)
+                .show(ctx, |ui| {
+                    ui.label(format!("Delete the saved profile {name}?"));
+                    ui.add_space(12.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("Delete profile").clicked() {
+                            actions.push(Action::RemoveProfile(name.clone()));
+                        }
+                        if ui.button("Cancel").clicked() {
+                            should_close = true;
+                        }
+                    });
+                });
+            if !open || should_close {
+                self.confirm_profile_removal = None;
+            }
         }
     }
 
@@ -807,6 +1002,9 @@ impl App {
                 if let Err(error) = self.reload_provider_data() {
                     self.set_status(&format!("Could not reload providers: {error:#}"), false);
                 }
+                if let Err(error) = self.reload_profile_data() {
+                    self.set_status(&format!("Could not reload profiles: {error:#}"), false);
+                }
             }
             Action::Sync => self.start_catalog_sync(true),
             Action::OpenProviderForm => {
@@ -877,6 +1075,69 @@ impl App {
                 }
             },
             Action::RefreshProvider(id) => self.start_provider_refresh(id),
+            Action::SelectProfile(index) => {
+                self.selected_profile = index.min(self.profiles.len().saturating_sub(1));
+            }
+            Action::OpenProfileForm => {
+                self.profile_name_draft.clear();
+                self.profile_form_open = true;
+            }
+            Action::SaveProfile(name) => match profile::save_named(&name) {
+                Ok(()) => {
+                    self.profile_form_open = false;
+                    self.profile_name_draft.clear();
+                    match self.reload_profile_data() {
+                        Ok(()) => {
+                            self.selected_profile = self
+                                .profiles
+                                .iter()
+                                .position(|(saved, _)| saved == &name)
+                                .unwrap_or(self.selected_profile);
+                            self.set_status(&format!("Saved profile {name}"), true);
+                        }
+                        Err(error) => self.set_status(
+                            &format!("Profile saved, but the list could not reload: {error:#}"),
+                            false,
+                        ),
+                    }
+                }
+                Err(error) => self.set_status(&format!("Could not save profile: {error:#}"), false),
+            },
+            Action::ConfirmProfileApply(name) => self.confirm_profile_apply = Some(name),
+            Action::ApplyProfile(name) => {
+                self.confirm_profile_apply = None;
+                match profile::apply_named(&name) {
+                    Ok(changed) => match self.reload_agent_values() {
+                        Ok(()) => self.set_status(
+                            &format!("Applied profile {name} · {changed} settings changed"),
+                            true,
+                        ),
+                        Err(error) => self.set_status(
+                            &format!("Profile applied, but settings could not reload: {error:#}"),
+                            false,
+                        ),
+                    },
+                    Err(error) => self
+                        .set_status(&format!("Could not apply profile {name}: {error:#}"), false),
+                }
+            }
+            Action::ConfirmProfileRemoval(name) => self.confirm_profile_removal = Some(name),
+            Action::RemoveProfile(name) => {
+                self.confirm_profile_removal = None;
+                match profile::delete_named(&name) {
+                    Ok(()) => match self.reload_profile_data() {
+                        Ok(()) => self.set_status(&format!("Deleted profile {name}"), true),
+                        Err(error) => self.set_status(
+                            &format!("Profile deleted, but the list could not reload: {error:#}"),
+                            false,
+                        ),
+                    },
+                    Err(error) => self.set_status(
+                        &format!("Could not delete profile {name}: {error:#}"),
+                        false,
+                    ),
+                }
+            }
             Action::Quit => {
                 self.exiting = true;
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -885,20 +1146,36 @@ impl App {
     }
 
     fn reload_settings(&mut self) {
-        let mut failure = None;
+        match self.reload_agent_values() {
+            Ok(()) => self.set_status("Settings reloaded", true),
+            Err(error) => self.set_status(&format!("Could not reload settings: {error:#}"), false),
+        }
+    }
+
+    fn reload_agent_values(&mut self) -> Result<()> {
+        let mut failures = Vec::new();
         for row in &mut self.rows {
             match values_for(&row.agent) {
                 Ok(values) => {
                     row.drafts.clone_from(&values);
                     row.values = values;
                 }
-                Err(error) => failure = Some(format!("{}: {error:#}", row.agent.spec.name)),
+                Err(error) => failures.push(format!("{}: {error:#}", row.agent.spec.name)),
             }
         }
-        match failure {
-            Some(error) => self.set_status(&format!("Could not reload settings: {error}"), false),
-            None => self.set_status("Settings reloaded", true),
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!(failures.join("; ")))
         }
+    }
+
+    fn reload_profile_data(&mut self) -> Result<()> {
+        self.profiles = profile::list_entries()?;
+        self.selected_profile = self
+            .selected_profile
+            .min(self.profiles.len().saturating_sub(1));
+        Ok(())
     }
 
     fn reload_provider_data(&mut self) -> Result<()> {
@@ -1055,6 +1332,7 @@ impl eframe::App for App {
                     let mut selected = match self.page {
                         Page::Agents => self.selected,
                         Page::Providers => self.selected_provider,
+                        Page::Profiles => self.selected_profile,
                     };
                     ui.allocate_ui_with_layout(
                         egui::vec2(228.0, content_height),
@@ -1062,11 +1340,13 @@ impl eframe::App for App {
                         |ui| match self.page {
                             Page::Agents => self.render_sidebar(ui, &mut selected),
                             Page::Providers => self.render_provider_sidebar(ui, &mut actions),
+                            Page::Profiles => self.render_profile_sidebar(ui, &mut actions),
                         },
                     );
                     match self.page {
                         Page::Agents => self.selected = selected,
                         Page::Providers => self.selected_provider = selected,
+                        Page::Profiles => self.selected_profile = selected,
                     }
                     ui.separator();
                     ui.allocate_ui_with_layout(
@@ -1075,6 +1355,7 @@ impl eframe::App for App {
                         |ui| match self.page {
                             Page::Agents => self.render_agent(ui, &mut actions),
                             Page::Providers => self.render_provider_details(ui, &mut actions),
+                            Page::Profiles => self.render_profile_details(ui, &mut actions),
                         },
                     );
                 });
@@ -1097,6 +1378,7 @@ impl eframe::App for App {
             });
         self.render_provider_form(ui.ctx(), &mut actions);
         self.render_remove_confirmation(ui.ctx(), &mut actions);
+        self.render_profile_dialogs(ui.ctx(), &mut actions);
         for action in actions {
             self.apply_action(action, ui.ctx());
         }
