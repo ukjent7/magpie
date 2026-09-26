@@ -95,7 +95,7 @@ pub(super) async fn refresh(rows: &mut [AccountRow]) {
     for (key, active, quota, refreshed_auth) in join_all(futures).await {
         let persistence_error = if let Some(auth) = refreshed_auth.as_ref() {
             if active {
-                persist_active_auth(&auth)
+                persist_active_auth(auth)
                     .await
                     .err()
                     .map(|error| error.to_string())
