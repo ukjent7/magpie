@@ -70,6 +70,16 @@ var presets = []PresetDef{
 	{ID: "moonshot-cn", Name: "Kimi (China)", Icon: "kimi", Kind: KindVendor, Catalog: "moonshotai",
 		Chat: "https://api.moonshot.cn/v1", Anthropic: "https://api.moonshot.cn/anthropic",
 		Website: "https://platform.moonshot.cn", KeysURL: "https://platform.moonshot.cn/console/api-keys"},
+	// a Kimi Code membership's own endpoints (k3, kimi-for-coding …): Kimi
+	// lets members use them from third-party tools, keyed at its console
+	{ID: "kimi-code", Name: "Kimi Code", Icon: "kimi", Kind: KindVendor, Catalog: "kimi-code-plan-global",
+		Chat: "https://api.kimi.ai/coding/v1", Anthropic: "https://api.kimi.ai/coding",
+		Note:    "Membership",
+		Website: "https://www.kimi.com/code", KeysURL: "https://www.kimi.com/code/console"},
+	{ID: "kimi-code-cn", Name: "Kimi Code (China)", Icon: "kimi", Kind: KindVendor, Catalog: "kimi-code-plan-cn",
+		Chat: "https://api.kimi.com/coding/v1", Anthropic: "https://api.kimi.com/coding",
+		Note:    "Membership",
+		Website: "https://www.kimi.com/code", KeysURL: "https://www.kimi.com/code/console"},
 	{ID: "zhipu", Name: "Zhipu GLM", Icon: "zhipu-color", Kind: KindVendor, Catalog: "zhipuai",
 		Chat: "https://open.bigmodel.cn/api/paas/v4", Anthropic: "https://open.bigmodel.cn/api/anthropic",
 		Website: "https://open.bigmodel.cn", KeysURL: "https://open.bigmodel.cn/usercenter/proj-mgmt/apikeys",
