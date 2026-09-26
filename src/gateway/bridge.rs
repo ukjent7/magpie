@@ -37,6 +37,10 @@ const TURN_LONGEST: Duration = Duration::from_secs(30 * 60);
 // took longer than the agent's patience to have one.
 pub const WAIT_TOOL: &str = "magpie_wait";
 
+// HELPER is the command that starts magpie's own MCP server: it is given the
+// callback to post calls to, and the file the caller's tools are in.
+pub const HELPER: &str = "claude-mcp-helper";
+
 // outcome is what the caller sent back for one tool call.
 #[derive(Clone, Debug, Default)]
 pub struct Outcome {
@@ -414,6 +418,9 @@ pub async fn open(run: &Arc<Run>, command: &mut Command) -> std::io::Result<Chil
         watching.finish().await;
     });
     *run.reaper.lock().await = Some(reaper);
+    // A caller may abandon a turn after receiving the calls in it: the parked
+    // agent and the callback waiting on it are not to be left alive forever.
+    Run::arm(run, TURN_LONGEST).await;
     Ok(stdout)
 }
 

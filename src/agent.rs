@@ -2298,12 +2298,17 @@ fn env_path(name: &str) -> Option<PathBuf> {
 }
 
 fn executable_exists(name: &str) -> bool {
+    on_path(name).is_some()
+}
+
+// on_path is where a command the agent's own name would run is, when the PATH
+// has one: on Windows the extensions PATHEXT lists are looked for too, as the
+// shell that runs them does.
+pub(crate) fn on_path(name: &str) -> Option<PathBuf> {
     if name.is_empty() {
-        return false;
+        return None;
     }
-    let Some(path) = env::var_os("PATH") else {
-        return false;
-    };
+    let path = env::var_os("PATH")?;
     let suffixes = if cfg!(windows) {
         env::var_os("PATHEXT")
             .map(|value| {
@@ -2318,11 +2323,11 @@ fn executable_exists(name: &str) -> bool {
         vec![String::new()]
     };
 
-    env::split_paths(&path).any(|directory| {
-        suffixes.iter().any(|suffix| {
-            let executable = directory.join(format!("{name}{suffix}"));
-            executable.is_file()
-        })
+    env::split_paths(&path).find_map(|directory| {
+        suffixes
+            .iter()
+            .map(|suffix| directory.join(format!("{name}{suffix}")))
+            .find(|executable| executable.is_file())
     })
 }
 

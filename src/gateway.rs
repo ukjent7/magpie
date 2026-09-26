@@ -28,6 +28,7 @@ use crate::{
 };
 
 pub mod bridge;
+pub mod claude;
 pub mod ir;
 pub mod parse;
 pub mod prompt;
