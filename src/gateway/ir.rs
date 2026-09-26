@@ -236,19 +236,16 @@ impl Collector {
     // push_text adds to the part the reply is building when it is of that
     // kind, and opens one of it when the reply is building something else.
     fn push_text(&mut self, kind: Kind, text: String) {
-        if let Some(last) = self
-            .reply
-            .parts
-            .last_mut()
-            .filter(|last| last.kind == kind)
-        {
+        if let Some(last) = self.reply.parts.last_mut().filter(|last| last.kind == kind) {
             last.text.push_str(&text);
             return;
         }
         self.close_tool();
-        self.reply
-            .parts
-            .push(Part { kind, text, ..Part::default() });
+        self.reply.parts.push(Part {
+            kind,
+            text,
+            ..Part::default()
+        });
     }
 
     // close_tool gives the open tool call the arguments gathered for it.

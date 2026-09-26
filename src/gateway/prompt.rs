@@ -197,10 +197,7 @@ mod tests {
 
     #[test]
     fn no_words_at_all_still_asks_to_go_on() {
-        assert_eq!(
-            claude(&Request::default()),
-            vec![text_block("[continue]")]
-        );
+        assert_eq!(claude(&Request::default()), vec![text_block("[continue]")]);
     }
 
     #[test]
@@ -265,11 +262,11 @@ mod tests {
 
     #[test]
     fn reasoning_reads_as_the_words_it_came_with() {
-        let parts = vec![
-            part(Kind::Thinking, "hmm "),
-            part(Kind::Text, "then this"),
-        ];
-        assert_eq!(said(&claude_turn(&[message("user", parts)])), "hmm then this");
+        let parts = vec![part(Kind::Thinking, "hmm "), part(Kind::Text, "then this")];
+        assert_eq!(
+            said(&claude_turn(&[message("user", parts)])),
+            "hmm then this"
+        );
     }
 
     #[test]
