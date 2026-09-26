@@ -346,8 +346,8 @@ mod tests {
     use base64::Engine;
     use std::sync::{Arc, Mutex};
 
-    use crate::library::testing::Sandbox;
     use crate::library::Homes;
+    use crate::library::testing::Sandbox;
     // reading CC Switch's skills means linking them, which unix does
     #[cfg(unix)]
     use crate::library::Store;

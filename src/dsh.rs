@@ -232,7 +232,12 @@ fn effort_in(patch: &PatchFile) -> Option<String> {
     }
     entry.lines.iter().find_map(|line| {
         let (key, value) = line.trim().split_once(':')?;
-        (key == "reasoningEffort").then(|| value.trim().trim_matches(|c| c == '\'' || c == '"').to_owned())
+        (key == "reasoningEffort").then(|| {
+            value
+                .trim()
+                .trim_matches(|c| c == '\'' || c == '"')
+                .to_owned()
+        })
     })
 }
 

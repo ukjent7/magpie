@@ -189,8 +189,7 @@ const fn provider_model(
 const CLAUDE_MODEL: FieldSpec = field("model", "model", "model");
 // the effort Claude Code starts with, as its /effort saves it; settings.json
 // keeps low to xhigh, since max lasts a session only
-const CLAUDE_EFFORT: FieldSpec =
-    choices_field("effort", "effort", "effortLevel", CLAUDE_EFFORTS);
+const CLAUDE_EFFORT: FieldSpec = choices_field("effort", "effort", "effortLevel", CLAUDE_EFFORTS);
 const CLAUDE_EFFORTS: &[&str] = &["low", "medium", "high", "xhigh"];
 const CLAUDE_GATEWAY_ENV: &[&str] = &[
     "env.ANTHROPIC_BASE_URL",
@@ -236,8 +235,12 @@ const COPILOT_MODEL: FieldSpec = field("model", "model", "model");
 // effortLevel, which Copilot saves beside the model and clears when its own
 // /model changes the model; the levels are the model's, these when magpie's
 // copy of Copilot's list doesn't say
-const COPILOT_EFFORT: FieldSpec =
-    choices_field("effort", "effort", "effortLevel", &["low", "medium", "high", "xhigh"]);
+const COPILOT_EFFORT: FieldSpec = choices_field(
+    "effort",
+    "effort",
+    "effortLevel",
+    &["low", "medium", "high", "xhigh"],
+);
 const CRUSH_LARGE: FieldSpec = provider_model(
     "model",
     "large",
@@ -965,10 +968,7 @@ impl Agent {
         // written whole, as the model ids it keys hold dots
         config::set_jsonc_values(
             &self.path,
-            &[(
-                COMMAND_CODE_EFFORT.path,
-                Value::Object(efforts),
-            )],
+            &[(COMMAND_CODE_EFFORT.path, Value::Object(efforts))],
         )
     }
 
@@ -1695,10 +1695,12 @@ fn opencode_provider() -> Result<Value> {
 // cc_efforts is settings.json's reasoningEffort: the effort Command Code
 // starts a session with, kept for each model its /effort was used on.
 fn cc_efforts(path: &Path) -> Result<serde_json::Map<String, Value>> {
-    Ok(config::get(path, ConfigFormat::Jsonc, COMMAND_CODE_EFFORT.path)?
-        .and_then(|stored| serde_json::from_str::<Value>(&stored).ok())
-        .and_then(|value| value.as_object().cloned())
-        .unwrap_or_default())
+    Ok(
+        config::get(path, ConfigFormat::Jsonc, COMMAND_CODE_EFFORT.path)?
+            .and_then(|stored| serde_json::from_str::<Value>(&stored).ok())
+            .and_then(|value| value.as_object().cloned())
+            .unwrap_or_default(),
+    )
 }
 
 fn commandcode_has_magpie_model(agent: &Agent) -> Result<bool> {
