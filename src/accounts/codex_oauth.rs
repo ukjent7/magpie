@@ -1,8 +1,5 @@
 use std::{collections::HashMap, time::Duration};
 
-#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
-use std::process::{Command, Stdio};
-
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use axum::{
     Router,
@@ -23,8 +20,8 @@ use tokio::{
 use url::{Url, form_urlencoded};
 
 use super::{
-    SavedLogin, live_codex_login, nonempty, read_saved_logins, same_login, upsert_login,
-    write_saved_logins,
+    SavedLogin, live_codex_login, nonempty, oauth::open_browser, oauth::random_token,
+    oauth::sign_in_page, read_saved_logins, same_login, upsert_login, write_saved_logins,
 };
 
 const AUTHORIZE_URL: &str = "https://auth.openai.com/oauth/authorize";
@@ -109,12 +106,6 @@ async fn add_codex_account() -> Result<()> {
     save_login(token).await
 }
 
-fn random_token(byte_count: usize) -> Result<String> {
-    let mut bytes = vec![0; byte_count];
-    getrandom::fill(&mut bytes).context("generate OAuth security token")?;
-    Ok(URL_SAFE_NO_PAD.encode(bytes))
-}
-
 fn authorization_url(challenge: &str, state: &str) -> Result<Url> {
     let mut url = Url::parse(AUTHORIZE_URL).context("parse ChatGPT sign-in URL")?;
     url.query_pairs_mut()
@@ -194,25 +185,6 @@ async fn oauth_callback(
         "Finishing sign-in",
         "Authorization was received. Return to Magpie to finish signing in.",
     )
-}
-
-fn sign_in_page(success: bool, title: &str, message: &str) -> Html<String> {
-    let color = if success { "#16875d" } else { "#b42318" };
-    Html(format!(
-        "<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>{}</title><body style=\"margin:0;background:#101114;color:#f5f5f5;font:16px system-ui;display:grid;min-height:100vh;place-items:center\"><main style=\"max-width:32rem;padding:2rem\"><h1 style=\"color:{color}\">{}</h1><p>{}</p></main></body></html>",
-        escape_html(title),
-        escape_html(title),
-        escape_html(message)
-    ))
-}
-
-fn escape_html(value: &str) -> String {
-    value
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&#39;")
 }
 
 async fn exchange_code(
@@ -334,45 +306,4 @@ async fn save_login(token: TokenResponse) -> Result<()> {
         println!("✓ added {user} · use it with: magpie accounts switch codex {user}");
     }
     Ok(())
-}
-
-fn open_browser(url: &str) -> bool {
-    #[cfg(target_os = "windows")]
-    {
-        use std::os::windows::process::CommandExt;
-
-        Command::new("rundll32.exe")
-            .args(["url.dll,FileProtocolHandler", url])
-            .creation_flags(0x08000000)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .is_ok()
-    }
-    #[cfg(target_os = "macos")]
-    {
-        Command::new("open")
-            .arg(url)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .is_ok()
-    }
-    #[cfg(target_os = "linux")]
-    {
-        Command::new("xdg-open")
-            .arg(url)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .is_ok()
-    }
-    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
-    {
-        let _ = url;
-        false
-    }
 }

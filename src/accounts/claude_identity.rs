@@ -140,7 +140,7 @@ fn profile_identity(profile: &Value) -> Option<(&str, &str)> {
     (!email.is_empty() && !organization.is_empty()).then_some((email, organization))
 }
 
-fn claude_user(email: &str, plan: &str, profile: Option<&Value>) -> String {
+pub(super) fn claude_user(email: &str, plan: &str, profile: Option<&Value>) -> String {
     if email.is_empty() || !matches!(plan, "team" | "enterprise") {
         return email.to_owned();
     }

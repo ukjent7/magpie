@@ -8,12 +8,14 @@ use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use crate::{codex, copilot, settings};
 
 mod claude_identity;
+mod claude_oauth;
 mod claude_usage;
 mod codex_oauth;
 mod codex_usage;
 mod copilot_usage;
+mod oauth;
 
-const USAGE: &str = "usage: magpie accounts [claude|codex|grok|copilot|gemini|antigravity] [--json] | magpie accounts add codex | magpie accounts switch|forget claude|codex <user>";
+const USAGE: &str = "usage: magpie accounts [claude|codex|grok|copilot|gemini|antigravity] [--json] | magpie accounts add claude|codex | magpie accounts switch|forget claude|codex <user>";
 
 #[derive(Clone, Default, Deserialize, Serialize)]
 #[serde(default)]
@@ -89,7 +91,13 @@ pub(crate) async fn command(args: &[String]) -> Result<()> {
         .first()
         .is_some_and(|arg| arg.eq_ignore_ascii_case("add"))
     {
-        return codex_oauth::command(args).await;
+        return match args.get(1).map(String::as_str) {
+            Some(agent) if agent.eq_ignore_ascii_case("claude") => {
+                claude_oauth::command(args).await
+            }
+            Some(agent) if agent.eq_ignore_ascii_case("codex") => codex_oauth::command(args).await,
+            _ => bail!("usage: magpie accounts add claude|codex"),
+        };
     }
 
     if let Some(subcommand) = args.first().filter(|arg| {
