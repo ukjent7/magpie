@@ -311,7 +311,6 @@ async fn gemini_models() -> Response {
             catalog
                 .groups
                 .iter()
-                .filter(|group| !group.hidden)
                 .map(|group| gemini_model(&format!("group/{}", group.id), &group.name)),
         )
         .collect::<Vec<_>>();
@@ -414,7 +413,7 @@ async fn gemini(State(state): State<GatewayState>, request: Request<Body>) -> Re
     };
     parts.uri = Uri::from_static("/v1/chat/completions");
     let response = forward(
-        state,
+        &state,
         Request::from_parts(parts, Body::from(chat_body)),
         ApiProtocol::Chat,
         None,
