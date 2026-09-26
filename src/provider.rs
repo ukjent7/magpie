@@ -531,6 +531,11 @@ pub(crate) struct Provider {
     balance_url: String,
     #[serde(skip_serializing_if = "String::is_empty")]
     balance_path: String,
+    // balance_token is what a vendor tells the whole account's balance to,
+    // not to any key (AiHubMix's system access token, pasted as
+    // balanceToken=). It is asked with nothing else.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    balance_token: String,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     models: Vec<String>,
     #[serde(skip_serializing_if = "String::is_empty")]

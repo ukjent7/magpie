@@ -14,12 +14,17 @@ enum Format {
     Moonshot(&'static str),
     OpenRouter,
     SiliconFlow(&'static str),
+    AiHubMix,
+    AiHubMixAccount,
     Custom(String),
 }
 
 struct Source {
     url: String,
     format: Format,
+    // token, when set, is sent as the whole Authorization header in place
+    // of the key's: the balance is the account's, not a key's
+    token: String,
 }
 
 pub(super) async fn fetch(provider: &Provider) -> Option<Result<String>> {
@@ -42,10 +47,12 @@ async fn fetch_from(provider: &Provider, key: &str, source: Source) -> Result<St
         .timeout(Duration::from_secs(8))
         .build()
         .context("create provider balance HTTP client")?;
-    let mut request = client
-        .get(&source.url)
-        .bearer_auth(key)
-        .header("accept", "application/json");
+    let mut request = client.get(&source.url).header("accept", "application/json");
+    if source.token.is_empty() {
+        request = request.bearer_auth(key);
+    } else {
+        request = request.header("authorization", source.token.as_str());
+    }
     for (name, value) in &provider.headers {
         request = request.header(name.as_str(), value.as_str());
     }
@@ -77,6 +84,7 @@ fn source(provider: &Provider) -> Option<Source> {
         return Some(Source {
             url: provider.balance_url.clone(),
             format: Format::Custom(provider.balance_path.clone()),
+            token: String::new(),
         });
     }
 
@@ -110,9 +118,30 @@ fn source(provider: &Provider) -> Option<Source> {
                     "https://api.siliconflow.com/v1/user/info".to_owned(),
                     Format::SiliconFlow("$"),
                 ),
+                "aihubmix.com" => {
+                    if !provider.balance_token.is_empty() {
+                        (
+                            "https://aihubmix.com/api/user/self".to_owned(),
+                            Format::AiHubMixAccount,
+                        )
+                    } else {
+                        (
+                            "https://aihubmix.com/dashboard/billing/remain".to_owned(),
+                            Format::AiHubMix,
+                        )
+                    }
+                }
                 _ => return None,
             };
-            Some(Source { url, format })
+            Some(Source {
+                url,
+                format,
+                token: if matches!(format, Format::AiHubMixAccount) {
+                    provider.balance_token.clone()
+                } else {
+                    String::new()
+                },
+            })
         })
 }
 
@@ -161,6 +190,36 @@ fn parse_balance(bytes: &[u8], format: Format) -> Result<String> {
                 .and_then(number)
                 .context("no balance in the reply")?;
             Ok(money(sign, amount))
+        }
+        // readAiHubMix: {"total_usage":12.5}, what is left on the key in
+        // dollars, despite the name. A key without a limit answers -1 of
+        // AiHubMix's units ($1 is 500000 of them): it has no balance of its
+        // own, and the account's is told only to the account's access token.
+        Format::AiHubMix => {
+            let amount = value
+                .get("total_usage")
+                .and_then(number)
+                .context("no balance in the reply")?;
+            ensure!(
+                amount >= 0.0,
+                "this key has no limit, and AiHubMix tells a key only what is left on it: \
+                 give magpie the account's access token (balanceToken=) to see the account's \
+                 balance, or give the key a limit in AiHubMix's console"
+            );
+            Ok(money("$", amount))
+        }
+        // readAiHubMixAccount: {"success":true,"data":{"quota":2500000}},
+        // the account's balance in AiHubMix's units, $1 to 500000 of them.
+        Format::AiHubMixAccount => {
+            ensure!(
+                value.get("success").and_then(Value::as_bool) == Some(true),
+                "AiHubMix didn't take the access token"
+            );
+            let amount = value
+                .pointer("/data/quota")
+                .and_then(number)
+                .context("no balance in the reply")?;
+            Ok(money("$", amount / 500000.0))
         }
         Format::Custom(path) => custom_balance(&value, &path),
     }
