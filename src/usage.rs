@@ -76,8 +76,8 @@ struct Record {
     status: u16,
 }
 
-#[derive(Clone, Copy, Debug)]
-enum Period {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Period {
     Today,
     Week,
     Month,
@@ -95,7 +95,7 @@ impl Period {
         }
     }
 
-    fn title(self) -> &'static str {
+    pub(crate) fn title(self) -> &'static str {
         match self {
             Self::Today => "today",
             Self::Week => "last 7 days",
@@ -119,16 +119,32 @@ impl Period {
 }
 
 #[derive(Clone, Copy, Debug, Default)]
-struct Totals {
-    calls: usize,
-    errors: usize,
-    input: usize,
-    output: usize,
-    cache_read: usize,
-    cache_write: usize,
-    reasoning: usize,
-    cost: f64,
-    unpriced: usize,
+pub(crate) struct Totals {
+    pub(crate) calls: usize,
+    pub(crate) errors: usize,
+    pub(crate) input: usize,
+    pub(crate) output: usize,
+    pub(crate) cache_read: usize,
+    pub(crate) cache_write: usize,
+    pub(crate) reasoning: usize,
+    pub(crate) cost: f64,
+    pub(crate) unpriced: usize,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct UsageRow {
+    pub(crate) name: String,
+    pub(crate) totals: Totals,
+    pub(crate) share: f64,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct UsageReport {
+    pub(crate) period: Period,
+    pub(crate) totals: Totals,
+    pub(crate) agents: Vec<UsageRow>,
+    pub(crate) models: Vec<UsageRow>,
+    pub(crate) path: PathBuf,
 }
 
 impl Totals {
@@ -155,8 +171,12 @@ impl Totals {
         }
     }
 
-    fn tokens(self) -> usize {
+    pub(crate) fn tokens(self) -> usize {
         self.input + self.output
+    }
+
+    pub(crate) fn display_cost(self) -> String {
+        format_cost(self)
     }
 }
 
@@ -209,6 +229,41 @@ pub(crate) fn command(args: &[String]) -> Result<()> {
         [value] => Period::parse(value).context("usage: magpie usage [today|7d|30d|all]")?,
         _ => bail!("usage: magpie usage [today|7d|30d|all]"),
     };
+    let report = report(period);
+    let totals = report.totals;
+
+    if totals.calls == 0 {
+        println!(
+            "no calls {} · route an agent through magpie and its usage shows up here",
+            report.period.title()
+        );
+        println!("  {}", report.path.display());
+        return Ok(());
+    }
+
+    println!(
+        "{} tokens · {} calls · {} errors · {} · {}",
+        format_tokens(totals.tokens()),
+        totals.calls,
+        totals.errors,
+        report.period.title(),
+        format_cost(totals)
+    );
+    println!(
+        "  in {}  out {}  cache read {}  cache write {}  reasoning {}",
+        format_tokens(totals.input),
+        format_tokens(totals.output),
+        format_tokens(totals.cache_read),
+        format_tokens(totals.cache_write),
+        format_tokens(totals.reasoning)
+    );
+    print_groups("agents", &report.agents);
+    print_groups("models", &report.models);
+    println!("  {}", report.path.display());
+    Ok(())
+}
+
+pub(crate) fn report(period: Period) -> UsageReport {
     let now = OffsetDateTime::now_local().unwrap_or_else(|_| OffsetDateTime::now_utc());
     let since = period.since(now);
     let records = load();
@@ -219,15 +274,6 @@ pub(crate) fn command(args: &[String]) -> Result<()> {
                 .is_ok_and(|time| time.unix_timestamp() >= since)
         })
         .collect::<Vec<_>>();
-
-    if records.is_empty() {
-        println!(
-            "no calls {} · route an agent through magpie and its usage shows up here",
-            period.title()
-        );
-        println!("  {}", path().display());
-        return Ok(());
-    }
 
     let mut totals = Totals::default();
     let mut agents = HashMap::<String, Totals>::new();
@@ -251,34 +297,21 @@ pub(crate) fn command(args: &[String]) -> Result<()> {
             .add(record, price);
     }
 
-    println!(
-        "{} tokens · {} calls · {} errors · {} · {}",
-        format_tokens(totals.tokens()),
-        totals.calls,
-        totals.errors,
-        period.title(),
-        format_cost(totals)
-    );
-    println!(
-        "  in {}  out {}  cache read {}  cache write {}  reasoning {}",
-        format_tokens(totals.input),
-        format_tokens(totals.output),
-        format_tokens(totals.cache_read),
-        format_tokens(totals.cache_write),
-        format_tokens(totals.reasoning)
-    );
-    print_groups("agents", agents, totals.tokens(), |id| agent_name(&id));
-    print_groups("models", models, totals.tokens(), |id| id);
-    println!("  {}", path().display());
-    Ok(())
+    let total_tokens = totals.tokens();
+    UsageReport {
+        period,
+        totals,
+        agents: usage_rows(agents, total_tokens, |id| agent_name(&id)),
+        models: usage_rows(models, total_tokens, |id| id),
+        path: path(),
+    }
 }
 
-fn print_groups(
-    heading: &str,
+fn usage_rows(
     groups: HashMap<String, Totals>,
     total_tokens: usize,
     name: impl Fn(String) -> String,
-) {
+) -> Vec<UsageRow> {
     let mut groups = groups.into_iter().collect::<Vec<_>>();
     groups.sort_by(|(left_id, left), (right_id, right)| {
         right
@@ -287,24 +320,35 @@ fn print_groups(
             .then_with(|| right.calls.cmp(&left.calls))
             .then_with(|| left_id.cmp(right_id))
     });
-    let rows = groups
+    groups
         .into_iter()
-        .map(|(id, totals)| (name(id), totals))
-        .collect::<Vec<_>>();
-    let width = rows.iter().map(|(name, _)| name.len()).max().unwrap_or(0);
+        .map(|(id, totals)| UsageRow {
+            name: name(id),
+            share: if total_tokens == 0 {
+                0.0
+            } else {
+                100.0 * totals.tokens() as f64 / total_tokens as f64
+            },
+            totals,
+        })
+        .collect()
+}
 
+fn print_groups(heading: &str, rows: &[UsageRow]) {
+    let width = rows
+        .iter()
+        .map(|row| row.name.len())
+        .max()
+        .unwrap_or_default();
     println!("\n  {heading}");
-    for (name, totals) in rows {
-        let share = if total_tokens == 0 {
-            0.0
-        } else {
-            100.0 * totals.tokens() as f64 / total_tokens as f64
-        };
+    for row in rows {
         println!(
-            "  {name:<width$}  {share:>3.0}%  {:>7}  {:<10}  {}",
-            format_tokens(totals.tokens()),
-            plural(totals.calls, "call"),
-            format_cost(totals)
+            "  {name:<width$}  {share:>3.0}%  {tokens:>7}  {calls:<10}  {cost}",
+            name = row.name.as_str(),
+            share = row.share,
+            tokens = format_tokens(row.totals.tokens()),
+            calls = plural(row.totals.calls, "call"),
+            cost = format_cost(row.totals),
         );
     }
 }
@@ -375,7 +419,7 @@ fn plural(count: usize, unit: &str) -> String {
     }
 }
 
-fn format_tokens(tokens: usize) -> String {
+pub(crate) fn format_tokens(tokens: usize) -> String {
     match tokens {
         1_000_000_000.. => format!("{:.2}B", tokens as f64 / 1_000_000_000.0),
         10_000_000.. => format!("{:.0}M", tokens as f64 / 1_000_000.0),

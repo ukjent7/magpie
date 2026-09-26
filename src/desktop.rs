@@ -15,7 +15,7 @@ use tray_icon::{
     menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem},
 };
 
-use crate::{agent, catalog, profile, provider, settings};
+use crate::{agent, catalog, profile, provider, settings, usage};
 
 type SyncResult = std::result::Result<Option<usize>, String>;
 
@@ -45,6 +45,7 @@ enum Page {
     Providers,
     Profiles,
     Groups,
+    Usage,
 }
 
 #[derive(Clone, Default)]
@@ -95,6 +96,8 @@ enum Action {
     ConfirmGroupRemoval(String),
     RemoveGroup(String),
     RestoreGroup(String),
+    SetUsagePeriod(usage::Period),
+    RefreshUsage,
     Quit,
 }
 
@@ -156,6 +159,8 @@ struct App {
     group_form_open: bool,
     group_draft: Option<provider::Group>,
     confirm_group_removal: Option<String>,
+    usage_period: usage::Period,
+    usage_report: usage::UsageReport,
     model_choices: Vec<ModelChoice>,
     signals: Signals,
     _tray: Option<TrayIcon>,
@@ -260,6 +265,8 @@ impl App {
                 (Vec::new(), Vec::new())
             }
         };
+        let usage_period = usage::Period::Month;
+        let usage_report = usage::report(usage_period);
         let mut app = Self {
             rows,
             selected: 0,
@@ -286,6 +293,8 @@ impl App {
             group_form_open: false,
             group_draft: None,
             confirm_group_removal: None,
+            usage_period,
+            usage_report,
             model_choices,
             signals,
             _tray: tray,
@@ -335,7 +344,7 @@ impl App {
         ui.horizontal(|ui| {
             ui.heading(RichText::new("magpie").strong());
             ui.add_space(12.0);
-            ui.label("Your agents, one model switchboard");
+            ui.label("Model switchboard");
             ui.add_space(18.0);
             if ui
                 .selectable_label(self.page == Page::Agents, "Agents")
@@ -360,6 +369,13 @@ impl App {
                 .clicked()
             {
                 self.page = Page::Groups;
+            }
+            if ui
+                .selectable_label(self.page == Page::Usage, "Usage")
+                .clicked()
+            {
+                self.page = Page::Usage;
+                actions.push(Action::RefreshUsage);
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.button("Quit").clicked() {
@@ -780,6 +796,91 @@ impl App {
                     actions.push(Action::ConfirmGroupRemoval(group.id.clone()));
                 }
             }
+        });
+    }
+
+    fn render_usage_sidebar(&self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
+        ui.heading("Usage period");
+        ui.add_space(8.0);
+        for (period, label) in [
+            (usage::Period::Today, "Today"),
+            (usage::Period::Week, "Last 7 days"),
+            (usage::Period::Month, "Last 30 days"),
+            (usage::Period::All, "All time"),
+        ] {
+            if ui
+                .selectable_label(self.usage_period == period, label)
+                .clicked()
+            {
+                actions.push(Action::SetUsagePeriod(period));
+            }
+        }
+        ui.add_space(8.0);
+        if ui.button("Refresh usage").clicked() {
+            actions.push(Action::RefreshUsage);
+        }
+    }
+
+    fn render_usage_details(&self, ui: &mut egui::Ui) {
+        let report = &self.usage_report;
+        ui.heading(format!("Usage · {}", report.period.title()));
+        ui.label(
+            RichText::new(report.path.display().to_string())
+                .small()
+                .color(ui.visuals().weak_text_color()),
+        );
+        ui.add_space(12.0);
+        if report.totals.calls == 0 {
+            ui.vertical_centered(|ui| {
+                ui.add_space(70.0);
+                ui.heading("No usage recorded");
+                ui.label(format!(
+                    "Requests routed through magpie will appear here for {}.",
+                    report.period.title()
+                ));
+            });
+            return;
+        }
+
+        let totals = report.totals;
+        ui.columns(4, |columns| {
+            render_usage_stat(
+                &mut columns[0],
+                "Tokens",
+                &usage::format_tokens(totals.tokens()),
+            );
+            render_usage_stat(&mut columns[1], "Calls", &totals.calls.to_string());
+            render_usage_stat(&mut columns[2], "Errors", &totals.errors.to_string());
+            render_usage_stat(&mut columns[3], "Estimated cost", &totals.display_cost());
+        });
+        ui.add_space(10.0);
+        ui.horizontal_wrapped(|ui| {
+            ui.label(format!("Input · {}", usage::format_tokens(totals.input)));
+            ui.separator();
+            ui.label(format!("Output · {}", usage::format_tokens(totals.output)));
+            ui.separator();
+            ui.label(format!(
+                "Cache read · {}",
+                usage::format_tokens(totals.cache_read)
+            ));
+            ui.separator();
+            ui.label(format!(
+                "Cache write · {}",
+                usage::format_tokens(totals.cache_write)
+            ));
+            ui.separator();
+            ui.label(format!(
+                "Reasoning · {}",
+                usage::format_tokens(totals.reasoning)
+            ));
+        });
+        ui.add_space(12.0);
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            ui.heading("By agent");
+            render_usage_rows(ui, &report.agents);
+            ui.add_space(10.0);
+            ui.heading("By model");
+            render_usage_rows(ui, &report.models);
         });
     }
 
@@ -1568,6 +1669,11 @@ impl App {
                     self.set_status(&format!("Could not restore group {id}: {error:#}"), false)
                 }
             },
+            Action::SetUsagePeriod(period) => {
+                self.usage_period = period;
+                self.reload_usage();
+            }
+            Action::RefreshUsage => self.reload_usage(),
             Action::Quit => {
                 self.exiting = true;
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -1624,6 +1730,11 @@ impl App {
         self.group_models = models;
         self.selected_group = self.selected_group.min(self.groups.len().saturating_sub(1));
         Ok(())
+    }
+
+    fn reload_usage(&mut self) {
+        self.usage_report = usage::report(self.usage_period);
+        self.set_status("Usage refreshed", true);
     }
 
     fn start_provider_refresh(&mut self, id: String) {
@@ -1773,6 +1884,7 @@ impl eframe::App for App {
                         Page::Providers => self.selected_provider,
                         Page::Profiles => self.selected_profile,
                         Page::Groups => self.selected_group,
+                        Page::Usage => 0,
                     };
                     ui.allocate_ui_with_layout(
                         egui::vec2(228.0, content_height),
@@ -1782,6 +1894,7 @@ impl eframe::App for App {
                             Page::Providers => self.render_provider_sidebar(ui, &mut actions),
                             Page::Profiles => self.render_profile_sidebar(ui, &mut actions),
                             Page::Groups => self.render_group_sidebar(ui, &mut actions),
+                            Page::Usage => self.render_usage_sidebar(ui, &mut actions),
                         },
                     );
                     match self.page {
@@ -1789,6 +1902,7 @@ impl eframe::App for App {
                         Page::Providers => self.selected_provider = selected,
                         Page::Profiles => self.selected_profile = selected,
                         Page::Groups => self.selected_group = selected,
+                        Page::Usage => {}
                     }
                     ui.separator();
                     ui.allocate_ui_with_layout(
@@ -1799,6 +1913,7 @@ impl eframe::App for App {
                             Page::Providers => self.render_provider_details(ui, &mut actions),
                             Page::Profiles => self.render_profile_details(ui, &mut actions),
                             Page::Groups => self.render_group_details(ui, &mut actions),
+                            Page::Usage => self.render_usage_details(ui),
                         },
                     );
                 });
@@ -1920,6 +2035,43 @@ fn group_affinity_name(affinity: &str) -> &'static str {
         "turn" => "Turn",
         "off" => "Off",
         _ => "Auto",
+    }
+}
+
+fn render_usage_stat(ui: &mut egui::Ui, label: &str, value: &str) {
+    egui::Frame::group(ui.style()).show(ui, |ui| {
+        ui.label(
+            RichText::new(label)
+                .small()
+                .color(ui.visuals().weak_text_color()),
+        );
+        ui.label(RichText::new(value).size(20.0).strong());
+    });
+}
+
+fn render_usage_rows(ui: &mut egui::Ui, rows: &[usage::UsageRow]) {
+    if rows.is_empty() {
+        ui.label("No recorded calls.");
+        return;
+    }
+    for row in rows {
+        egui::Frame::group(ui.style()).show(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(RichText::new(&row.name).strong());
+                ui.separator();
+                ui.label(format!(
+                    "{} tokens · {} calls · {}",
+                    usage::format_tokens(row.totals.tokens()),
+                    row.totals.calls,
+                    row.totals.display_cost()
+                ));
+            });
+            ui.add(
+                egui::ProgressBar::new((row.share / 100.0).clamp(0.0, 1.0) as f32)
+                    .text(format!("{:.0}%", row.share)),
+            );
+        });
+        ui.add_space(4.0);
     }
 }
 
