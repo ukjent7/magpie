@@ -11,12 +11,12 @@ use anyhow::{Context, Result, bail};
 use axum::{
     Json, Router,
     body::{Body, to_bytes},
-    extract::{Request, State},
+    extract::{Path, Request, State},
     http::{HeaderMap, HeaderName, HeaderValue, StatusCode, Uri, header},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
-use futures_util::{StreamExt, stream};
+use futures_util::StreamExt;
 use reqwest::Client;
 use serde_json::{Value, json};
 use tokio::{sync::oneshot, task::JoinHandle};
@@ -41,6 +41,9 @@ const CHAT_COMPLETIONS_PATH: &str = "/v1/chat/completions";
 const RESPONSES_PATH: &str = "/v1/responses";
 const MESSAGES_PATH: &str = "/v1/messages";
 const MESSAGE_COUNT_PATH: &str = "/v1/messages/count_tokens";
+// Where an agent's own MCP helper posts its tool calls to, by the token that
+// names the run they belong to.
+const MCP_CALLBACK_PATH: &str = "/_magpie/claude-mcp/{token}";
 const MODELS_PATH: &str = "/v1/models";
 pub(crate) const API_ROUTES: [(&str, &str, &str); 7] = [
     ("OpenAI Chat Completions", "POST", CHAT_COMPLETIONS_PATH),
@@ -56,6 +59,9 @@ pub(crate) const API_ROUTES: [(&str, &str, &str); 7] = [
     ("Gemini model catalog", "GET", "/v1beta/models"),
 ];
 const MAX_REQUEST_BYTES: usize = 64 * 1024 * 1024;
+// A callback carries one call and one result, which is less than any prompt:
+// what a helper posts is bounded tighter than a request to a model.
+const MAX_CALLBACK_BYTES: usize = 16 << 20;
 const MAX_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
 const UPSTREAM_TIMEOUT: Duration = Duration::from_secs(600);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
@@ -230,6 +236,7 @@ fn router() -> Result<Router> {
         .route(MESSAGES_PATH, post(messages))
         .route("/messages", post(messages))
         .route(MESSAGE_COUNT_PATH, post(count_tokens))
+        .route(MCP_CALLBACK_PATH, post(mcp_callback))
         .route("/v1/magpie/quotas", get(quotas))
         .fallback(not_found)
         .with_state(state))
@@ -603,7 +610,7 @@ async fn gemini_response(response: Response, model: &str, streaming: bool) -> Re
 fn gemini_stream_response(response: Response, model: String) -> Response {
     let status = response.status();
     let headers = response.headers().clone();
-    let stream = stream::unfold(
+    let stream = futures_util::stream::unfold(
         (
             response.into_body().into_data_stream(),
             crate::gemini::StreamTranslator::new(model),
@@ -2043,7 +2050,7 @@ fn relay(
         .get(header::CONTENT_TYPE)
         .and_then(|value| value.to_str().ok());
     let scanner = Some(UsageScanner::new(protocol, content_type));
-    let body_stream = stream::unfold(
+    let body_stream = futures_util::stream::unfold(
         (
             upstream.bytes_stream(),
             scanner,
@@ -2139,7 +2146,7 @@ fn translated_stream_response(
                 .and_then(|value| value.to_str().ok()),
         )
     });
-    let body_stream = stream::unfold(
+    let body_stream = futures_util::stream::unfold(
         (
             upstream.bytes_stream(),
             translator,
@@ -2299,6 +2306,19 @@ fn copy_translated_headers(response: &mut Response, upstream_headers: &HeaderMap
 
 async fn not_found() -> Response {
     api_error(StatusCode::NOT_FOUND, "unknown gateway endpoint")
+}
+
+// The callback an agent's own MCP helper posts its tool calls to, which waits
+// here until the caller's next request carries the result: that is how one
+// turn of an agent spans the caller's several requests.
+async fn mcp_callback(Path(token): Path<String>, request: Request<Body>) -> Response {
+    let Ok(bytes) = to_bytes(request.into_parts().1, MAX_CALLBACK_BYTES).await else {
+        return (StatusCode::BAD_REQUEST, "invalid tool call").into_response();
+    };
+    let Ok(call) = serde_json::from_slice::<Value>(&bytes) else {
+        return (StatusCode::BAD_REQUEST, "invalid tool call").into_response();
+    };
+    bridge::mcp_call(&token, call).await
 }
 
 // token_floor is the least reply length a provider said it takes, from the
@@ -2495,7 +2515,7 @@ fn finish_redact(mut response: Response, redacted: bool) -> Response {
             }
             Err(error) => Err(error),
         })
-        .chain(stream::once(async move {
+        .chain(futures_util::stream::once(async move {
             let out = finish_writer
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())

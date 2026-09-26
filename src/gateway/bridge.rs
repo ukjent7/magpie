@@ -73,9 +73,9 @@ impl Outcome {
     }
 }
 
-// call is one tool call's answer, which two may wait on: the agent's own
-// request that made it, and the caller's later wait for it.
-#[derive(Clone)]
+// call is one tool call's answer. The run keeps the only way to give it, so
+// letting go of a call is how everyone waiting on one learns the run has
+// ended — which is the caller's own request that made it, and its later wait.
 struct Call {
     seen: watch::Receiver<Option<Outcome>>,
     send: watch::Sender<Option<Outcome>>,
@@ -91,10 +91,22 @@ impl Call {
         let _ = self.send.send(Some(outcome));
     }
 
+    // waited is what a waiter holds of a call: a hold on its answer, never a
+    // way to give one.
+    fn waited(&self) -> Seen {
+        Seen(self.seen.clone())
+    }
+}
+
+// seen is one waiter's hold on a call its run still owns.
+#[derive(Clone)]
+struct Seen(watch::Receiver<Option<Outcome>>);
+
+impl Seen {
     // answered waits for the caller's result, and gives up when the run ends
-    // without one: letting go of a call is how its run says so.
+    // without one.
     async fn answered(&self) -> Option<Outcome> {
-        let mut seen = self.seen.clone();
+        let mut seen = self.0.clone();
         loop {
             if let Some(outcome) = seen.borrow_and_update().as_ref().cloned() {
                 return Some(outcome);
@@ -197,7 +209,7 @@ struct Inner {
     // makes its calls one after another, while a client runs them all at once
     early: HashMap<String, Outcome>,
     // calls that outlasted the agent's patience, to be collected by wait_tool
-    late: HashMap<String, Call>,
+    late: HashMap<String, Seen>,
     stderr: Vec<u8>,
     closed: bool,
     // which conversation this run waits for, once it is idle
@@ -362,10 +374,10 @@ impl Run {
             inner.closed = true;
             inner.stdin.take();
             inner.segment.take();
+            inner.late.clear();
             inner
                 .waiting
                 .drain()
-                .chain(inner.late.drain())
                 .map(|(_, call)| call)
                 .collect::<Vec<_>>()
         };
@@ -649,6 +661,7 @@ pub async fn continue_with(
     if let Some(began) = run.hooks.began() {
         run.emit(began).await;
     }
+    let wanted = call_ids(&results);
     let mut delivered = 0;
     for part in results {
         let outcome = Outcome {
@@ -670,10 +683,7 @@ pub async fn continue_with(
     }
     if delivered == 0 {
         run.abort().await;
-        anyhow::bail!(
-            "the agent is not waiting for tool results {}",
-            call_ids(&results)
-        );
+        anyhow::bail!("the agent is not waiting for tool results {wanted}");
     }
     run.hooks.resumed();
     Ok(segment)
@@ -704,13 +714,16 @@ pub async fn mcp_call(token: &str, body: Value) -> Response {
         return awaited(&run, id, &arguments).await;
     }
 
+    // The run keeps the call; this request keeps only a hold on its answer, so
+    // that the run ending is what ends the wait.
     let call = Call::new();
+    let waiting = call.waited();
     let given = {
         let mut inner = run.inner.lock().await;
         match inner.early.remove(id) {
             Some(outcome) => Some(outcome),
             None => {
-                inner.waiting.insert(id.to_owned(), call.clone());
+                inner.waiting.insert(id.to_owned(), call);
                 None
             }
         }
@@ -725,19 +738,19 @@ pub async fn mcp_call(token: &str, body: Value) -> Response {
         .insert(id.to_owned(), run.clone());
     run.hooks.called(id, &called, &arguments);
 
-    let waited = match run.patience {
+    let answered = match run.patience {
         Some(wait) => tokio::select! {
-            outcome = call.answered() => outcome,
+            outcome = waiting.answered() => outcome,
             () = tokio::time::sleep(wait) => {
                 // the call stays where it was made, too: the caller's next
                 // request answers both
-                run.inner.lock().await.late.insert(id.to_owned(), call.clone());
+                run.inner.lock().await.late.insert(id.to_owned(), waiting.clone());
                 return answer(&still_running(id, &called));
             }
         },
-        None => call.answered().await,
+        None => waiting.answered().await,
     };
-    match waited {
+    match answered {
         Some(outcome) => answer(&outcome),
         None => (StatusCode::GONE, "the agent's run ended").into_response(),
     }
@@ -991,11 +1004,11 @@ mod tests {
             message("assistant", vec![said("done")]),
             message("user", vec![said("and again")]),
         ];
-        let (so_far, since) = resume_turn(&Request {
+        let with_more = Request {
             messages: messages.clone(),
             ..asked()
-        })
-        .expect("a turn after a reply");
+        };
+        let (so_far, since) = resume_turn(&with_more).expect("a turn after a reply");
         assert_eq!(so_far, &messages[..2]);
         assert_eq!(since, &messages[2..]);
         assert_eq!(
@@ -1127,9 +1140,10 @@ mod tests {
     #[tokio::test]
     async fn a_call_answered_before_it_is_made_is_not_lost() {
         let call = Call::new();
+        let waiting = call.waited();
         call.give(Outcome::words("early"));
         assert_eq!(
-            call.answered().await.unwrap().blocks[0]["text"],
+            waiting.answered().await.unwrap().blocks[0]["text"],
             json!("early")
         );
     }
@@ -1137,8 +1151,9 @@ mod tests {
     #[tokio::test]
     async fn a_call_left_without_an_answer_says_the_run_ended() {
         let call = Call::new();
-        drop(call.send);
-        assert!(call.answered().await.is_none());
+        let waiting = call.waited();
+        drop(call);
+        assert!(waiting.answered().await.is_none());
     }
 
     #[tokio::test]
@@ -1167,7 +1182,7 @@ mod tests {
             ..Event::default()
         })
         .await;
-        assert!(reading.recv().is_none(), "the turn is over");
+        assert!(reading.recv().await.is_none(), "the turn is over");
         assert!(!run.attached().await);
         // without a process there is no input to keep for the next turn
         assert!(!run.keeps_input().await);

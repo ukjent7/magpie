@@ -460,7 +460,9 @@ fn said(value: &Value, key: &str) -> bool {
     told(value, key).unwrap_or_default()
 }
 
-fn rows(value: &Value, key: &str) -> &[Value] {
+// rows is the array a key holds, or none of one when it holds anything else,
+// which is what a client that sends its parts as a bare string does.
+fn rows<'a>(value: &'a Value, key: &str) -> &'a [Value] {
     value
         .get(key)
         .and_then(Value::as_array)

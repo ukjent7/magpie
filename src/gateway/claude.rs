@@ -607,8 +607,8 @@ mod tests {
         assert!(whole.is_empty());
         let (echoed, _) = event(json!({"type": "assistant", "message": {"content": []}}));
         assert!(echoed.is_empty(), "what the CLI repeats says nothing new");
-        let (junk, _) = reads("not json at all");
-        assert!(junk.0.is_empty() && !junk.1);
+        let (junk, over) = reads("not json at all");
+        assert!(junk.is_empty() && !over, "a line that is no answer");
         let (other, _) = event(json!({"type": "system", "subtype": "init"}));
         assert!(other.is_empty());
     }
