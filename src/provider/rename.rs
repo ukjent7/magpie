@@ -202,10 +202,7 @@ pub fn rename_provider(from: &str, to: &str) -> Result<Vec<String>> {
     let mut moves = Vec::new();
     if from != to {
         let models = agent::magpie_models()?;
-        for agent in agent::all()
-            .into_iter()
-            .filter(|agent| agent.is_detected())
-        {
+        for agent in agent::all().into_iter().filter(|agent| agent.is_detected()) {
             for (key, value) in agent.values()? {
                 let Some(moved) = moved_value(&value, &from, &to, &models) else {
                     continue;

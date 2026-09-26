@@ -2800,8 +2800,13 @@ fn find(id: &str) -> Result<Provider> {
         .iter()
         .find(|provider| provider.id == id || provider.name.eq_ignore_ascii_case(id))
         // an id it had before it was renamed is still this provider's
-        .or_else(|| all.iter().find(|provider| provider.was.iter().any(|was| was == id)));
-    found.cloned().with_context(|| format!("no provider {id:?}; magpie providers lists them"))
+        .or_else(|| {
+            all.iter()
+                .find(|provider| provider.was.iter().any(|was| was == id))
+        });
+    found
+        .cloned()
+        .with_context(|| format!("no provider {id:?}; magpie providers lists them"))
 }
 
 fn load() -> Result<ProviderFile> {
@@ -3647,7 +3652,11 @@ mod tests {
 
     #[test]
     fn a_bare_model_id_names_the_group_it_was_found_by() {
-        let groups = [group("gpt-6-sol"), group("grok-4-7"), group("auto-deepseek")];
+        let groups = [
+            group("gpt-6-sol"),
+            group("grok-4-7"),
+            group("auto-deepseek"),
+        ];
         for (asked, want) in [
             ("gpt-6-sol", "group/gpt-6-sol"),
             ("GPT-6-SOL", "group/gpt-6-sol"),
