@@ -4,7 +4,9 @@
 //	{"provider":{"magpie":{"name":"magpie","kind":"anthropic",
 //	  "options":{"apiKey":"magpie","baseURL":"http://127.0.0.1:3425"},
 //	  "enabled":true,"source":"custom",
-//	  "models":{"<id>":{"name":…,"limit":{"context":…},"modalities":{…}}}}}}
+//	  "models":{"<id>":{"name":…,"limit":{"context":…,"output":…},
+//	    "modalities":{…},"reasoning":{"enabled":true,"variants":[…],
+//	    "defaultVariant":…}}}}}}
 //
 // An anthropic provider is asked at baseURL + /v1/messages. The model is
 // picked per task in ZCode's own picker and kept in its window, not in a
@@ -24,7 +26,8 @@
 //	      "personalModelIds":[…],"modelOrder":[…]}}]},
 //	  "modelConfigRules":{"providerModelRules":[{"providerId":"magpie",
 //	    "modelId":…,"config":{"properties":{"contextWindow":…,
-//	      "inputFormat":{"supportsImage":…}}}}],
+//	      "inputFormat":{"supportsImage":…}},
+//	      "optionSpecs":{"maxOutputTokens":{"max":…},"reasoningLevel":{"values":[…]}}}}],
 //	    "manualProviderModelRules":[…]}}}
 //
 // magpie writes both files, so an older ZCode sees its models too. A model
