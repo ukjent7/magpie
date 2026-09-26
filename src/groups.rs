@@ -58,7 +58,7 @@ fn add(args: &[String]) -> Result<()> {
 
 fn set(args: &[String]) -> Result<()> {
     let [reference, pairs @ ..] = args else {
-        bail!("usage: magpie group set <id> name=… models=… routing=… stays=…");
+        bail!("usage: magpie group set <id> name=… models=… routing=… stays=… id=…");
     };
     ensure!(
         !pairs.is_empty(),
@@ -73,12 +73,36 @@ fn set(args: &[String]) -> Result<()> {
     );
     let entries = provider::available_model_entries()?;
     let existing_members = group.members.clone();
-    apply_pairs(&mut group, pairs, &entries, &existing_members, false)?;
+    let mut renamed: Option<String> = None;
+    let pairs = pairs
+        .iter()
+        .filter(|pair| {
+            pair.split_once('=')
+                .is_some_and(|(key, _)| key.eq_ignore_ascii_case("id"))
+                .then(|| {
+                    renamed = pair.split_once('=').map(|(_, value)| value.to_owned());
+                    false
+                })
+                .unwrap_or(true)
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let from = group.id.clone();
+    apply_pairs(&mut group, &pairs, &entries, &existing_members, false)?;
     ensure!(
         !group.members.is_empty(),
         "a group needs at least one model"
     );
     provider::save_group(group.clone())?;
+    if let Some(to) = renamed
+        && !to.trim().eq_ignore_ascii_case(&from)
+    {
+        provider::rename_group(&from, &to)?;
+        println!("! agents set to group/{from} need group/{} now", to.trim());
+        let renamed_group = find_group(to.trim())?;
+        println!("✓ saved {}", renamed_group.name);
+        return show_group(&renamed_group, &entries);
+    }
     println!("✓ saved {}", group.name);
     show_group(&group, &entries)
 }

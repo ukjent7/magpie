@@ -1151,6 +1151,64 @@ pub fn restore_group(id: &str) -> Result<()> {
     store(file)
 }
 
+// rename_group gives a group another id, the one agents pick it by
+// (group/<id>). A group magpie found becomes the user's under the new id,
+// the found one kept removed so it doesn't come back beside it. The groups
+// that have it in them, and their rules, name it by the new id.
+pub fn rename_group(from: &str, to: &str) -> Result<()> {
+    let from = from.trim().to_ascii_lowercase();
+    let to = to.trim().to_ascii_lowercase();
+    ensure!(
+        !to.is_empty() && slug(&to) == to,
+        "a group's id must be lowercase letters, digits and dashes, not {to:?}"
+    );
+    if to == from {
+        return Ok(());
+    }
+    let mut file = load()?;
+    let entries = model_entries(&file.providers);
+    let all = groups_in(&file.groups, &entries);
+    let mut group = all
+        .iter()
+        .find(|group| group.id == from)
+        .cloned()
+        .with_context(|| format!("no group {from:?}"))?;
+    ensure!(
+        !all.iter().any(|group| group.id == to),
+        "there is a group {to:?} already"
+    );
+    let found = auto_groups(&entries).iter().any(|group| group.id == from);
+    group.id.clone_from(&to);
+    group.auto = false;
+    group.hidden = false;
+    file.groups.retain(|group| group.id != from);
+    if found {
+        file.groups.push(Group {
+            id: from.clone(),
+            hidden: true,
+            ..Group::default()
+        });
+    }
+    file.groups.push(group);
+    let old = format!("group/{from}");
+    let now = format!("group/{to}");
+    for group in &mut file.groups {
+        for member in &mut group.members {
+            if *member == old {
+                *member = now.clone();
+            }
+        }
+        if let Some(rules) = group.extra.get_mut("rules").and_then(Value::as_array_mut) {
+            for rule in rules {
+                if rule.get("use").and_then(Value::as_str) == Some(old.as_str()) {
+                    rule["use"] = Value::String(now.clone());
+                }
+            }
+        }
+    }
+    store(file)
+}
+
 pub fn list() -> Result<()> {
     let providers = providers_with_local_accounts(load()?.providers);
     if providers.is_empty() {

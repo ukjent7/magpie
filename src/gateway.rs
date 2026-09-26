@@ -850,7 +850,11 @@ async fn forward(
     }
 
     let mut selected = None;
-    for (index, candidate) in candidates.iter().enumerate() {
+    let mut body = body;
+    let mut floored = false;
+    let mut index = 0usize;
+    while index < candidates.len() {
+        let candidate = &candidates[index];
         let is_last = index + 1 == candidates.len();
         let response = match send_upstream(
             state,
@@ -881,6 +885,7 @@ async fn forward(
                     "magpie: {} failed before responding; trying the next route: {error:#}",
                     candidate.label()
                 );
+                index += 1;
                 continue;
             }
             Err(error) => {
@@ -907,6 +912,71 @@ async fn forward(
                 return api_error_for(protocol, StatusCode::BAD_GATEWAY, "provider request failed");
             }
         };
+        if !floored && response.status() == StatusCode::BAD_REQUEST {
+            // asked for fewer tokens than this provider answers with (#64):
+            // the same one again with the reply's length raised
+            let content_type = response.headers().get(header::CONTENT_TYPE).cloned();
+            let mut bytes = Vec::new();
+            while let Ok(Some(chunk)) = response.chunk().await {
+                if bytes.len().saturating_add(chunk.len()) > MAX_RESPONSE_BYTES {
+                    break;
+                }
+                bytes.extend_from_slice(&chunk);
+            }
+            if let Some(floor) = token_floor(&String::from_utf8_lossy(&bytes))
+                && let Some(raised) = with_token_floor(&body, floor)
+            {
+                floored = true;
+                body = raised;
+                eprintln!(
+                    "magpie: {} takes a reply of at least {floor} tokens; asking again",
+                    candidate.label()
+                );
+                continue;
+            }
+            let usage_request = path_override.is_none().then(|| {
+                crate::usage::Request::new(
+                    parts
+                        .headers
+                        .get(header::USER_AGENT)
+                        .and_then(|value| value.to_str().ok()),
+                    &candidate.provider.id,
+                    &candidate.provider.where_(),
+                    candidate.model,
+                    request_started,
+                )
+            });
+            let error_body: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+            if let Some(request) = usage_request {
+                crate::usage::record(
+                    request,
+                    400,
+                    affinity::usage_from_value(candidate.upstream, &error_body),
+                );
+            }
+            let message = format!(
+                "{}: {}",
+                candidate.provider.name,
+                upstream_error_message(&error_body, &bytes)
+            );
+            if too_long(StatusCode::BAD_REQUEST, &message) {
+                let mut message = message;
+                if protocol == ApiProtocol::Anthropic
+                    && !message.to_ascii_lowercase().contains("prompt is too long")
+                {
+                    message = format!("prompt is too long: {message}");
+                }
+                return api_error_for(protocol, StatusCode::BAD_REQUEST, &message);
+            }
+            let mut response = Response::new(Body::from(bytes));
+            *response.status_mut() = StatusCode::BAD_REQUEST;
+            if let Some(content_type) = content_type {
+                response
+                    .headers_mut()
+                    .insert(header::CONTENT_TYPE, content_type);
+            }
+            return response;
+        }
         if retryable_status(response.status()) {
             let retry_after = response
                 .headers()
@@ -924,6 +994,7 @@ async fn forward(
                 candidate.label(),
                 response.status()
             );
+            index += 1;
             continue;
         }
         selected = Some((response, *candidate));
@@ -2123,6 +2194,73 @@ fn copy_translated_headers(response: &mut Response, upstream_headers: &HeaderMap
 
 async fn not_found() -> Response {
     api_error(StatusCode::NOT_FOUND, "unknown gateway endpoint")
+}
+
+// token_floor is the least reply length a provider said it takes, from the
+// 400 it sends when a request asks for less ("max_tokens must be greater
+// than 2"). Apps checking a model is up ask for a token or two, which most
+// providers answer and some turn away. None when the error isn't about that.
+fn token_floor(message: &str) -> Option<u64> {
+    let message = message.to_ascii_lowercase();
+    for key in ["max_completion_tokens", "max_output_tokens", "max_tokens"] {
+        let Some(at) = message.find(key) else {
+            continue;
+        };
+        let window = &message[(at + key.len()).min(message.len())..];
+        let window = &window[..window.len().min(60)];
+        const TRIGGERS: &[(&str, u64)] = &[
+            ("greater than", 1),
+            ("more than", 1),
+            ("larger than", 1),
+            ("at least", 0),
+            (">=", 0),
+            (">", 1),
+        ];
+        for (trigger, add) in TRIGGERS {
+            if let Some(where_) = window.find(trigger) {
+                let digits: String = window[where_ + trigger.len()..]
+                    .chars()
+                    .skip_while(|c| !c.is_ascii_digit())
+                    .take_while(|c| c.is_ascii_digit())
+                    .collect();
+                return digits
+                    .parse::<u64>()
+                    .ok()
+                    .filter(|floor| *floor <= 1024)
+                    .map(|floor| floor + add);
+            }
+        }
+    }
+    None
+}
+
+// with_token_floor raises the reply's length the request asks for to floor,
+// wherever the request's protocol keeps it; None when it asked for that much
+// already, so the error was about something else.
+fn with_token_floor(body: &Value, floor: u64) -> Option<Value> {
+    if floor == 0 {
+        return None;
+    }
+    let mut object = body.as_object()?.clone();
+    let mut raised = false;
+    for key in ["max_tokens", "max_completion_tokens", "max_output_tokens"] {
+        if let Some(value) = object.get(key).and_then(Value::as_u64)
+            && value < floor
+        {
+            object.insert(key.to_owned(), json!(floor));
+            raised = true;
+        }
+    }
+    if let Some(config) = object
+        .get_mut("generationConfig")
+        .and_then(Value::as_object_mut)
+        && let Some(value) = config.get("maxOutputTokens").and_then(Value::as_u64)
+        && value < floor
+    {
+        config.insert("maxOutputTokens".to_owned(), json!(floor));
+        raised = true;
+    }
+    raised.then(|| Value::Object(object))
 }
 
 // upstream_error_response passes a vendor's failure on to the agent, but a
