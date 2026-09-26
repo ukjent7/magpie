@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // fakeAlma is Alma's API as its spec has it: providers and settings in
@@ -310,5 +311,40 @@ func TestAlmaDown(t *testing.T) {
 func TestAlmaNoneUnderTest(t *testing.T) {
 	if almaAPI != "" {
 		t.Fatalf("almaAPI under test: %q", almaAPI)
+	}
+}
+
+// A look at what Alma is on reuses what Alma said a moment ago; a change
+// sent to Alma, and what a change reads first, always ask it again.
+func TestAlmaLook(t *testing.T) {
+	gets := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+		if r.Method == "GET" {
+			gets++
+		}
+		rw.Write([]byte(`{"chat":{"defaultModel":"own:gpt-4o"}}`))
+	}))
+	t.Cleanup(srv.Close)
+	oldAPI, oldFor := almaAPI, almaReadFor
+	almaAPI, almaReadFor = srv.URL, time.Minute
+	t.Cleanup(func() { almaAPI, almaReadFor = oldAPI, oldFor })
+
+	for range 3 {
+		if _, err := almaSettingsSeen(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if gets != 1 {
+		t.Fatalf("three looks asked Alma %d times", gets)
+	}
+	if _, err := almaSettings(); err != nil || gets != 2 {
+		t.Fatalf("a read before a change must ask Alma: %d, %v", gets, err)
+	}
+	if err := almaDo("PUT", "/api/settings", map[string]any{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	almaSettingsSeen()
+	if gets != 3 {
+		t.Fatalf("a look after a change must ask Alma again: %d", gets)
 	}
 }

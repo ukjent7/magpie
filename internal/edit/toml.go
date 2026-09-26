@@ -2,12 +2,16 @@ package edit
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
+	"io/fs"
 	"strconv"
 	"strings"
 
 	"github.com/pelletier/go-toml/v2"
 	"github.com/pelletier/go-toml/v2/unstable"
+
+	"github.com/yetone/magpie/internal/filememo"
 )
 
 // Whole TOML tables are treated as units: magpie owns the tables it writes
@@ -19,13 +23,9 @@ import (
 // quotes, and whitespace around the dots is not part of it, so `[ a . b ]` is
 // the name `a.b`. Missing files return (nil, nil); errors include the path.
 func TOMLTables(path string) ([]string, error) {
-	raw, err := Read(path)
-	if err != nil || raw == nil {
-		return nil, err
-	}
-	tables, err := parseTOMLTables(splitLines(string(raw)))
+	tables, err := tomlTablesOf(path)
 	if err != nil {
-		return nil, fmt.Errorf("%s: %w", path, err)
+		return nil, err
 	}
 	var out []string
 	for _, table := range tables {
@@ -42,17 +42,16 @@ func TOMLTables(path string) ([]string, error) {
 // retain their literal text. Arrays and inline tables are omitted.
 // An array table with the requested name is a type error, not an absent table.
 func GetTOMLTable(path, name string) (map[string]string, error) {
-	raw, err := Read(path)
-	if err != nil || raw == nil {
+	tables, err := tomlTablesOf(path)
+	if err != nil {
 		return nil, err
 	}
-	lines := splitLines(string(raw))
-	table, err := parseTOMLTable(lines, name)
-	if err != nil {
-		return nil, fmt.Errorf("%s: %w", path, err)
-	}
-	if table.from < 0 {
+	table, ok := tomlTableNamed(tables, name)
+	if !ok {
 		return nil, nil
+	}
+	if table.array {
+		return nil, fmt.Errorf("%s: line %d, column %d: %q is an array table, expected an ordinary table", path, table.from+1, table.column, name)
 	}
 	out := map[string]string{}
 	for _, kv := range table.keys {
@@ -248,15 +247,39 @@ func parseTOMLTable(lines []string, name string) (tomlTableSpan, error) {
 	if err != nil {
 		return tomlTableSpan{}, err
 	}
-	for _, table := range tables {
-		if table.name == name {
-			if table.array {
-				return tomlTableSpan{}, fmt.Errorf("line %d, column %d: %q is an array table, expected an ordinary table", table.from+1, table.column, name)
-			}
-			return table, nil
+	if table, ok := tomlTableNamed(tables, name); ok {
+		if table.array {
+			return tomlTableSpan{}, fmt.Errorf("line %d, column %d: %q is an array table, expected an ordinary table", table.from+1, table.column, name)
 		}
+		return table, nil
 	}
 	return tomlTableSpan{from: -1, to: -1}, nil
+}
+
+func tomlTableNamed(tables []tomlTableSpan, name string) (tomlTableSpan, bool) {
+	for _, table := range tables {
+		if table.name == name {
+			return table, true
+		}
+	}
+	return tomlTableSpan{}, false
+}
+
+// tomlTablesOf is parseTOMLTables of a file, parsed again only once it
+// changes: an agent's config can be large (Codex's lists every project it
+// was trusted in) and is read field by field. Missing files are (nil, nil).
+func tomlTablesOf(path string) ([]tomlTableSpan, error) {
+	tables, err := filememo.Read("toml tables", path, func(b []byte) ([]tomlTableSpan, error) {
+		tables, err := parseTOMLTables(splitLines(string(b)))
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", path, err)
+		}
+		return tables, nil
+	})
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	return tables, err
 }
 
 // parseTOMLTables finds both ordinary and array-table blocks in one parser pass.

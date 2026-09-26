@@ -124,7 +124,6 @@ type providersJSON struct {
 	Gateway   gatewayJSON    `json:"gateway"`
 }
 
-// currentProvider reads which provider (and model) an agent is routed to now.
 // agentModel is the model an agent is on, as magpie's catalog names it.
 func agentModel(a *agent.Agent) string {
 	if len(a.Fields) == 0 {
@@ -133,20 +132,34 @@ func agentModel(a *agent.Agent) string {
 	return strings.TrimPrefix(a.Fields[0].Get(), "magpie/")
 }
 
-func currentProvider(a *agent.Agent) (string, string) {
-	v := agentModel(a)
-	if strings.HasPrefix(v, provider.GroupPrefix) {
-		return "", "" // a routing group: no one provider
-	}
-	if pid, model, ok := strings.Cut(v, "/"); ok {
-		if _, err := provider.Find(pid); err == nil {
-			return pid, model
-		}
-	}
-	return "", ""
+// agentUse is what an agent is on now: read once for the page, not again
+// for each provider (reading it may ask the agent itself, as Alma's does).
+type agentUse struct {
+	*agent.Agent
+	pid, model string
+	group      provider.Group
+	members    []provider.Member
+	inGroup    bool
 }
 
-func providerInfo(p provider.Provider, agents []*agent.Agent) providerJSON {
+func agentUses(agents []*agent.Agent, findGroup func(string) (provider.Group, []provider.Member, bool)) []agentUse {
+	out := make([]agentUse, 0, len(agents))
+	for _, a := range agents {
+		u := agentUse{Agent: a}
+		v := agentModel(a)
+		if strings.HasPrefix(v, provider.GroupPrefix) {
+			u.group, u.members, u.inGroup = findGroup(v)
+		} else if pid, model, ok := strings.Cut(v, "/"); ok {
+			if _, err := provider.Find(pid); err == nil {
+				u.pid, u.model = pid, model
+			}
+		}
+		out = append(out, u)
+	}
+	return out
+}
+
+func providerInfo(p provider.Provider, agents []agentUse) providerJSON {
 	out := providerJSON{
 		ID: p.ID, Name: p.Name, Icon: p.Icon, Preset: p.Preset, Host: p.Host(),
 		Chat: p.Chat, Responses: p.Responses, Anthropic: p.Anthropic,
@@ -207,12 +220,11 @@ func providerInfo(p provider.Provider, agents []*agent.Agent) providerJSON {
 		out.Fetched = ago(t)
 	}
 	for _, a := range agents {
-		pid, model := currentProvider(a)
-		pa := providerAgent{ID: a.ID, Name: a.Name, Icon: a.Icon, Current: pid == p.ID, Model: model}
-		if g, ms, ok := provider.FindGroup(agentModel(a)); ok {
-			for _, m := range ms {
+		pa := providerAgent{ID: a.ID, Name: a.Name, Icon: a.Icon, Current: a.pid == p.ID, Model: a.model}
+		if a.inGroup {
+			for _, m := range a.members {
 				if m.Provider.ID == p.ID {
-					pa.Current, pa.Model, pa.Group = true, m.Model, g.Name
+					pa.Current, pa.Model, pa.Group = true, m.Model, a.group.Name
 					break
 				}
 			}
@@ -232,11 +244,13 @@ func providersState() providersJSON {
 		}
 		s.Excluded = append(s.Excluded, e)
 	}
+	findGroup := provider.GroupFinder()
+	uses := agentUses(agents, findGroup)
 	have := map[string]bool{}
 	for _, p := range provider.All() {
 		// a preset is added once any provider is its, whatever its id
 		have[p.ID], have[p.Preset] = true, true
-		s.Providers = append(s.Providers, providerInfo(p, agents))
+		s.Providers = append(s.Providers, providerInfo(p, uses))
 	}
 	for _, pr := range provider.Presets() {
 		s.Presets = append(s.Presets, presetJSON{PresetDef: pr, Added: have[pr.ID]})
@@ -248,7 +262,7 @@ func providersState() providersJSON {
 			continue
 		}
 		g := gwGroupJSON{ID: e.ID, Name: e.Name, Icons: e.Icons}
-		if _, ms, ok := provider.FindGroup(e.ID); ok {
+		if _, ms, ok := findGroup(e.ID); ok {
 			for _, m := range ms {
 				if !slices.Contains(g.Providers, m.Provider.Name) {
 					g.Providers = append(g.Providers, m.Provider.Name)
@@ -461,7 +475,7 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 			writeJSON(rw, struct {
 				Results  []provider.Result `json:"results"`
 				Provider providerJSON      `json:"provider"`
-			}{p.Test(ctx), providerInfo(*p, agent.Detected())})
+			}{p.Test(ctx), providerInfo(*p, agentUses(agent.Detected(), provider.GroupFinder()))})
 			return
 		case "unfetch":
 			// the vendor's list, forgotten until the next Refresh
@@ -485,7 +499,7 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 			writeJSON(rw, struct {
 				Count    int          `json:"count"`
 				Provider providerJSON `json:"provider"`
-			}{len(ms), providerInfo(*p, agent.Detected())})
+			}{len(ms), providerInfo(*p, agentUses(agent.Detected(), provider.GroupFinder()))})
 			return
 		default:
 			http.NotFound(rw, r)

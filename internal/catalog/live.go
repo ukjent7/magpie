@@ -9,8 +9,11 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
+
+	"github.com/yetone/magpie/internal/filememo"
 )
 
 // A vendor's own /models endpoint is the truth about what it serves today;
@@ -31,15 +34,15 @@ type liveFile struct {
 
 // Live returns the model list last fetched from the provider, if any.
 func Live(provider string) (models []Model, fetched time.Time, ok bool) {
-	b, err := os.ReadFile(LivePath(provider))
-	if err != nil {
+	f, err := filememo.Read("live models", LivePath(provider), func(b []byte) (liveFile, error) {
+		var f liveFile
+		err := json.Unmarshal(b, &f)
+		return f, err
+	})
+	if err != nil || len(f.Models) == 0 {
 		return nil, time.Time{}, false
 	}
-	var f liveFile
-	if json.Unmarshal(b, &f) != nil || len(f.Models) == 0 {
-		return nil, time.Time{}, false
-	}
-	return f.Models, f.Fetched, true
+	return slices.Clone(f.Models), f.Fetched, true
 }
 
 // SaveLive stores a fetched list; an empty list forgets it.

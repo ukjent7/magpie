@@ -188,16 +188,31 @@ func isDigit(c byte) bool { return c >= '0' && c <= '9' }
 // FindGroup looks a group up by its catalog id ("group/<id>") and resolves
 // its members; one not ready now is left out.
 func FindGroup(id string) (Group, []Member, bool) {
-	gid, ok := strings.CutPrefix(strings.TrimSpace(id), GroupPrefix)
-	if !ok {
+	return GroupFinder()(id)
+}
+
+// GroupFinder is FindGroup for looking up many: every provider's models
+// are read once, when the first group is looked up, not again for each.
+func GroupFinder() func(id string) (Group, []Member, bool) {
+	var (
+		entries []Entry
+		all     []Group
+		read    bool
+	)
+	return func(id string) (Group, []Member, bool) {
+		gid, ok := strings.CutPrefix(strings.TrimSpace(id), GroupPrefix)
+		if !ok {
+			return Group{}, nil, false
+		}
+		if !read {
+			entries, read = providerEntries(), true
+			all = groupsIn(entries)
+		}
+		if g, ok := groupOf(all, gid); ok {
+			return g, membersIn(entries, all, g), true
+		}
 		return Group{}, nil, false
 	}
-	entries := providerEntries()
-	all := groupsIn(entries)
-	if g, ok := groupOf(all, gid); ok {
-		return g, membersIn(entries, all, g), true
-	}
-	return Group{}, nil, false
 }
 
 // groupOf is the group of an id among all, unless it was removed.
