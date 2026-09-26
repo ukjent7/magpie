@@ -65,6 +65,9 @@ func SetModelName(ref, name string) error {
 	if len([]rune(name)) > 80 {
 		return errors.New("a model's name is at most 80 characters")
 	}
+	if name != "" && !p.serves(model) {
+		return fmt.Errorf("%s has no model %s (magpie provider %s lists them)", p.ID, model, p.ID)
+	}
 	s := settings.Load()
 	key := p.ID + "/" + model
 	if s.ModelNames[key] == name {
@@ -209,3 +212,10 @@ func (p Provider) ModelNames() map[string]string {
 // EffortsOf is the reasoning levels one of a provider's listed models has,
 // before any the user left out.
 func EffortsOf(m catalog.Model) []string { return effortsOf(m) }
+
+// serves reports whether model is one of the provider's, listed or exposed:
+// a name given to a model it doesn't have would never be shown.
+func (p Provider) serves(model string) bool {
+	has := func(m catalog.Model) bool { return m.ID == model }
+	return slices.ContainsFunc(p.Available(), has) || slices.ContainsFunc(p.Exposed(), has)
+}

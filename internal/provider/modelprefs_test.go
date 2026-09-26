@@ -127,7 +127,7 @@ func TestModelName(t *testing.T) {
 	if _, ok := settings.Load().ModelNames["a/sol"]; ok {
 		t.Fatal("a reset name is still kept")
 	}
-	for _, bad := range []string{"sol", "nobody/sol", "group/auto-sol", "a/"} {
+	for _, bad := range []string{"sol", "nobody/sol", "group/auto-sol", "a/", "a/no-such-model"} {
 		if err := SetModelName(bad, "x"); err == nil {
 			t.Errorf("%s was named", bad)
 		}

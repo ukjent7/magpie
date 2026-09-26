@@ -84,6 +84,7 @@ const I18N = {
     "agent default": "Agent 默认值",
     "default": "默认",
     "off": "关闭",
+    "none": "不思考",
     "minimal": "最低",
     "low": "低",
     "medium": "中",
