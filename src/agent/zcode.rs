@@ -132,10 +132,11 @@ fn models_json() -> Result<Map<String, Value>> {
             "modalities": {"input": input, "output": ["text"]},
         });
         if !levels.is_empty() {
+            let default = default_level(&levels);
             entry["reasoning"] = json!({
                 "enabled": true,
                 "variants": levels,
-                "defaultVariant": default_level(&levels),
+                "defaultVariant": default,
             });
         }
         models.insert(model.id.clone(), entry);
