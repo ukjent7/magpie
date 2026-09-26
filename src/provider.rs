@@ -2328,11 +2328,30 @@ async fn show(id: &str) -> Result<()> {
                 provider.catalog_id(),
                 &provider.models,
             );
+            // where the list came from: models.dev until the vendor is asked
+            // itself, then its host — or its name, for a subscription served
+            // through its own CLI
+            let from = match crate::catalog::fetched_at(&provider.id) {
+                Some(at) => format!("{} · fetched {}", provider.fetched_from(), ago(at)),
+                None => "models.dev".to_owned(),
+            };
             println!(
-                "  models: {} exposed of {} available",
+                "  models: {} exposed of {} · from {from}",
                 exposed.len(),
                 available.len()
             );
+            for model in exposed.iter().take(12) {
+                let named = (model.name != model.id).then(|| format!("  {}", model.name));
+                println!(
+                    "      {}/{}{}",
+                    provider.id,
+                    model.id,
+                    named.unwrap_or_default()
+                );
+            }
+            if exposed.len() > 12 {
+                println!("      … {} more", exposed.len() - 12);
+            }
         }
     }
     if !provider.fallback.is_empty() {
@@ -3165,6 +3184,24 @@ fn mask(secret: &str) -> String {
 
 fn is_false(value: &bool) -> bool {
     !value
+}
+
+// ago is how long before now a provider's model list was fetched — the day
+// it was fetched, once that is more than two days gone.
+fn ago(at: std::time::SystemTime) -> String {
+    let Ok(since) = std::time::SystemTime::now().duration_since(at) else {
+        return "just now".to_owned();
+    };
+    let seconds = since.as_secs();
+    if seconds < 60 {
+        "just now".to_owned()
+    } else if seconds < 3_600 {
+        format!("{}m ago", seconds / 60)
+    } else if seconds < 48 * 3_600 {
+        format!("{}h ago", seconds / 3_600)
+    } else {
+        time::OffsetDateTime::from(at).date().to_string()
+    }
 }
 
 impl Provider {

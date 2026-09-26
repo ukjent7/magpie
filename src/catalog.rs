@@ -579,6 +579,13 @@ pub fn rename_live(from: &str, to: &str) {
     let _ = std::fs::rename(from, to);
 }
 
+// fetched_at is when a provider's own list was last read from its vendor.
+pub fn fetched_at(provider_id: &str) -> Option<SystemTime> {
+    live_path(provider_id)
+        .and_then(|path| fs::metadata(path).ok())
+        .and_then(|metadata| metadata.modified().ok())
+}
+
 fn candidate_urls(base: &str) -> Vec<String> {
     let mut urls = Vec::with_capacity(4);
     let mut add = |url: String| {
