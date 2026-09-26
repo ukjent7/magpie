@@ -3,7 +3,7 @@ use axum::response::Html;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 pub(super) fn random_token(byte_count: usize) -> Result<String> {
     let mut bytes = vec![0; byte_count];
@@ -33,11 +33,8 @@ fn escape_html(value: &str) -> String {
 pub(super) fn open_browser(url: &str) -> bool {
     #[cfg(target_os = "windows")]
     {
-        use std::os::windows::process::CommandExt;
-
-        Command::new("rundll32.exe")
+        crate::proc::command("rundll32.exe")
             .args(["url.dll,FileProtocolHandler", url])
-            .creation_flags(0x08000000)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -46,7 +43,7 @@ pub(super) fn open_browser(url: &str) -> bool {
     }
     #[cfg(target_os = "macos")]
     {
-        Command::new("open")
+        crate::proc::command("open")
             .arg(url)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -56,7 +53,7 @@ pub(super) fn open_browser(url: &str) -> bool {
     }
     #[cfg(target_os = "linux")]
     {
-        Command::new("xdg-open")
+        crate::proc::command("xdg-open")
             .arg(url)
             .stdin(Stdio::null())
             .stdout(Stdio::null())

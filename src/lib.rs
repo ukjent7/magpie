@@ -25,6 +25,7 @@ mod grouprule;
 pub mod groups;
 pub mod library;
 mod netproxy;
+mod proc;
 pub mod profile;
 pub mod provider;
 mod quota;

@@ -7,7 +7,6 @@ use std::{
 use anyhow::{Context, Result, bail, ensure};
 use serde_json::Value;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
-use tokio::process::Command;
 
 use super::{
     SavedLogin, grok_active_user, grok_identity, oauth::random_token, read_saved_logins,
@@ -71,7 +70,7 @@ async fn add_grok_account() -> Result<()> {
 }
 
 async fn run_grok_login(executable: &Path, home: &Path) -> Result<()> {
-    let mut command = Command::new(executable);
+    let mut command = crate::proc::async_command(executable);
     command
         .args(["login", "--device-auth"])
         .env("GROK_HOME", home)

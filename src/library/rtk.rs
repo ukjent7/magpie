@@ -202,7 +202,7 @@ fn rtk_agents(homes: &Homes) -> Vec<agent::Agent> {
 }
 
 async fn rtk_run(bin: &Path, args: &[&str], env: &[(&str, &str)]) -> Result<String> {
-    let mut command = tokio::process::Command::new(bin);
+    let mut command = crate::proc::async_command(bin);
     command
         .args(args)
         // rtk asks before a change it isn't told to make: nothing answers it

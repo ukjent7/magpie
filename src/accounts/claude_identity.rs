@@ -1,11 +1,7 @@
 use std::{env, fs, path::PathBuf, time::Duration};
 
-#[cfg(target_os = "macos")]
-use std::process::Command;
-
 use serde::Deserialize;
 use serde_json::Value;
-use tokio::process::Command as AsyncCommand;
 
 use anyhow::{Context, Result, bail};
 
@@ -101,7 +97,7 @@ pub(super) fn install_login(auth: &Value, profile: Option<&Value>) -> Result<()>
         #[cfg(target_os = "macos")]
         CredentialLocation::Keychain { account } => {
             let secret = String::from_utf8(contents).context("serialize Claude credentials")?;
-            let mut command = Command::new("security");
+            let mut command = crate::proc::command("security");
             command.args([
                 "add-generic-password",
                 "-U",
@@ -167,7 +163,7 @@ fn title_case(value: &str) -> String {
 async fn auth_status() -> Option<AuthStatus> {
     let output = tokio::time::timeout(
         CLAUDE_STATUS_TIMEOUT,
-        AsyncCommand::new("claude")
+        crate::proc::async_command("claude")
             .args(["auth", "status", "--json"])
             .kill_on_drop(true)
             .output(),
@@ -189,7 +185,7 @@ fn read_credentials() -> Option<(Value, CredentialLocation)> {
 
     #[cfg(target_os = "macos")]
     {
-        let output = Command::new("security")
+        let output = crate::proc::command("security")
             .args([
                 "find-generic-password",
                 "-s",

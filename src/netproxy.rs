@@ -5,9 +5,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-#[cfg(any(target_os = "macos", target_os = "windows"))]
-use std::process::Command;
-
 use reqwest::{Client, ClientBuilder, Proxy};
 use url::Url;
 
@@ -297,7 +294,7 @@ fn platform_system_proxy() -> SystemProxy {
 
 #[cfg(target_os = "windows")]
 fn registry_value(key: &str, name: &str) -> Option<String> {
-    let output = Command::new("reg.exe")
+    let output = crate::proc::command("reg.exe")
         .args(["query", key, "/v", name])
         .output()
         .ok()?;
@@ -350,7 +347,7 @@ fn windows_proxy(server: &str, bypass: Vec<String>) -> SystemProxy {
 
 #[cfg(target_os = "macos")]
 fn platform_system_proxy() -> SystemProxy {
-    let Ok(output) = Command::new("scutil").arg("--proxy").output() else {
+    let Ok(output) = crate::proc::command("scutil").arg("--proxy").output() else {
         return SystemProxy::default();
     };
     if !output.status.success() {

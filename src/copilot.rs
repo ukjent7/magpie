@@ -6,9 +6,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
-use std::process::Command;
-
 use anyhow::{Context, Result, ensure};
 use jsonc_parser::{ParseOptions, cst::CstRootNode};
 use reqwest::{Client, header};
@@ -209,7 +206,7 @@ fn copilot_cli_secret(account: &str) -> Option<String> {
     }
 
     #[cfg(target_os = "macos")]
-    let output = Command::new("security")
+    let output = crate::proc::command("security")
         .args([
             "find-generic-password",
             "-s",
@@ -220,7 +217,7 @@ fn copilot_cli_secret(account: &str) -> Option<String> {
         ])
         .output();
     #[cfg(target_os = "linux")]
-    let output = Command::new("secret-tool")
+    let output = crate::proc::command("secret-tool")
         .args(["lookup", "service", "copilot-cli", "account", account])
         .output();
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
