@@ -431,7 +431,7 @@ pub fn parse(protocol: ApiProtocol, body: &Value) -> TurnRequest {
     }
 }
 
-fn string_or_text(value: Option<&Value>) -> String {
+pub(crate) fn string_or_text(value: Option<&Value>) -> String {
     match value {
         Some(Value::String(text)) => text.clone(),
         Some(Value::Array(blocks)) => blocks
@@ -811,8 +811,8 @@ fn parse_responses(body: &Value) -> TurnRequest {
     out
 }
 
-// effortOf normalises the reasoning effort names the APIs use.
-fn effort_of(value: &str) -> String {
+// effort_of normalises the reasoning effort names the APIs use.
+pub(crate) fn effort_of(value: &str) -> String {
     match value.trim().to_ascii_lowercase().as_str() {
         "minimal" | "none" => "low".to_owned(),
         level @ ("low" | "medium" | "high" | "xhigh" | "max") => level.to_owned(),
@@ -820,7 +820,7 @@ fn effort_of(value: &str) -> String {
     }
 }
 
-fn effort_of_budget(budget: i64) -> String {
+pub(crate) fn effort_of_budget(budget: i64) -> String {
     if budget <= 0 {
         String::new()
     } else if budget <= 4096 {
