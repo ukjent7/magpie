@@ -377,6 +377,9 @@ impl Agent {
         if self.spec.id == "opencode" && !field.catalog_prefix.is_empty() {
             return self.set_opencode_model(field, value);
         }
+        if self.spec.id == "commandcode" && field.key == "model" {
+            return self.set_commandcode_model(value);
+        }
         if self.spec.id == "gemini" && field.key == "model" {
             return self.set_gemini_model(value);
         }
@@ -585,6 +588,41 @@ impl Agent {
             ],
         )
     }
+
+    fn set_commandcode_model(&self, value: &str) -> Result<()> {
+        let providers_path = self.path.with_file_name("providers.json");
+        let routed = config::get(&self.path, self.spec.format, "modelProvider")?.as_deref()
+            == Some("magpie");
+
+        if value.is_empty() {
+            if routed {
+                config::delete_many(&self.path, self.spec.format, &["model", "modelProvider"])?;
+            } else {
+                config::delete(&self.path, self.spec.format, "model")?;
+            }
+            return config::delete(&providers_path, ConfigFormat::Jsonc, "provider.magpie");
+        }
+
+        if let Some(model) = value.strip_prefix("magpie/")
+            && is_gateway_model(model)?
+        {
+            let provider = commandcode_provider()?;
+            config::set_jsonc_value(&providers_path, "provider.magpie", &provider)?;
+            return config::set_jsonc_values(
+                &self.path,
+                &[
+                    ("model", Value::String(value.to_owned())),
+                    ("modelProvider", Value::String("magpie".to_owned())),
+                ],
+            );
+        }
+
+        if routed {
+            config::delete(&self.path, self.spec.format, "modelProvider")?;
+        }
+        config::set(&self.path, self.spec.format, "model", value)?;
+        config::delete(&providers_path, ConfigFormat::Jsonc, "provider.magpie")
+    }
 }
 
 pub fn sync_catalog_models() -> Result<()> {
@@ -595,6 +633,18 @@ pub fn sync_catalog_models() -> Result<()> {
     {
         let model_catalog = crate::codexcat::render()?;
         settings::write_json(&codex_catalog_path(&agent), &model_catalog)?;
+    }
+
+    if let Some(agent) = all()
+        .into_iter()
+        .find(|agent| agent.spec.id == "commandcode")
+        && commandcode_has_magpie_model(&agent)?
+    {
+        config::set_jsonc_value(
+            &agent.path.with_file_name("providers.json"),
+            "provider.magpie",
+            &commandcode_provider()?,
+        )?;
     }
 
     let Some(agent) = all().into_iter().find(|agent| agent.spec.id == "opencode") else {
@@ -1075,6 +1125,70 @@ fn opencode_provider() -> Result<Value> {
         },
         "models": models,
     }))
+}
+
+fn commandcode_has_magpie_model(agent: &Agent) -> Result<bool> {
+    Ok(config::get(&agent.path, agent.spec.format, "modelProvider")?.as_deref() == Some("magpie"))
+}
+
+fn commandcode_provider() -> Result<Value> {
+    let (groups, entries) = crate::provider::desktop_group_data()?;
+    let entries_by_id = entries
+        .iter()
+        .map(|entry| (entry.id.as_str(), entry))
+        .collect::<HashMap<_, _>>();
+    let mut models = serde_json::Map::new();
+
+    for entry in &entries {
+        models.insert(
+            entry.id.clone(),
+            commandcode_model(
+                if entry.model.name.is_empty() {
+                    &entry.model.id
+                } else {
+                    &entry.model.name
+                },
+                &entry.model.efforts,
+            ),
+        );
+    }
+    for group in groups.into_iter().filter(|group| !group.hidden) {
+        let members = group
+            .members
+            .iter()
+            .filter_map(|member| entries_by_id.get(member.as_str()).copied())
+            .collect::<Vec<_>>();
+        if members.is_empty() {
+            continue;
+        }
+        models.insert(
+            format!("group/{}", group.id),
+            commandcode_model(&format!("{} · routing group", group.name), &[]),
+        );
+    }
+
+    Ok(json!({
+        "name": "magpie",
+        "api": "openai-completions",
+        "baseURL": crate::gateway::v1_url(),
+        "apiKey": false,
+        "models": models,
+    }))
+}
+
+fn commandcode_model(name: &str, efforts: &[String]) -> Value {
+    let mut model = json!({"name": name});
+    let efforts = efforts
+        .iter()
+        .filter(|effort| ["low", "medium", "high", "xhigh", "max"].contains(&effort.as_str()))
+        .collect::<Vec<_>>();
+    if !efforts.is_empty()
+        && let Some(fields) = model.as_object_mut()
+    {
+        fields.insert("reasoning".to_owned(), Value::Bool(true));
+        fields.insert("reasoningEfforts".to_owned(), json!(efforts));
+    }
+    model
 }
 
 fn opencode_model(name: &str, images: bool) -> Value {
