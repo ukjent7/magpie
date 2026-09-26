@@ -246,6 +246,48 @@ pub fn set_yaml_values(path: &Path, assignments: &[(&str, Value)]) -> Result<()>
     write_atomic(path, document.to_string().as_bytes())
 }
 
+pub fn yaml_mapping_values(path: &Path, key_path: &str) -> Result<Vec<String>> {
+    let Some(text) = read_optional(path)? else {
+        return Ok(Vec::new());
+    };
+    if text.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    let document = Document::from_str(&text).context("parse YAML")?;
+    let Some(node) = document.try_get_path(key_path).ok() else {
+        return Ok(Vec::new());
+    };
+    let Some(mapping) = node.as_mapping() else {
+        return Ok(Vec::new());
+    };
+    Ok(mapping
+        .values()
+        .filter_map(|value| value.as_scalar().map(|scalar| scalar.as_string()))
+        .collect())
+}
+
+/// Convert a JSONC object to valid YAML using YAML 1.2's JSON-compatible syntax.
+pub fn convert_jsonc_to_yaml(source: &Path, destination: &Path) -> Result<()> {
+    let Some(text) = read_optional(source)? else {
+        return Ok(());
+    };
+    let root = CstRootNode::parse(&text, &ParseOptions::default())
+        .with_context(|| format!("parse JSONC at {}", source.display()))?;
+    let value = root
+        .value()
+        .and_then(|node| node.to_serde_value())
+        .with_context(|| format!("JSONC file {} has no value", source.display()))?;
+    if !value.is_object() {
+        bail!(
+            "JSONC file {} must contain a top-level object",
+            source.display()
+        );
+    }
+    let mut yaml = serde_json::to_string_pretty(&value).context("serialize YAML document")?;
+    yaml.push('\n');
+    write_atomic(destination, yaml.as_bytes())
+}
+
 pub fn delete(path: &Path, format: ConfigFormat, key_path: &str) -> Result<()> {
     delete_many(path, format, &[key_path])
 }

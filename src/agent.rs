@@ -1,4 +1,8 @@
-use std::{collections::HashMap, env, fs, path::PathBuf};
+use std::{
+    collections::HashMap,
+    env, fs,
+    path::{Path, PathBuf},
+};
 
 use anyhow::{Context, Result, bail, ensure};
 use serde_json::{Value, json};
@@ -392,6 +396,9 @@ impl Agent {
         if self.spec.id == "hermes" && field.key == "model" {
             return self.set_hermes_model(value);
         }
+        if self.spec.id == "omp" && field.key == "model" {
+            return self.set_omp_model(value);
+        }
         if self.spec.id == "gemini" && field.key == "model" {
             return self.set_gemini_model(value);
         }
@@ -767,6 +774,28 @@ impl Agent {
         }
         config::set(&self.path, self.spec.format, HERMES_MODEL.path, value)
     }
+
+    fn set_omp_model(&self, value: &str) -> Result<()> {
+        let models_path = omp_models_path(self);
+        if value.is_empty() {
+            config::delete(&self.path, self.spec.format, OMP_MODEL.path)?;
+        } else if let Some(model) = value.strip_prefix("magpie/") {
+            ensure!(
+                is_gateway_model(model)?,
+                "{model:?} is not a model currently served by magpie"
+            );
+            prepare_omp_models(self, &models_path)?;
+            config::set_yaml_values(&models_path, &[("providers.magpie", omp_provider()?)])?;
+            return config::set(&self.path, self.spec.format, OMP_MODEL.path, value);
+        } else {
+            config::set(&self.path, self.spec.format, OMP_MODEL.path, value)?;
+        }
+
+        if !omp_has_magpie_model(self)? {
+            config::delete(&models_path, ConfigFormat::Yaml, "providers.magpie")?;
+        }
+        Ok(())
+    }
 }
 
 pub fn sync_catalog_models() -> Result<()> {
@@ -811,6 +840,14 @@ pub fn sync_catalog_models() -> Result<()> {
         && hermes_gateway_configured(&agent)?
     {
         config::set_yaml_values(&agent.path, &[("providers.magpie", hermes_provider()?)])?;
+    }
+
+    if let Some(agent) = all().into_iter().find(|agent| agent.spec.id == "omp")
+        && omp_has_magpie_model(&agent)?
+    {
+        let models_path = omp_models_path(&agent);
+        prepare_omp_models(&agent, &models_path)?;
+        config::set_yaml_values(&models_path, &[("providers.magpie", omp_provider()?)])?;
     }
 
     let Some(agent) = all().into_iter().find(|agent| agent.spec.id == "opencode") else {
@@ -1622,6 +1659,137 @@ fn hermes_provider() -> Result<Value> {
         "extra_headers": {"User-Agent": "hermes-agent"},
         "models": models,
     }))
+}
+
+fn omp_models_path(agent: &Agent) -> PathBuf {
+    let directory = agent
+        .path
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."));
+    let yml = directory.join("models.yml");
+    if yml.exists() {
+        return yml;
+    }
+    let yaml = directory.join("models.yaml");
+    if yaml.exists() {
+        return yaml;
+    }
+    yml
+}
+
+fn prepare_omp_models(agent: &Agent, path: &Path) -> Result<()> {
+    if path.exists() {
+        return Ok(());
+    }
+    let legacy_json = agent.path.with_file_name("models.json");
+    config::convert_jsonc_to_yaml(&legacy_json, path)
+}
+
+fn omp_has_magpie_model(agent: &Agent) -> Result<bool> {
+    Ok(config::yaml_mapping_values(&agent.path, "modelRoles")?
+        .iter()
+        .any(|model| model.starts_with("magpie/")))
+}
+
+fn omp_provider() -> Result<Value> {
+    const EFFORTS: &[&str] = &["minimal", "low", "medium", "high", "xhigh", "max"];
+
+    let (groups, entries) = crate::provider::desktop_group_data()?;
+    let entries_by_id = entries
+        .iter()
+        .map(|entry| (entry.id.as_str(), entry))
+        .collect::<HashMap<_, _>>();
+    let mut models = Vec::with_capacity(entries.len() + groups.len());
+    for entry in &entries {
+        let name = if entry.model.name.is_empty() {
+            &entry.model.id
+        } else {
+            &entry.model.name
+        };
+        models.push(omp_model(
+            &entry.id,
+            &format!("{name} · {}", entry.provider_name),
+            entry.model.context,
+            &entry.model.efforts,
+            EFFORTS,
+        ));
+    }
+    for group in groups.into_iter().filter(|group| !group.hidden) {
+        let members = group
+            .members
+            .iter()
+            .filter_map(|member| entries_by_id.get(member.as_str()).copied())
+            .collect::<Vec<_>>();
+        let Some((first, rest)) = members.split_first() else {
+            continue;
+        };
+        let efforts = first
+            .model
+            .efforts
+            .iter()
+            .filter(|effort| {
+                rest.iter()
+                    .all(|member| member.model.efforts.contains(effort))
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let context = members
+            .iter()
+            .map(|member| member.model.context)
+            .filter(|context| *context > 0)
+            .min()
+            .unwrap_or_default();
+        models.push(omp_model(
+            &format!("group/{}", group.id),
+            &format!("{} · routing group", group.name),
+            context,
+            &efforts,
+            EFFORTS,
+        ));
+    }
+
+    Ok(json!({
+        "baseUrl": crate::gateway::v1_url(),
+        "api": "openai-completions",
+        "auth": "none",
+        "models": models,
+    }))
+}
+
+fn omp_model(
+    id: &str,
+    name: &str,
+    context: usize,
+    efforts: &[String],
+    known_efforts: &[&str],
+) -> Value {
+    let efforts = known_efforts
+        .iter()
+        .filter(|effort| {
+            efforts
+                .iter()
+                .any(|model_effort| model_effort.as_str() == **effort)
+        })
+        .copied()
+        .collect::<Vec<_>>();
+    let mut model = json!({
+        "id": id,
+        "name": name,
+        "reasoning": !efforts.is_empty(),
+    });
+    let Some(fields) = model.as_object_mut() else {
+        return model;
+    };
+    if context > 0 {
+        fields.insert("contextWindow".to_owned(), json!(context));
+    }
+    if !efforts.is_empty() {
+        fields.insert(
+            "thinking".to_owned(),
+            json!({"mode": "effort", "efforts": efforts}),
+        );
+    }
+    model
 }
 
 fn opencode_model(name: &str, images: bool) -> Value {
