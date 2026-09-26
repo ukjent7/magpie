@@ -86,7 +86,7 @@ pub(crate) fn get() -> String {
         }
         Ok(current)
     };
-    read.unwrap_or_else(|_| {
+    read().unwrap_or_else(|_| {
         super::applied::of("alma")
             .field("model")
             .unwrap_or_default()
