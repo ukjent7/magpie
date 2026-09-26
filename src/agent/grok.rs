@@ -165,7 +165,7 @@ fn document(path: &Path) -> Result<DocumentMut> {
     if text.trim().is_empty() {
         return Ok(DocumentMut::new());
     }
-    DocumentMut::from_str(&text).with_context(|| format!("parse {}", path.display()))
+    std::str::FromStr::from_str(&text).with_context(|| format!("parse {}", path.display()))
 }
 
 fn save(path: &Path, doc: &DocumentMut) -> Result<()> {
@@ -295,7 +295,7 @@ mod tests {
     }
 
     fn table(path: &Path, keys: &[&str]) -> Option<Table> {
-        let doc = DocumentMut::from_str(&read(path)).unwrap();
+        let doc = std::str::FromStr::from_str(&read(path)).unwrap();
         let (last, parents) = keys.split_last().unwrap();
         let mut item = doc.as_table();
         for key in parents {

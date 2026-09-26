@@ -377,11 +377,13 @@ fn quota_of(card: &PlanQuota) -> crate::quota::Quota {
             .iter()
             .map(|window| {
                 let resets_at = window.resets_at.clone().or_else(|| {
-                    (window.span_secs > 0).then(|| {
+                    if window.span_secs > 0 {
                         (OffsetDateTime::now_utc() + TimeDuration::seconds(window.span_secs as i64))
                             .format(&Rfc3339)
                             .ok()
-                    })
+                    } else {
+                        None
+                    }
                 });
                 crate::quota::QuotaSpan::new(
                     window.name.clone(),

@@ -74,7 +74,7 @@ fn set(args: &[String]) -> Result<()> {
     let entries = provider::available_model_entries()?;
     let existing_members = group.members.clone();
     let mut renamed: Option<String> = None;
-    let mut pairs = Vec::new();
+    let mut pairs: Vec<String> = Vec::new();
     for pair in pairs {
         if let Some((key, value)) = pair.split_once('=')
             && key.eq_ignore_ascii_case("id")

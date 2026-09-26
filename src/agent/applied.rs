@@ -69,7 +69,7 @@ fn load() -> HashMap<String, Applied> {
 fn save(applied: &HashMap<String, Applied>) -> Result<()> {
     let path = applied_path();
     let mut bytes = serde_json::to_string_pretty(applied).context("serialize applied record")?;
-    bytes.push(b'\n');
+    bytes.push('\n');
     crate::config::atomic_write_secret_for_settings(&path, bytes.as_bytes())
 }
 
