@@ -371,7 +371,7 @@ async fn gemini(State(state): State<GatewayState>, request: Request<Body>) -> Re
             "expected /v1beta/models/{model}:generateContent",
         );
     };
-    let model = model.strip_prefix("models/").unwrap_or(model);
+    let model = model.strip_prefix("models/").unwrap_or(model).to_owned();
     if model.is_empty() {
         return gemini_error(StatusCode::BAD_REQUEST, "model name cannot be empty");
     }
@@ -403,7 +403,7 @@ async fn gemini(State(state): State<GatewayState>, request: Request<Body>) -> Re
         _ => return gemini_error(StatusCode::NOT_FOUND, &format!("unknown method {method}")),
     };
 
-    let chat_request = crate::gemini::to_chat_request(&body, model, streaming);
+    let chat_request = crate::gemini::to_chat_request(&body, &model, streaming);
     let chat_body = match serde_json::to_vec(&chat_request) {
         Ok(body) => body,
         Err(error) => {
@@ -419,7 +419,7 @@ async fn gemini(State(state): State<GatewayState>, request: Request<Body>) -> Re
         None,
     )
     .await;
-    gemini_response(response, model, streaming).await
+    gemini_response(response, &model, streaming).await
 }
 
 async fn gemini_response(response: Response, model: &str, streaming: bool) -> Response {
