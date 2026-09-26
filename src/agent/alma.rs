@@ -76,7 +76,17 @@ fn api() -> String {
 // not running it is what magpie last set there, so that isn't taken for
 // something else having changed it.
 pub(crate) fn get() -> String {
-    read_default().unwrap_or_else(|_| {
+    let read = || -> Result<String> {
+        let current = read_default()?;
+        let Some((provider_id, model)) = current.split_once(':') else {
+            return Ok(current);
+        };
+        if magpie(&providers()?).is_some_and(|provider| provider.id == provider_id) {
+            return Ok(format!("{}/{}", super::MAGPIE_ID, model));
+        }
+        Ok(current)
+    };
+    read.unwrap_or_else(|_| {
         super::applied::of("alma")
             .field("model")
             .unwrap_or_default()

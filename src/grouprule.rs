@@ -1413,7 +1413,10 @@ fn parse_rule(group: &Group, words: &[String]) -> Result<(Rule, usize, String)> 
         rule.intent.is_empty() || !classifier.is_empty() || !classifier_of(group).is_empty(),
         "a rule with an intent needs the group's classifier, the model that tells which intent a message is: add classifier=<model>, best a small fast one"
     );
-    Ok((rule, at, classifier))
+    // what SaveGroup would say of it: a rule without a condition, or with
+    // an effort that is no level, is refused, not stored
+    let mut cleaned = clean_rules(std::slice::from_ref(&rule), &group.members)?;
+    Ok((cleaned.remove(0), at, classifier))
 }
 
 fn place(group: &Group, word: &str) -> Result<usize> {

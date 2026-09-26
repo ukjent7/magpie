@@ -414,12 +414,13 @@ mod tests {
         grok.apply("model", "magpie/deepseek/pro").unwrap();
         assert!(grok.drift().is_none());
 
+        // the model's table gone altogether: the detail says so
         write(&path, "[models]\ndefault = \"magpie/deepseek/pro\"\n");
         let drift = grok.drift().expect("unwired");
         assert_eq!(drift.kind, "unwired");
         assert_eq!(drift.field, "model");
         assert_eq!(drift.want, "magpie/deepseek/pro");
-        assert!(drift.detail.contains("base_url"), "{}", drift.detail);
+        assert!(drift.detail.contains("gone"), "{}", drift.detail);
         grok.reapply().unwrap();
         assert!(grok.drift().is_none());
         assert!(
@@ -427,6 +428,16 @@ mod tests {
                 .expect("wired back")
                 .contains_key("base_url")
         );
+
+        // the table there, but its gateway swapped behind magpie's back:
+        // the detail names the key that no longer holds
+        let tampered = read(&path).replace(&crate::gateway::v1_url(), "http://127.0.0.1:9/v1");
+        write(&path, &tampered);
+        let drift = grok.drift().expect("unwired");
+        assert_eq!(drift.kind, "unwired");
+        assert!(drift.detail.contains("base_url"), "{}", drift.detail);
+        grok.reapply().unwrap();
+        assert!(grok.drift().is_none());
 
         write(&path, "[models]\ndefault = \"grok-4.6\"\n");
         let drift = grok.drift().expect("replaced");
