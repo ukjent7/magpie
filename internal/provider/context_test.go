@@ -1,10 +1,16 @@
 package provider
 
-import "testing"
+import (
+	"path/filepath"
+	"testing"
+)
 
 func TestContextSetByUser(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	t.Setenv("XDG_CONFIG_HOME", "")
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	// set, not empty: a group saved lists what Devin's CLI reports, and
+	// Devin given an empty one writes its config into the working directory
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 	p := Provider{ID: "a", Contexts: map[string]int{"*": 272000, "big": 1000000}}
 	if got := p.ContextOf("big"); got != 1000000 {
 		t.Errorf("big: %d", got)
