@@ -185,6 +185,30 @@ const PRESETS: &[Preset] = &[
         keys_url: "https://platform.moonshot.cn/console/api-keys",
         ..Preset::EMPTY
     },
+    // a Kimi Code membership's own endpoints (k3, kimi-for-coding …): Kimi
+    // lets members use them from third-party tools, keyed at its console
+    Preset {
+        id: "kimi-code",
+        name: "Kimi Code",
+        icon: "kimi",
+        chat: "https://api.kimi.ai/coding/v1",
+        anthropic: "https://api.kimi.ai/coding",
+        catalog: "kimi-code-plan-global",
+        website: "https://www.kimi.com/code",
+        keys_url: "https://www.kimi.com/code/console",
+        ..Preset::EMPTY
+    },
+    Preset {
+        id: "kimi-code-cn",
+        name: "Kimi Code (China)",
+        icon: "kimi",
+        chat: "https://api.kimi.com/coding/v1",
+        anthropic: "https://api.kimi.com/coding",
+        catalog: "kimi-code-plan-cn",
+        website: "https://www.kimi.com/code",
+        keys_url: "https://www.kimi.com/code/console",
+        ..Preset::EMPTY
+    },
     Preset {
         id: "zhipu",
         name: "Zhipu GLM",
@@ -2902,7 +2926,8 @@ pub(crate) fn with_saved_keys(incoming: &[Provider], saved: &[Provider]) -> Vec<
         .iter()
         .cloned()
         .map(|mut provider| {
-            if provider.key.is_empty() && provider.keys.is_empty()
+            if provider.key.is_empty()
+                && provider.keys.is_empty()
                 && let Some(kept) = here.get(&provider.id)
             {
                 provider.key.clone_from(&kept.key);

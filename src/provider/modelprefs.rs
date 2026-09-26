@@ -206,7 +206,10 @@ pub fn set_efforts(reference: &str, efforts: &[String]) -> Result<()> {
         ensure!(
             all.contains(&level),
             if all.is_empty() {
-                format!("{}/{} has no reasoning levels to choose from", provider.id, model)
+                format!(
+                    "{}/{} has no reasoning levels to choose from",
+                    provider.id, model
+                )
             } else {
                 format!(
                     "{}/{} has no reasoning level {level:?} (it has {})",
@@ -376,7 +379,11 @@ fn list() -> Result<()> {
         if let Some(name) = preferences.names.get(*key).filter(|name| !name.is_empty()) {
             line.push_str(&format!("  {name}"));
         }
-        if let Some(levels) = preferences.efforts.get(*key).filter(|levels| !levels.is_empty()) {
+        if let Some(levels) = preferences
+            .efforts
+            .get(*key)
+            .filter(|levels| !levels.is_empty())
+        {
             line.push_str(&format!("  {}", levels.join("/")));
         }
         println!("{line}");

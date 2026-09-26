@@ -115,9 +115,7 @@ async fn run(cli: Cli) -> Result<()> {
         [command] if command == "ls" || command == "list" => list_agents(true),
         [command] if command == "providers" => crate::provider::list(),
         [command, rest @ ..] if command == "models" => crate::provider::models(rest).await,
-        [command, rest @ ..] if command == "model" => {
-            crate::provider::modelprefs::command(rest)
-        }
+        [command, rest @ ..] if command == "model" => crate::provider::modelprefs::command(rest),
         [command, rest @ ..] if command == "visible" => {
             crate::provider::visible_command(rest).await
         }
