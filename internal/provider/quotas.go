@@ -2,6 +2,7 @@ package provider
 
 import (
 	"context"
+	"slices"
 	"time"
 )
 
@@ -20,7 +21,40 @@ func quotas(ctx context.Context) (subs, plans, balances []SubscriptionQuota) {
 	go func() { b <- KeyBalances(ctx) }()
 	go func() { p <- PlanQuotas(ctx) }()
 	subs = SubscriptionUsage(ctx)
-	return subs, <-p, <-b
+	return subs, notShown(<-p, subs), <-b
+}
+
+// notShown is the plans not already on a subscription's card: a GLM
+// Coding plan read with a Zhipu or Z.ai key is the ZCode account's own
+// when ZCode is signed in to the same account, and shown once, on its
+// card, which counts the calls.
+func notShown(plans, subs []SubscriptionQuota) []SubscriptionQuota {
+	return slices.DeleteFunc(plans, func(p SubscriptionQuota) bool {
+		return slices.ContainsFunc(subs, func(s SubscriptionQuota) bool { return sameAccount(p, s) })
+	})
+}
+
+// sameAccount reports whether two cards are one account read twice: every
+// window of the same length both say when they start again starts again
+// at the same moment, and there is one such at least — a window's reset
+// is when that account first used it.
+func sameAccount(a, b SubscriptionQuota) bool {
+	if a.Error != "" || b.Error != "" {
+		return false
+	}
+	matched := false
+	for _, x := range a.Windows {
+		for _, y := range b.Windows {
+			if x.Aside || y.Aside || x.Span == 0 || x.Span != y.Span || x.ResetsAt == nil || y.ResetsAt == nil {
+				continue
+			}
+			if !x.ResetsAt.Equal(*y.ResetsAt) {
+				return false
+			}
+			matched = true
+		}
+	}
+	return matched
 }
 
 // Quota is one account's or key's allowance as magpie quota --json and
