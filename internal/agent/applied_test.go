@@ -125,6 +125,7 @@ func TestDriftUnwiredEveryAgent(t *testing.T) {
 	managed := claudeManaged
 	claudeManaged = func() string { return filepath.Join(home, "managed-settings.json") }
 	t.Cleanup(func() { claudeManaged = managed })
+	almaApp := startAlma(t) // Alma keeps its providers in the app
 	for _, a := range All() {
 		if a.Check == nil {
 			continue
@@ -162,6 +163,7 @@ func TestDriftUnwiredEveryAgent(t *testing.T) {
 				}
 				return nil
 			})
+			n += almaApp.repoint(gateway.URL(), "http://127.0.0.1:9")
 			if n == 0 {
 				t.Fatal("no file holds the gateway's URL")
 			}

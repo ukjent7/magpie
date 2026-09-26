@@ -21,6 +21,7 @@ func TestAgentOf(t *testing.T) {
 		"pi":                                       "pi",
 		"grok-pager/0.2.1":                         "grok",
 		"ZCode/3.10.1":                             "zcode",
+		"Alma/1.2.0":                               "alma",
 		"":                                         "other",
 	}
 	for ua, want := range cases {

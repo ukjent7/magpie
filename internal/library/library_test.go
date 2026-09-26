@@ -92,6 +92,17 @@ func TestTargets(t *testing.T) {
 	}
 }
 
+// Alma is wired through its API for models only: the library has no place
+// in it, and says so rather than recording it as given anything.
+func TestTakesRefusesAlma(t *testing.T) {
+	sandbox(t)
+	for _, kind := range []string{"instructions", "mcp", "skills"} {
+		if id, err := Takes("alma", kind); err == nil || !strings.Contains(err.Error(), "Alma has no user-wide place") {
+			t.Errorf("%s: %q %v", kind, id, err)
+		}
+	}
+}
+
 // Every format writes a server so that reading it back gives it again, and
 // taking it out leaves the file as the user had it.
 func TestServerEveryFormat(t *testing.T) {
