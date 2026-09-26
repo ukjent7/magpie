@@ -217,7 +217,8 @@ pub fn anthropic(body: &Value) -> Request {
                     parts.push(text_part(text));
                 }
             }
-            Some(Value::Array(blocks)) => for block in blocks {
+            Some(Value::Array(blocks)) => {
+                for block in blocks {
                 match word(block, "type").as_str() {
                     "text" => parts.push(text_part(word(block, "text"))),
                     "image" => {
@@ -253,7 +254,8 @@ pub fn anthropic(body: &Value) -> Request {
                     }),
                     _ => {}
                 }
-            },
+                }
+            }
             _ => {}
         }
         r.messages.push(Message {
