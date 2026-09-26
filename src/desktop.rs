@@ -44,6 +44,7 @@ enum Page {
     Agents,
     Providers,
     Profiles,
+    Groups,
 }
 
 #[derive(Clone, Default)]
@@ -87,6 +88,13 @@ enum Action {
     ApplyProfile(String),
     ConfirmProfileRemoval(String),
     RemoveProfile(String),
+    SelectGroup(usize),
+    CreateGroup,
+    EditGroup(usize),
+    SaveGroup(provider::Group),
+    ConfirmGroupRemoval(String),
+    RemoveGroup(String),
+    RestoreGroup(String),
     Quit,
 }
 
@@ -142,6 +150,12 @@ struct App {
     profile_name_draft: String,
     confirm_profile_apply: Option<String>,
     confirm_profile_removal: Option<String>,
+    groups: Vec<provider::Group>,
+    group_models: Vec<provider::ModelEntry>,
+    selected_group: usize,
+    group_form_open: bool,
+    group_draft: Option<provider::Group>,
+    confirm_group_removal: Option<String>,
     model_choices: Vec<ModelChoice>,
     signals: Signals,
     _tray: Option<TrayIcon>,
@@ -238,6 +252,14 @@ impl App {
                 Vec::new()
             }
         };
+        let (groups, group_models) = match provider::desktop_group_data() {
+            Ok(data) => data,
+            Err(error) => {
+                status = format!("Could not load routing groups: {error:#}");
+                status_ok = false;
+                (Vec::new(), Vec::new())
+            }
+        };
         let mut app = Self {
             rows,
             selected: 0,
@@ -258,6 +280,12 @@ impl App {
             profile_name_draft: String::new(),
             confirm_profile_apply: None,
             confirm_profile_removal: None,
+            groups,
+            group_models,
+            selected_group: 0,
+            group_form_open: false,
+            group_draft: None,
+            confirm_group_removal: None,
             model_choices,
             signals,
             _tray: tray,
@@ -326,6 +354,12 @@ impl App {
                 .clicked()
             {
                 self.page = Page::Profiles;
+            }
+            if ui
+                .selectable_label(self.page == Page::Groups, "Groups")
+                .clicked()
+            {
+                self.page = Page::Groups;
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.button("Quit").clicked() {
@@ -449,6 +483,48 @@ impl App {
                     .clicked()
                 {
                     actions.push(Action::SelectProfile(index));
+                }
+            }
+        });
+    }
+
+    fn render_group_sidebar(&self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
+        ui.horizontal(|ui| {
+            ui.heading("Groups");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .small_button("+")
+                    .on_hover_text("Create a routing group")
+                    .clicked()
+                {
+                    actions.push(Action::CreateGroup);
+                }
+            });
+        });
+        ui.add_space(8.0);
+        if self.groups.is_empty() {
+            ui.label("No routing groups yet.");
+            ui.add_space(8.0);
+            if ui.button("Create a group").clicked() {
+                actions.push(Action::CreateGroup);
+            }
+            return;
+        }
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            for (index, group) in self.groups.iter().enumerate() {
+                let state = if group.hidden {
+                    "removed"
+                } else if group.auto {
+                    "discovered"
+                } else {
+                    "custom"
+                };
+                let label = format!("{}\n{} models · {state}", group.name, group.members.len());
+                if ui
+                    .selectable_label(self.selected_group == index, label)
+                    .clicked()
+                {
+                    actions.push(Action::SelectGroup(index));
                 }
             }
         });
@@ -611,6 +687,98 @@ impl App {
             }
             if ui.button("Delete profile").clicked() {
                 actions.push(Action::ConfirmProfileRemoval(name.clone()));
+            }
+        });
+    }
+
+    fn render_group_details(&self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
+        let Some(group) = self.groups.get(self.selected_group) else {
+            ui.vertical_centered(|ui| {
+                ui.add_space(80.0);
+                ui.heading("Create a routing group");
+                ui.label("Combine provider models behind one gateway model name.");
+                if ui.button("Create group").clicked() {
+                    actions.push(Action::CreateGroup);
+                }
+            });
+            return;
+        };
+
+        ui.horizontal(|ui| {
+            ui.heading(&group.name);
+            if group.auto {
+                ui.label(
+                    RichText::new("Discovered")
+                        .small()
+                        .color(ui.visuals().weak_text_color()),
+                );
+            }
+            if group.hidden {
+                ui.label(
+                    RichText::new("Removed")
+                        .small()
+                        .color(ui.visuals().weak_text_color()),
+                );
+            }
+        });
+        ui.label(
+            RichText::new(format!("group/{}", group.id))
+                .small()
+                .monospace()
+                .color(ui.visuals().weak_text_color()),
+        );
+        ui.add_space(8.0);
+        ui.horizontal_wrapped(|ui| {
+            ui.label(format!("Routing · {}", group_routing_name(&group.routing)));
+            ui.separator();
+            ui.label(format!(
+                "Affinity · {}",
+                group_affinity_name(&group.affinity)
+            ));
+            ui.separator();
+            ui.label(format!("{} models", group.members.len()));
+        });
+        if group.auto && !group.hidden {
+            ui.label(
+                RichText::new("Saving edits turns this discovered group into a custom group.")
+                    .small()
+                    .color(ui.visuals().weak_text_color()),
+            );
+        }
+        ui.add_space(10.0);
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            for member in &group.members {
+                let label = self
+                    .group_models
+                    .iter()
+                    .find(|entry| entry.id == *member)
+                    .map_or_else(
+                        || format!("{member}  ·  currently unavailable"),
+                        |entry| {
+                            let model_name = if entry.model.name.is_empty() {
+                                &entry.model.id
+                            } else {
+                                &entry.model.name
+                            };
+                            format!("{}  ·  {model_name}", entry.provider_name)
+                        },
+                    );
+                ui.label(label);
+            }
+        });
+        ui.add_space(14.0);
+        ui.horizontal(|ui| {
+            if group.hidden {
+                if ui.button("Restore group").clicked() {
+                    actions.push(Action::RestoreGroup(group.id.clone()));
+                }
+            } else {
+                if ui.button("Edit group").clicked() {
+                    actions.push(Action::EditGroup(self.selected_group));
+                }
+                if ui.button("Remove group").clicked() {
+                    actions.push(Action::ConfirmGroupRemoval(group.id.clone()));
+                }
             }
         });
     }
@@ -832,6 +1000,180 @@ impl App {
             if !open || should_close {
                 self.confirm_profile_removal = None;
             }
+        }
+    }
+
+    fn render_group_form(&mut self, ctx: &egui::Context, actions: &mut Vec<Action>) {
+        if !self.group_form_open {
+            return;
+        }
+        let Some(draft) = self.group_draft.as_mut() else {
+            self.group_form_open = false;
+            return;
+        };
+        let title = if draft.id.is_empty() {
+            "New routing group"
+        } else {
+            "Edit routing group"
+        };
+        let models = &self.group_models;
+        let mut open = true;
+        let mut should_close = false;
+        egui::Window::new(title)
+            .default_width(620.0)
+            .collapsible(false)
+            .resizable(true)
+            .open(&mut open)
+            .show(ctx, |ui| {
+                if !draft.id.is_empty() {
+                    ui.label(
+                        RichText::new(format!("group/{}", draft.id))
+                            .small()
+                            .monospace()
+                            .color(ui.visuals().weak_text_color()),
+                    );
+                }
+                if draft.auto {
+                    ui.label("Saving edits makes this discovered group a custom group.");
+                }
+                ui.label("Group name");
+                ui.text_edit_singleline(&mut draft.name);
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    ui.label("Routing");
+                    egui::ComboBox::from_id_salt("group-routing")
+                        .selected_text(group_routing_name(&draft.routing))
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut draft.routing, String::new(), "Smart");
+                            ui.selectable_value(&mut draft.routing, "order".to_owned(), "Order");
+                            ui.selectable_value(&mut draft.routing, "rotate".to_owned(), "Rotate");
+                            ui.selectable_value(
+                                &mut draft.routing,
+                                "usage".to_owned(),
+                                "Least used",
+                            );
+                        });
+                    ui.add_space(12.0);
+                    ui.label("Affinity");
+                    egui::ComboBox::from_id_salt("group-affinity")
+                        .selected_text(group_affinity_name(&draft.affinity))
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut draft.affinity, String::new(), "Auto");
+                            ui.selectable_value(
+                                &mut draft.affinity,
+                                "session".to_owned(),
+                                "Session",
+                            );
+                            ui.selectable_value(&mut draft.affinity, "turn".to_owned(), "Turn");
+                            ui.selectable_value(&mut draft.affinity, "off".to_owned(), "Off");
+                        });
+                });
+
+                ui.add_space(10.0);
+                ui.label(format!("Models · {} selected", draft.members.len()));
+                if models.is_empty() {
+                    ui.label("No available models. Add a provider and fetch its models first.");
+                } else {
+                    egui::ScrollArea::vertical()
+                        .max_height(300.0)
+                        .show(ui, |ui| {
+                            for entry in models {
+                                let model_name = if entry.model.name.is_empty() {
+                                    &entry.model.id
+                                } else {
+                                    &entry.model.name
+                                };
+                                let label = format!(
+                                    "{}  ·  {}  ·  {}",
+                                    entry.provider_name, model_name, entry.id
+                                );
+                                let mut selected = draft.members.contains(&entry.id);
+                                let changed = ui
+                                    .push_id(&entry.id, |ui| ui.checkbox(&mut selected, label))
+                                    .inner
+                                    .changed();
+                                if changed && selected {
+                                    draft.members.push(entry.id.clone());
+                                } else if changed {
+                                    draft.members.retain(|member| member != &entry.id);
+                                }
+                            }
+                        });
+                }
+
+                let unavailable = draft
+                    .members
+                    .iter()
+                    .filter(|member| !models.iter().any(|entry| &entry.id == *member))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                if !unavailable.is_empty() {
+                    ui.add_space(6.0);
+                    ui.label("Unavailable models are skipped until a provider serves them again:");
+                    for member in unavailable {
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new(&member).small().monospace());
+                            if ui.small_button("Remove").clicked() {
+                                draft.members.retain(|saved| saved != &member);
+                            }
+                        });
+                    }
+                }
+
+                ui.add_space(12.0);
+                ui.horizontal(|ui| {
+                    let valid = !draft.name.trim().is_empty() && !draft.members.is_empty();
+                    if ui
+                        .add_enabled(valid, egui::Button::new("Save group"))
+                        .clicked()
+                    {
+                        actions.push(Action::SaveGroup(draft.clone()));
+                    }
+                    if ui.button("Cancel").clicked() {
+                        should_close = true;
+                    }
+                });
+            });
+        if should_close || !open {
+            self.group_form_open = false;
+            self.group_draft = None;
+        }
+    }
+
+    fn render_group_removal_confirmation(
+        &mut self,
+        ctx: &egui::Context,
+        actions: &mut Vec<Action>,
+    ) {
+        let Some(id) = self.confirm_group_removal.clone() else {
+            return;
+        };
+        let name = self
+            .groups
+            .iter()
+            .find(|group| group.id == id)
+            .map_or(id.as_str(), |group| group.name.as_str())
+            .to_owned();
+        let mut open = true;
+        let mut should_close = false;
+        egui::Window::new("Remove routing group?")
+            .collapsible(false)
+            .resizable(false)
+            .open(&mut open)
+            .show(ctx, |ui| {
+                ui.label(format!("Remove {name} from the gateway?"));
+                ui.add_space(12.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Remove group").clicked() {
+                        actions.push(Action::RemoveGroup(id.clone()));
+                    }
+                    if ui.button("Cancel").clicked() {
+                        should_close = true;
+                    }
+                });
+            });
+        if should_close || !open {
+            self.confirm_group_removal = None;
         }
     }
 
@@ -1138,6 +1480,94 @@ impl App {
                     ),
                 }
             }
+            Action::SelectGroup(index) => {
+                self.selected_group = index.min(self.groups.len().saturating_sub(1));
+            }
+            Action::CreateGroup => {
+                self.group_draft = Some(provider::Group::default());
+                self.group_form_open = true;
+            }
+            Action::EditGroup(index) => {
+                if let Some(group) = self.groups.get(index).filter(|group| !group.hidden) {
+                    self.group_draft = Some(group.clone());
+                    self.group_form_open = true;
+                }
+            }
+            Action::SaveGroup(group) => {
+                let id = group.id.clone();
+                let saved = if id.is_empty() {
+                    provider::add_desktop_group(group)
+                } else {
+                    provider::save_group(group).map(|()| id)
+                };
+                match saved {
+                    Ok(id) => {
+                        self.group_form_open = false;
+                        self.group_draft = None;
+                        match self.reload_group_data() {
+                            Ok(()) => {
+                                self.selected_group = self
+                                    .groups
+                                    .iter()
+                                    .position(|group| group.id == id)
+                                    .unwrap_or(self.selected_group);
+                                self.set_status(&format!("Saved group {id}"), true);
+                            }
+                            Err(error) => self.set_status(
+                                &format!("Group saved, but the list could not reload: {error:#}"),
+                                false,
+                            ),
+                        }
+                    }
+                    Err(error) => {
+                        self.set_status(&format!("Could not save group: {error:#}"), false)
+                    }
+                }
+            }
+            Action::ConfirmGroupRemoval(id) => self.confirm_group_removal = Some(id),
+            Action::RemoveGroup(id) => {
+                self.confirm_group_removal = None;
+                match provider::delete_group(&id) {
+                    Ok(()) => match self.reload_group_data() {
+                        Ok(()) => {
+                            self.selected_group = self
+                                .groups
+                                .iter()
+                                .position(|group| group.id == id)
+                                .unwrap_or_else(|| {
+                                    self.selected_group.min(self.groups.len().saturating_sub(1))
+                                });
+                            self.set_status(&format!("Removed group {id}"), true);
+                        }
+                        Err(error) => self.set_status(
+                            &format!("Group removed, but the list could not reload: {error:#}"),
+                            false,
+                        ),
+                    },
+                    Err(error) => {
+                        self.set_status(&format!("Could not remove group {id}: {error:#}"), false)
+                    }
+                }
+            }
+            Action::RestoreGroup(id) => match provider::restore_group(&id) {
+                Ok(()) => match self.reload_group_data() {
+                    Ok(()) => {
+                        self.selected_group = self
+                            .groups
+                            .iter()
+                            .position(|group| group.id == id)
+                            .unwrap_or(self.selected_group);
+                        self.set_status(&format!("Restored group {id}"), true);
+                    }
+                    Err(error) => self.set_status(
+                        &format!("Group restored, but the list could not reload: {error:#}"),
+                        false,
+                    ),
+                },
+                Err(error) => {
+                    self.set_status(&format!("Could not restore group {id}: {error:#}"), false)
+                }
+            },
             Action::Quit => {
                 self.exiting = true;
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -1180,10 +1610,19 @@ impl App {
 
     fn reload_provider_data(&mut self) -> Result<()> {
         self.providers = provider::desktop_providers()?;
-        self.model_choices = model_choices()?;
         self.selected_provider = self
             .selected_provider
             .min(self.providers.len().saturating_sub(1));
+        self.reload_group_data()?;
+        Ok(())
+    }
+
+    fn reload_group_data(&mut self) -> Result<()> {
+        let (groups, models) = provider::desktop_group_data()?;
+        self.model_choices = model_choices_for(&models, &groups);
+        self.groups = groups;
+        self.group_models = models;
+        self.selected_group = self.selected_group.min(self.groups.len().saturating_sub(1));
         Ok(())
     }
 
@@ -1333,6 +1772,7 @@ impl eframe::App for App {
                         Page::Agents => self.selected,
                         Page::Providers => self.selected_provider,
                         Page::Profiles => self.selected_profile,
+                        Page::Groups => self.selected_group,
                     };
                     ui.allocate_ui_with_layout(
                         egui::vec2(228.0, content_height),
@@ -1341,12 +1781,14 @@ impl eframe::App for App {
                             Page::Agents => self.render_sidebar(ui, &mut selected),
                             Page::Providers => self.render_provider_sidebar(ui, &mut actions),
                             Page::Profiles => self.render_profile_sidebar(ui, &mut actions),
+                            Page::Groups => self.render_group_sidebar(ui, &mut actions),
                         },
                     );
                     match self.page {
                         Page::Agents => self.selected = selected,
                         Page::Providers => self.selected_provider = selected,
                         Page::Profiles => self.selected_profile = selected,
+                        Page::Groups => self.selected_group = selected,
                     }
                     ui.separator();
                     ui.allocate_ui_with_layout(
@@ -1356,6 +1798,7 @@ impl eframe::App for App {
                             Page::Agents => self.render_agent(ui, &mut actions),
                             Page::Providers => self.render_provider_details(ui, &mut actions),
                             Page::Profiles => self.render_profile_details(ui, &mut actions),
+                            Page::Groups => self.render_group_details(ui, &mut actions),
                         },
                     );
                 });
@@ -1379,6 +1822,8 @@ impl eframe::App for App {
         self.render_provider_form(ui.ctx(), &mut actions);
         self.render_remove_confirmation(ui.ctx(), &mut actions);
         self.render_profile_dialogs(ui.ctx(), &mut actions);
+        self.render_group_form(ui.ctx(), &mut actions);
+        self.render_group_removal_confirmation(ui.ctx(), &mut actions);
         for action in actions {
             self.apply_action(action, ui.ctx());
         }
@@ -1460,8 +1905,33 @@ fn values_for(current: &agent::Agent) -> Result<BTreeMap<&'static str, String>> 
     current.values().map(|values| values.into_iter().collect())
 }
 
+fn group_routing_name(routing: &str) -> &'static str {
+    match routing {
+        "order" => "Order",
+        "rotate" => "Rotate",
+        "usage" => "Least used",
+        _ => "Smart",
+    }
+}
+
+fn group_affinity_name(affinity: &str) -> &'static str {
+    match affinity {
+        "session" => "Session",
+        "turn" => "Turn",
+        "off" => "Off",
+        _ => "Auto",
+    }
+}
+
 fn model_choices() -> Result<Vec<ModelChoice>> {
-    let entries = provider::available_model_entries()?;
+    let (groups, entries) = provider::desktop_group_data()?;
+    Ok(model_choices_for(&entries, &groups))
+}
+
+fn model_choices_for(
+    entries: &[provider::ModelEntry],
+    groups: &[provider::Group],
+) -> Vec<ModelChoice> {
     let ready_models = entries
         .iter()
         .map(|entry| entry.id.as_str())
@@ -1478,7 +1948,7 @@ fn model_choices() -> Result<Vec<ModelChoice>> {
             provider: entry.provider_name.clone(),
         })
         .collect::<Vec<_>>();
-    for group in provider::groups()?.into_iter().filter(|group| {
+    for group in groups.iter().filter(|group| {
         !group.hidden
             && group
                 .members
@@ -1491,5 +1961,5 @@ fn model_choices() -> Result<Vec<ModelChoice>> {
             provider: "routing group".to_owned(),
         });
     }
-    Ok(choices)
+    choices
 }

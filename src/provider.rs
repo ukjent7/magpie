@@ -729,16 +729,18 @@ pub(crate) fn gateway_catalog() -> Result<GatewayCatalog> {
 }
 
 pub fn available_model_entries() -> Result<Vec<ModelEntry>> {
-    Ok(model_entries(&providers_with_local_accounts(
-        load()?.providers,
-    )))
+    Ok(desktop_group_data()?.1)
 }
 
 pub fn groups() -> Result<Vec<Group>> {
+    Ok(desktop_group_data()?.0)
+}
+
+pub fn desktop_group_data() -> Result<(Vec<Group>, Vec<ModelEntry>)> {
     let mut file = load()?;
     file.providers = providers_with_local_accounts(file.providers);
     let entries = model_entries(&file.providers);
-    Ok(groups_in(&file.groups, &entries))
+    Ok((groups_in(&file.groups, &entries), entries))
 }
 
 pub fn desktop_presets() -> Vec<DesktopPreset> {
@@ -867,6 +869,36 @@ pub fn remove_desktop_provider(id: &str) -> Result<()> {
 pub async fn refresh_desktop_models(id: &str) -> Result<usize> {
     let provider = find(id)?;
     refresh_models(&provider, false).await
+}
+
+pub fn add_desktop_group(mut group: Group) -> Result<String> {
+    group.name = group.name.trim().to_owned();
+    ensure!(!group.name.is_empty(), "group name is empty");
+    let base = slug(&group.name);
+    let base = if base.is_empty() {
+        "group".to_owned()
+    } else {
+        base
+    };
+    let groups = groups()?;
+    group.id = if groups
+        .iter()
+        .any(|existing| existing.id.eq_ignore_ascii_case(&base))
+    {
+        (2_u32..)
+            .map(|suffix| format!("{base}-{suffix}"))
+            .find(|candidate| {
+                groups
+                    .iter()
+                    .all(|existing| !existing.id.eq_ignore_ascii_case(candidate))
+            })
+            .context("could not generate a unique group id")?
+    } else {
+        base
+    };
+    let id = group.id.clone();
+    save_group(group)?;
+    Ok(id)
 }
 
 pub fn save_group(mut group: Group) -> Result<()> {
