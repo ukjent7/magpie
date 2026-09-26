@@ -674,6 +674,7 @@ async fn forward(
             );
         }
     };
+    let (bytes, redacted) = redact_request(&bytes);
     let body: Value = match serde_json::from_slice(&bytes) {
         Ok(body) => body,
         Err(_) => {
@@ -1030,12 +1031,18 @@ async fn forward(
     ) && !streaming
         && response.status().is_success()
     {
-        return codex_non_stream_response(response, affinity_record, usage_request).await;
+        return finish_redact(
+            codex_non_stream_response(response, affinity_record, usage_request).await,
+            redacted,
+        );
     }
     let translated = upstream_protocol != protocol;
     if response.status().is_success() {
         if !translated {
-            return relay(response, upstream_protocol, affinity_record, usage_request);
+            return finish_redact(
+                relay(response, upstream_protocol, affinity_record, usage_request),
+                redacted,
+            );
         }
     } else {
         let provider_name = provider.name.clone();
@@ -1060,13 +1067,16 @@ async fn forward(
                 .is_some_and(|media_type| media_type.trim() == "text/event-stream")
         });
     if streaming && upstream_sse {
-        return translated_stream_response(
-            response,
-            upstream_protocol,
-            protocol,
-            &model,
-            affinity_record,
-            usage_request,
+        return finish_redact(
+            translated_stream_response(
+                response,
+                upstream_protocol,
+                protocol,
+                &model,
+                affinity_record,
+                usage_request,
+            ),
+            redacted,
         );
     }
 
@@ -1170,7 +1180,10 @@ async fn forward(
             }
         }
     };
-    translated_response(status, &upstream_headers, bytes, streaming)
+    finish_redact(
+        translated_response(status, &upstream_headers, bytes, streaming),
+        redacted,
+    )
 }
 
 struct UpstreamRequest<'a> {
@@ -2315,6 +2328,73 @@ async fn upstream_error_response(
             .headers_mut()
             .insert(header::CONTENT_TYPE, content_type.clone());
     }
+    response
+}
+
+// redact_request masks a request's secrets, as the settings say, before it
+// goes to a vendor; finish_redact wraps the response so what the vendor
+// answers has them back. Nothing masked, nothing wrapped.
+fn redact_request(bytes: &[u8]) -> (Vec<u8>, bool) {
+    let settings = crate::settings::load();
+    if !settings.redact && !settings.redact_personal && settings.redact_words.is_empty() {
+        return (bytes.to_vec(), false);
+    }
+    if !crate::redact::known() {
+        crate::redact::set_key_path(crate::settings::path().with_file_name("redact.key"));
+    }
+    let options = crate::redact::Options {
+        secrets: settings.redact,
+        personal: settings.redact_personal,
+        words: settings.redact_words.clone(),
+    };
+    let (masked, count) = crate::redact::mask_json(bytes, &options);
+    (masked, count > 0)
+}
+
+fn finish_redact(response: Response, redacted: bool) -> Response {
+    if !redacted {
+        return response;
+    }
+    let content_type = response
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+    let content_encoding = response
+        .headers()
+        .get(header::CONTENT_ENCODING)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+    response.headers_mut().remove(header::CONTENT_LENGTH);
+    let status = response.status();
+    let headers = response.headers().clone();
+    let writer = std::sync::Arc::new(std::sync::Mutex::new(crate::redact::Writer::new(
+        content_type.as_deref(),
+        content_encoding.as_deref(),
+    )));
+    let stream = response
+        .into_body()
+        .into_data_stream()
+        .map(move |chunk| match chunk {
+            Ok(bytes) => {
+                let out = writer
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .write(&bytes);
+                Ok(axum::body::Bytes::from(out))
+            }
+            Err(error) => Err(error),
+        })
+        .chain(stream::once(async move {
+            let out = writer
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .finish();
+            Ok::<_, axum::Error>(axum::body::Bytes::from(out))
+        }));
+    let mut response = Response::new(Body::from_stream(stream));
+    *response.status_mut() = status;
+    *response.headers_mut() = headers;
     response
 }
 

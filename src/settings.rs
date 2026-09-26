@@ -11,6 +11,17 @@ pub struct Settings {
     pub tray: String,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub proxy: String,
+    // Redact keeps secrets in what agents send (API keys, private keys,
+    // tokens, passwords) from the vendors behind magpie: they go as
+    // placeholders, and come back as they were. RedactPersonal does the
+    // same for emails, phone numbers and ID and bank card numbers, and
+    // RedactWords for the user's own words.
+    #[serde(skip_serializing_if = "is_false")]
+    pub redact: bool,
+    #[serde(skip_serializing_if = "is_false")]
+    pub redact_personal: bool,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub redact_words: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub agent_order: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -35,6 +46,9 @@ impl Default for Settings {
             agents_hidden: Vec::new(),
             agents_shown: Vec::new(),
             visible: BTreeMap::new(),
+            redact: false,
+            redact_personal: false,
+            redact_words: Vec::new(),
         }
     }
 }
@@ -83,6 +97,10 @@ pub fn load() -> Settings {
 
 pub fn save(settings: &Settings) -> Result<()> {
     write_json(&path(), settings)
+}
+
+fn is_false(value: &bool) -> bool {
+    !value
 }
 
 pub fn write_json(path: &std::path::Path, value: &impl Serialize) -> Result<()> {

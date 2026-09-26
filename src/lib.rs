@@ -26,6 +26,7 @@ mod netproxy;
 pub mod profile;
 pub mod provider;
 mod quota;
+mod redact;
 pub mod settings;
 mod translation;
 pub mod tui;
