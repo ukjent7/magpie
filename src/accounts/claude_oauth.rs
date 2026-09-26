@@ -311,6 +311,63 @@ async fn exchange_code(
     })
 }
 
+// renewed is what a sign-in comes to when its token is traded in: a refresh
+// rotates both tokens, so the whole pair is written again.
+pub(super) struct Renewed {
+    pub access: String,
+    pub refresh: Option<String>,
+    // when the new token runs out, as Claude Code keeps it: milliseconds since
+    // the epoch
+    pub expires_at: Option<i64>,
+}
+
+// renew trades a refresh token for the next pair, which is what Claude Code
+// itself does as its token runs down — and why magpie, answering with the same
+// sign-in, has to keep up with it.
+pub(super) async fn renew(refresh_token: &str) -> Result<Renewed> {
+    let client = reqwest::Client::new();
+    let mut response = client
+        .post(TOKEN_URL)
+        .header(header::ACCEPT, "application/json")
+        .json(&json!({
+            "grant_type": "refresh_token",
+            "refresh_token": refresh_token,
+            "client_id": CLIENT_ID,
+        }))
+        .send()
+        .await
+        .context("ask Claude Code for a new token")?;
+    let status = response.status();
+    let body = read_limited(&mut response).await?;
+    let traded = serde_json::from_slice::<Renewal>(&body)
+        .ok()
+        .filter(|traded| status == StatusCode::OK && !traded.access_token.is_empty());
+    let Some(traded) = traded else {
+        // a refusal is the sign-in being gone, where no answer may yet mean a
+        // proxy or a hiccup in the way
+        if status == StatusCode::BAD_REQUEST || status == StatusCode::UNAUTHORIZED {
+            bail!("Claude Code is signed out (token refresh failed); run claude auth login");
+        }
+        bail!(
+            "Claude Code token refresh failed (HTTP {})",
+            status.as_u16()
+        );
+    };
+    Ok(Renewed {
+        access: traded.access_token,
+        refresh: (!traded.refresh_token.is_empty()).then_some(traded.refresh_token),
+        expires_at: (traded.expires_in > 0).then(|| expires_at(traded.expires_in)),
+    })
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct Renewal {
+    access_token: String,
+    refresh_token: String,
+    expires_in: i64,
+}
+
 async fn fetch_profile(client: &reqwest::Client, token: &str) -> Result<ProfileResponse> {
     let mut response = client
         .get(PROFILE_URL)
