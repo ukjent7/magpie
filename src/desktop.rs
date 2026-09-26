@@ -69,11 +69,11 @@ pub async fn command(start_hidden: bool) -> Result<()> {
         "magpie",
         native_options,
         Box::new(move |creation| {
-            App::new(creation.egui_ctx.clone(), start_hidden)
-                .map(|app| Box::new(app) as Box<dyn eframe::App>)
+            let app = App::new(creation.egui_ctx.clone(), start_hidden)?;
+            Ok(Box::new(app))
         }),
     )
-    .context("run desktop interface");
+    .map_err(|error| anyhow::anyhow!("run desktop interface: {error:?}"));
 
     let gateway_result = match gateway {
         Some(gateway) => gateway.shutdown().await,
@@ -266,7 +266,7 @@ impl App {
         };
 
         ui.horizontal(|ui| {
-            ui.heading(&row.agent.spec.name);
+            ui.heading(row.agent.spec.name);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.label(
                     RichText::new("Detected")
@@ -584,7 +584,7 @@ fn create_tray(ctx: &egui::Context, signals: &Signals) -> Result<TrayIcon> {
     let open_signal = Arc::clone(&signals.open);
     let quit_signal = Arc::clone(&signals.quit);
     let ctx = ctx.clone();
-    MenuEvent::set_event_handler(Some(move |event| {
+    MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
         if event.id() == &open_id {
             open_signal.store(true, Ordering::Relaxed);
             ctx.request_repaint();
