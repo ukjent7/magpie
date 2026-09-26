@@ -443,6 +443,31 @@ pub struct ModelEntry {
     pub icon: String,
 }
 
+#[derive(Clone, Debug)]
+pub struct DesktopProvider {
+    pub id: String,
+    pub name: String,
+    pub endpoint: String,
+    pub protocols: Vec<String>,
+    pub active_keys: usize,
+    pub has_key: bool,
+    pub key_required: bool,
+    pub account: bool,
+    pub routing: String,
+    pub affinity: String,
+    pub hidden: bool,
+    pub models: Vec<String>,
+    pub model_count: usize,
+}
+
+#[derive(Clone, Debug)]
+pub struct DesktopPreset {
+    pub id: String,
+    pub name: String,
+    pub endpoint: String,
+    pub key_required: bool,
+}
+
 #[derive(Clone, Default, Deserialize, Serialize)]
 #[serde(default, rename_all = "camelCase")]
 struct KeyAccount {
@@ -714,6 +739,134 @@ pub fn groups() -> Result<Vec<Group>> {
     file.providers = providers_with_local_accounts(file.providers);
     let entries = model_entries(&file.providers);
     Ok(groups_in(&file.groups, &entries))
+}
+
+pub fn desktop_presets() -> Vec<DesktopPreset> {
+    PRESETS
+        .iter()
+        .map(|preset| DesktopPreset {
+            id: preset.id.to_owned(),
+            name: preset.name.to_owned(),
+            endpoint: [preset.chat, preset.responses, preset.anthropic]
+                .into_iter()
+                .find(|endpoint| !endpoint.is_empty())
+                .unwrap_or_default()
+                .to_owned(),
+            key_required: preset.kind != PresetKind::Local,
+        })
+        .collect()
+}
+
+pub fn desktop_providers() -> Result<Vec<DesktopProvider>> {
+    providers_with_local_accounts(load()?.providers)
+        .into_iter()
+        .map(|provider| {
+            let exposed = crate::catalog::exposed_models(
+                &provider.id,
+                provider.catalog_id(),
+                &provider.models,
+            );
+            let model_count = exposed.len();
+            let models = exposed
+                .into_iter()
+                .take(8)
+                .map(|model| {
+                    if model.name.is_empty() {
+                        model.id
+                    } else {
+                        model.name
+                    }
+                })
+                .collect();
+            let protocols = [
+                ("Chat Completions", &provider.chat),
+                ("Responses", &provider.responses),
+                ("Anthropic Messages", &provider.anthropic),
+            ]
+            .into_iter()
+            .filter(|(_, endpoint)| !endpoint.is_empty())
+            .map(|(protocol, _)| protocol.to_owned())
+            .collect();
+            let endpoint = [&provider.chat, &provider.responses, &provider.anthropic]
+                .into_iter()
+                .find(|endpoint| !endpoint.is_empty())
+                .cloned()
+                .unwrap_or_default();
+            let has_key = !provider.key.is_empty()
+                || provider
+                    .keys
+                    .iter()
+                    .any(|key| !key.key.is_empty() && !key.off);
+            let active_keys = usize::from(!provider.key.is_empty())
+                + provider
+                    .keys
+                    .iter()
+                    .filter(|key| !key.key.is_empty() && !key.off)
+                    .count();
+            let key_required = !provider.is_local() && provider.account.is_none();
+            let account = provider.account.is_some();
+            let routing = if provider.routing.is_empty() {
+                "smart".to_owned()
+            } else {
+                provider.routing.clone()
+            };
+            let affinity = affinity_name(&provider.affinity).to_owned();
+
+            Ok(DesktopProvider {
+                id: provider.id,
+                name: provider.name,
+                endpoint,
+                protocols,
+                active_keys,
+                has_key,
+                key_required,
+                account,
+                routing,
+                affinity,
+                hidden: provider.hidden,
+                models,
+                model_count,
+            })
+        })
+        .collect()
+}
+
+pub fn add_desktop_preset(id: &str, key: &str) -> Result<String> {
+    let preset = find_preset(id).with_context(|| format!("unknown provider preset {id:?}"))?;
+    let mut provider = preset.provider();
+    provider.key = key.trim().to_owned();
+    Ok(store_new_provider(provider)?.id)
+}
+
+pub fn add_desktop_custom(name: &str, endpoint: &str, key: &str) -> Result<String> {
+    let provider = Provider {
+        name: name.trim().to_owned(),
+        chat: endpoint.trim().to_owned(),
+        key: key.trim().to_owned(),
+        ..Provider::default()
+    };
+    Ok(store_new_provider(provider)?.id)
+}
+
+pub fn set_desktop_key(id: &str, key: &str) -> Result<()> {
+    ensure!(!key.trim().is_empty(), "provider key is empty");
+    let mut file = load()?;
+    let provider = find_provider_mut(&mut file, id)?;
+    ensure!(
+        provider.account.is_none(),
+        "signed-in provider keys are managed by the agent"
+    );
+    provider.key = key.trim().to_owned();
+    store(file)
+}
+
+pub fn remove_desktop_provider(id: &str) -> Result<()> {
+    remove_provider_data(id).map(|_| ())
+}
+
+pub async fn refresh_desktop_models(id: &str) -> Result<usize> {
+    let provider = find(id)?;
+    refresh_models(&provider, false).await
 }
 
 pub fn save_group(mut group: Group) -> Result<()> {
@@ -1337,8 +1490,18 @@ fn add(args: &[String]) -> Result<()> {
         }
     }
 
-    provider = prepare_provider(provider)?;
+    let provider = store_new_provider(provider)?;
+    let key = if provider.key.is_empty() {
+        "no key".to_owned()
+    } else {
+        mask(&provider.key)
+    };
+    println!("✓ added {} ({}) · {key}", provider.name, provider.id);
+    Ok(())
+}
 
+fn store_new_provider(mut provider: Provider) -> Result<Provider> {
+    provider = prepare_provider(provider)?;
     let mut file = load()?;
     if let Some(existing) = file.providers.iter().find(|existing| {
         existing.chat == provider.chat
@@ -1361,13 +1524,7 @@ fn add(args: &[String]) -> Result<()> {
     }
     file.providers.push(provider.clone());
     store(file)?;
-    let key = if provider.key.is_empty() {
-        "no key".to_owned()
-    } else {
-        mask(&provider.key)
-    };
-    println!("✓ added {} ({}) · {key}", provider.name, provider.id);
-    Ok(())
+    Ok(provider)
 }
 
 async fn show(id: &str) -> Result<()> {
@@ -1867,6 +2024,12 @@ fn affinity_name(value: &str) -> &str {
 }
 
 fn remove(id: &str) -> Result<()> {
+    let provider = remove_provider_data(id)?;
+    println!("✓ removed {} ({})", provider.name, provider.id);
+    Ok(())
+}
+
+fn remove_provider_data(id: &str) -> Result<Provider> {
     let mut file = load()?;
     let Some(index) = file
         .providers
@@ -1877,8 +2040,7 @@ fn remove(id: &str) -> Result<()> {
     };
     let provider = file.providers.remove(index);
     store(file)?;
-    println!("✓ removed {} ({})", provider.name, provider.id);
-    Ok(())
+    Ok(provider)
 }
 
 fn find(id: &str) -> Result<Provider> {

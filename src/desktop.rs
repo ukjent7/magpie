@@ -39,6 +39,28 @@ struct ModelChoice {
     provider: String,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Page {
+    Agents,
+    Providers,
+}
+
+#[derive(Clone, Default)]
+struct ProviderDraft {
+    source: ProviderSource,
+    preset_id: String,
+    name: String,
+    endpoint: String,
+    key: String,
+}
+
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+enum ProviderSource {
+    #[default]
+    Preset,
+    Custom,
+}
+
 enum Action {
     SetField {
         row: usize,
@@ -47,6 +69,16 @@ enum Action {
     },
     Reload,
     Sync,
+    OpenProviderForm,
+    SelectProvider(usize),
+    AddProvider(ProviderDraft),
+    SetProviderKey {
+        id: String,
+        key: String,
+    },
+    ConfirmProviderRemoval(String),
+    RemoveProvider(String),
+    RefreshProvider(String),
     Quit,
 }
 
@@ -85,6 +117,17 @@ pub async fn command(start_hidden: bool) -> Result<()> {
 struct App {
     rows: Vec<AgentRow>,
     selected: usize,
+    page: Page,
+    providers: Vec<provider::DesktopProvider>,
+    presets: Vec<provider::DesktopPreset>,
+    selected_provider: usize,
+    provider_draft: ProviderDraft,
+    provider_form_open: bool,
+    provider_key_for: String,
+    provider_key_draft: String,
+    confirm_remove: Option<String>,
+    provider_refreshing: bool,
+    provider_receiver: Option<Receiver<(String, std::result::Result<usize, String>)>>,
     model_choices: Vec<ModelChoice>,
     signals: Signals,
     _tray: Option<TrayIcon>,
@@ -158,9 +201,35 @@ impl App {
                 Vec::new()
             }
         };
+        let presets = provider::desktop_presets();
+        let provider_draft = ProviderDraft {
+            preset_id: presets
+                .first()
+                .map_or_else(String::new, |preset| preset.id.clone()),
+            ..ProviderDraft::default()
+        };
+        let providers = match provider::desktop_providers() {
+            Ok(providers) => providers,
+            Err(error) => {
+                status = format!("Could not load providers: {error:#}");
+                status_ok = false;
+                Vec::new()
+            }
+        };
         let mut app = Self {
             rows,
             selected: 0,
+            page: Page::Agents,
+            providers,
+            presets,
+            selected_provider: 0,
+            provider_draft,
+            provider_form_open: false,
+            provider_key_for: String::new(),
+            provider_key_draft: String::new(),
+            confirm_remove: None,
+            provider_refreshing: false,
+            provider_receiver: None,
             model_choices,
             signals,
             _tray: tray,
@@ -195,6 +264,7 @@ impl App {
             self.set_visible(ctx, false);
         }
         self.receive_sync_result();
+        self.receive_provider_result();
     }
 
     fn set_visible(&mut self, ctx: &egui::Context, visible: bool) {
@@ -210,6 +280,19 @@ impl App {
             ui.heading(RichText::new("magpie").strong());
             ui.add_space(12.0);
             ui.label("Your agents, one model switchboard");
+            ui.add_space(18.0);
+            if ui
+                .selectable_label(self.page == Page::Agents, "Agents")
+                .clicked()
+            {
+                self.page = Page::Agents;
+            }
+            if ui
+                .selectable_label(self.page == Page::Providers, "Providers")
+                .clicked()
+            {
+                self.page = Page::Providers;
+            }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.button("Quit").clicked() {
                     actions.push(Action::Quit);
@@ -253,6 +336,304 @@ impl App {
                 }
             }
         });
+    }
+
+    fn render_provider_sidebar(&self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
+        ui.horizontal(|ui| {
+            ui.heading("Providers");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .small_button("+")
+                    .on_hover_text("Add a provider")
+                    .clicked()
+                {
+                    actions.push(Action::OpenProviderForm);
+                }
+            });
+        });
+        ui.add_space(8.0);
+        if self.providers.is_empty() {
+            ui.label("No providers configured.");
+            ui.add_space(8.0);
+            ui.label("Add a preset or connect an OpenAI compatible API.");
+            return;
+        }
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            for (index, provider) in self.providers.iter().enumerate() {
+                let credential = if provider.account {
+                    "signed in"
+                } else if provider.has_key {
+                    "key set"
+                } else if provider.key_required {
+                    "key needed"
+                } else {
+                    "local"
+                };
+                let label = format!(
+                    "{}\n{} models · {credential}",
+                    provider.name, provider.model_count
+                );
+                if ui
+                    .selectable_label(self.selected_provider == index, label)
+                    .clicked()
+                {
+                    actions.push(Action::SelectProvider(index));
+                }
+            }
+        });
+    }
+
+    fn render_provider_details(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
+        let Some(provider) = self.providers.get(self.selected_provider).cloned() else {
+            ui.vertical_centered(|ui| {
+                ui.add_space(80.0);
+                ui.heading("Connect a provider");
+                ui.label("Choose a preset or add your own API endpoint.");
+                if ui.button("Add provider").clicked() {
+                    actions.push(Action::OpenProviderForm);
+                }
+            });
+            return;
+        };
+
+        if self.provider_key_for != provider.id {
+            self.provider_key_for.clone_from(&provider.id);
+            self.provider_key_draft.clear();
+        }
+
+        ui.horizontal(|ui| {
+            ui.heading(&provider.name);
+            if provider.hidden {
+                ui.label(
+                    RichText::new("Hidden")
+                        .small()
+                        .color(ui.visuals().weak_text_color()),
+                );
+            }
+        });
+        ui.label(
+            RichText::new(&provider.id)
+                .small()
+                .color(ui.visuals().weak_text_color()),
+        );
+        ui.add_space(8.0);
+        ui.label("Endpoint");
+        ui.label(RichText::new(&provider.endpoint).monospace());
+        ui.add_space(8.0);
+        ui.horizontal_wrapped(|ui| {
+            for protocol in &provider.protocols {
+                ui.label(
+                    RichText::new(protocol)
+                        .small()
+                        .background_color(ui.visuals().code_bg_color),
+                );
+            }
+        });
+        ui.add_space(12.0);
+        ui.horizontal_wrapped(|ui| {
+            ui.label(format!("{} models", provider.model_count));
+            ui.separator();
+            if provider.account {
+                ui.label("Signed-in account");
+            } else {
+                ui.label(format!("{} active key(s)", provider.active_keys));
+            }
+            ui.separator();
+            ui.label(format!("key routing · {}", provider.routing));
+            ui.separator();
+            ui.label(format!("affinity · {}", provider.affinity));
+        });
+        if !provider.models.is_empty() {
+            ui.add_space(8.0);
+            let preview = provider.models.join(" · ");
+            let text = if provider.model_count > provider.models.len() {
+                format!(
+                    "{preview} · +{} more",
+                    provider.model_count - provider.models.len()
+                )
+            } else {
+                preview
+            };
+            ui.label(RichText::new(text).small());
+        }
+
+        ui.add_space(18.0);
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(!self.provider_refreshing, egui::Button::new("Fetch models"))
+                .clicked()
+            {
+                actions.push(Action::RefreshProvider(provider.id.clone()));
+            }
+            if !provider.account && ui.button("Remove provider").clicked() {
+                actions.push(Action::ConfirmProviderRemoval(provider.id.clone()));
+            }
+        });
+
+        if provider.key_required && !provider.account {
+            ui.add_space(18.0);
+            ui.separator();
+            ui.heading("API key");
+            ui.horizontal(|ui| {
+                let width = ui.available_width().min(360.0);
+                ui.add_sized(
+                    [width, 30.0],
+                    egui::TextEdit::singleline(&mut self.provider_key_draft)
+                        .password(true)
+                        .hint_text(if provider.has_key {
+                            "Enter a replacement key"
+                        } else {
+                            "Enter the API key"
+                        }),
+                );
+                if ui
+                    .add_enabled(
+                        !self.provider_key_draft.trim().is_empty(),
+                        egui::Button::new("Save key"),
+                    )
+                    .clicked()
+                {
+                    actions.push(Action::SetProviderKey {
+                        id: provider.id.clone(),
+                        key: self.provider_key_draft.clone(),
+                    });
+                }
+            });
+            ui.label(
+                RichText::new(if provider.has_key {
+                    "The current key remains private and is never shown again."
+                } else {
+                    "The key is stored in your local Magpie provider settings."
+                })
+                .small()
+                .color(ui.visuals().weak_text_color()),
+            );
+        }
+    }
+
+    fn render_provider_form(&mut self, ctx: &egui::Context, actions: &mut Vec<Action>) {
+        if !self.provider_form_open {
+            return;
+        }
+        let mut open = self.provider_form_open;
+        egui::Window::new("Add provider")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.radio_value(
+                        &mut self.provider_draft.source,
+                        ProviderSource::Preset,
+                        "Preset",
+                    );
+                    ui.radio_value(
+                        &mut self.provider_draft.source,
+                        ProviderSource::Custom,
+                        "Custom endpoint",
+                    );
+                });
+                ui.add_space(8.0);
+
+                if self.provider_draft.source == ProviderSource::Custom {
+                    ui.label("Provider name");
+                    ui.text_edit_singleline(&mut self.provider_draft.name);
+                    ui.add_space(6.0);
+                    ui.label("OpenAI compatible base URL");
+                    ui.text_edit_singleline(&mut self.provider_draft.endpoint);
+                } else {
+                    let selected = self
+                        .presets
+                        .iter()
+                        .find(|preset| preset.id == self.provider_draft.preset_id);
+                    egui::ComboBox::from_id_salt("provider-preset")
+                        .selected_text(
+                            selected.map_or("Choose a preset", |preset| preset.name.as_str()),
+                        )
+                        .show_ui(ui, |ui| {
+                            for preset in &self.presets {
+                                ui.selectable_value(
+                                    &mut self.provider_draft.preset_id,
+                                    preset.id.clone(),
+                                    preset.name.as_str(),
+                                );
+                            }
+                        });
+                    if let Some(preset) = selected {
+                        ui.label(RichText::new(&preset.endpoint).small());
+                    }
+                }
+
+                let selected = self
+                    .presets
+                    .iter()
+                    .find(|preset| preset.id == self.provider_draft.preset_id);
+                let key_required = selected.is_some_and(|preset| preset.key_required);
+                let custom = self.provider_draft.source == ProviderSource::Custom;
+                let show_key = custom || key_required;
+                if show_key {
+                    ui.add_space(6.0);
+                    ui.label("API key");
+                    ui.add(egui::TextEdit::singleline(&mut self.provider_draft.key).password(true));
+                } else if !custom {
+                    ui.label("This local provider usually does not need an API key.");
+                }
+
+                ui.add_space(14.0);
+                ui.horizontal(|ui| {
+                    let valid = if custom {
+                        !self.provider_draft.name.trim().is_empty()
+                            && !self.provider_draft.endpoint.trim().is_empty()
+                    } else {
+                        selected.is_some()
+                            && (!key_required || !self.provider_draft.key.trim().is_empty())
+                    };
+                    if ui
+                        .add_enabled(valid, egui::Button::new("Add provider"))
+                        .clicked()
+                    {
+                        actions.push(Action::AddProvider(self.provider_draft.clone()));
+                    }
+                    if ui.button("Cancel").clicked() {
+                        open = false;
+                    }
+                });
+            });
+        self.provider_form_open = open;
+        if !open {
+            self.provider_draft.key.clear();
+        }
+    }
+
+    fn render_remove_confirmation(&mut self, ctx: &egui::Context, actions: &mut Vec<Action>) {
+        let Some(id) = self.confirm_remove.clone() else {
+            return;
+        };
+        let name = self
+            .providers
+            .iter()
+            .find(|provider| provider.id == id)
+            .map_or(id.as_str(), |provider| provider.name.as_str())
+            .to_owned();
+        let mut open = true;
+        egui::Window::new("Remove provider?")
+            .collapsible(false)
+            .resizable(false)
+            .open(&mut open)
+            .show(ctx, |ui| {
+                ui.label(format!("Remove {name} and its saved API keys?"));
+                ui.horizontal(|ui| {
+                    if ui.button("Remove").clicked() {
+                        actions.push(Action::RemoveProvider(id.clone()));
+                    }
+                    if ui.button("Cancel").clicked() {
+                        self.confirm_remove = None;
+                    }
+                });
+            });
+        if !open {
+            self.confirm_remove = None;
+        }
     }
 
     fn render_agent(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
@@ -417,8 +798,81 @@ impl App {
                     }
                 }
             }
-            Action::Reload => self.reload_settings(),
+            Action::Reload => {
+                self.reload_settings();
+                if let Err(error) = self.reload_provider_data() {
+                    self.set_status(&format!("Could not reload providers: {error:#}"), false);
+                }
+            }
             Action::Sync => self.start_catalog_sync(true),
+            Action::OpenProviderForm => {
+                self.provider_draft.key.clear();
+                self.provider_form_open = true;
+            }
+            Action::SelectProvider(index) => {
+                self.selected_provider = index.min(self.providers.len().saturating_sub(1));
+                self.provider_key_draft.clear();
+            }
+            Action::AddProvider(draft) => {
+                let added = if draft.source == ProviderSource::Custom {
+                    provider::add_desktop_custom(&draft.name, &draft.endpoint, &draft.key)
+                } else {
+                    provider::add_desktop_preset(&draft.preset_id, &draft.key)
+                };
+                match added {
+                    Ok(id) => match self.reload_provider_data() {
+                        Ok(()) => {
+                            self.selected_provider = self
+                                .providers
+                                .iter()
+                                .position(|provider| provider.id == id)
+                                .unwrap_or(self.selected_provider);
+                            self.provider_form_open = false;
+                            self.provider_draft.key.clear();
+                            self.set_status(&format!("Added provider {id}"), true);
+                        }
+                        Err(error) => self.set_status(
+                            &format!("Provider added, but the list could not reload: {error:#}"),
+                            false,
+                        ),
+                    },
+                    Err(error) => {
+                        self.set_status(&format!("Could not add provider: {error:#}"), false)
+                    }
+                }
+            }
+            Action::SetProviderKey { id, key } => match provider::set_desktop_key(&id, &key) {
+                Ok(()) => {
+                    self.provider_key_draft.clear();
+                    match self.reload_provider_data() {
+                        Ok(()) => self.set_status(&format!("Updated API key for {id}"), true),
+                        Err(error) => self.set_status(
+                            &format!(
+                                "API key updated, but the provider list could not reload: {error:#}"
+                            ),
+                            false,
+                        ),
+                    }
+                }
+                Err(error) => self.set_status(&format!("Could not save API key: {error:#}"), false),
+            },
+            Action::ConfirmProviderRemoval(id) => self.confirm_remove = Some(id),
+            Action::RemoveProvider(id) => match provider::remove_desktop_provider(&id) {
+                Ok(()) => {
+                    self.confirm_remove = None;
+                    match self.reload_provider_data() {
+                        Ok(()) => self.set_status(&format!("Removed provider {id}"), true),
+                        Err(error) => self.set_status(
+                            &format!("Provider removed, but the list could not reload: {error:#}"),
+                            false,
+                        ),
+                    }
+                }
+                Err(error) => {
+                    self.set_status(&format!("Could not remove provider: {error:#}"), false)
+                }
+            },
+            Action::RefreshProvider(id) => self.start_provider_refresh(id),
             Action::Quit => {
                 self.exiting = true;
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -440,6 +894,69 @@ impl App {
         match failure {
             Some(error) => self.set_status(&format!("Could not reload settings: {error}"), false),
             None => self.set_status("Settings reloaded", true),
+        }
+    }
+
+    fn reload_provider_data(&mut self) -> Result<()> {
+        self.providers = provider::desktop_providers()?;
+        self.model_choices = model_choices()?;
+        self.selected_provider = self
+            .selected_provider
+            .min(self.providers.len().saturating_sub(1));
+        Ok(())
+    }
+
+    fn start_provider_refresh(&mut self, id: String) {
+        if self.provider_refreshing {
+            return;
+        }
+        let (sender, receiver) = mpsc::channel();
+        let refresh_id = id.clone();
+        let refresh = async move {
+            let result = provider::refresh_desktop_models(&refresh_id)
+                .await
+                .map_err(|error| format!("{error:#}"));
+            let _ = sender.send((refresh_id, result));
+        };
+        match tokio::runtime::Handle::try_current() {
+            Ok(runtime) => {
+                runtime.spawn(refresh);
+                self.provider_receiver = Some(receiver);
+                self.provider_refreshing = true;
+                self.set_status(&format!("Fetching models for {id}…"), true);
+            }
+            Err(error) => self.set_status(
+                &format!("Fetching models needs an async runtime: {error}"),
+                false,
+            ),
+        }
+    }
+
+    fn receive_provider_result(&mut self) {
+        let result = match self.provider_receiver.as_ref().map(Receiver::try_recv) {
+            Some(Ok(result)) => Some(result),
+            Some(Err(TryRecvError::Disconnected)) => Some((
+                String::new(),
+                Err("provider refresh worker stopped".to_owned()),
+            )),
+            Some(Err(TryRecvError::Empty)) | None => None,
+        };
+        let Some((id, result)) = result else {
+            return;
+        };
+        self.provider_receiver = None;
+        self.provider_refreshing = false;
+        match result {
+            Ok(count) => match self.reload_provider_data() {
+                Ok(()) => self.set_status(&format!("Fetched {count} models from {id}"), true),
+                Err(error) => self.set_status(
+                    &format!("Fetched models, but provider list could not reload: {error:#}"),
+                    false,
+                ),
+            },
+            Err(error) => {
+                self.set_status(&format!("Could not fetch models from {id}: {error}"), false)
+            }
         }
     }
 
@@ -486,14 +1003,19 @@ impl App {
         self.sync_receiver = None;
         self.syncing = false;
         match result {
-            Ok(Some(count)) => {
-                self.model_choices = model_choices().unwrap_or_default();
-                self.reload_settings();
-                self.set_status(
-                    &format!("Model catalog refreshed for {count} providers"),
-                    true,
-                );
-            }
+            Ok(Some(count)) => match self.reload_provider_data() {
+                Ok(()) => {
+                    self.reload_settings();
+                    self.set_status(
+                        &format!("Model catalog refreshed for {count} providers"),
+                        true,
+                    );
+                }
+                Err(error) => self.set_status(
+                    &format!("Catalog refreshed, but provider data could not reload: {error:#}"),
+                    false,
+                ),
+            },
             Ok(None) => self.set_status("Model catalog is up to date", true),
             Err(error) => self.set_status(&format!("Catalog refresh failed: {error}"), false),
         }
@@ -526,18 +1048,30 @@ impl eframe::App for App {
                 let available = ui.available_size();
                 let content_height = (available.y - 44.0).max(140.0);
                 ui.horizontal(|ui| {
-                    let mut selected = self.selected;
+                    let mut selected = match self.page {
+                        Page::Agents => self.selected,
+                        Page::Providers => self.selected_provider,
+                    };
                     ui.allocate_ui_with_layout(
                         egui::vec2(228.0, content_height),
                         egui::Layout::top_down(egui::Align::Min),
-                        |ui| self.render_sidebar(ui, &mut selected),
+                        |ui| match self.page {
+                            Page::Agents => self.render_sidebar(ui, &mut selected),
+                            Page::Providers => self.render_provider_sidebar(ui, &mut actions),
+                        },
                     );
-                    self.selected = selected;
+                    match self.page {
+                        Page::Agents => self.selected = selected,
+                        Page::Providers => self.selected_provider = selected,
+                    }
                     ui.separator();
                     ui.allocate_ui_with_layout(
                         egui::vec2((available.x - 248.0).max(300.0), content_height),
                         egui::Layout::top_down(egui::Align::Min),
-                        |ui| self.render_agent(ui, &mut actions),
+                        |ui| match self.page {
+                            Page::Agents => self.render_agent(ui, &mut actions),
+                            Page::Providers => self.render_provider_details(ui, &mut actions),
+                        },
                     );
                 });
 
@@ -557,6 +1091,8 @@ impl eframe::App for App {
                     });
                 });
             });
+        self.render_provider_form(ui.ctx(), &mut actions);
+        self.render_remove_confirmation(ui.ctx(), &mut actions);
         for action in actions {
             self.apply_action(action, ui.ctx());
         }
