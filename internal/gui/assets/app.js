@@ -722,9 +722,12 @@ async function renderUpdateBadge() {
   const restart = async () => {
     b.classList.add("busy");
     label.textContent = t("Restarting…");
-    // an answer means it didn't: the password prompt dismissed, or the swap failed
-    if (await api("update/install", {}).catch(() => ({}))) {
-      b.classList.remove("busy");
+    // an answer means it didn't: the password prompt dismissed, the swap
+    // failed, or a newer version is out and downloading first
+    const a = await api("update/install", {}).catch(() => ({}));
+    if (a) {
+      if (["checking", "downloading"].includes(a.state)) b.dataset.pulling = "1";
+      else b.classList.remove("busy");
       renderUpdateBadge();
     }
   };
