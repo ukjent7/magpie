@@ -234,6 +234,9 @@ fn apply_fields(fields: &BTreeMap<String, String>) -> Result<usize> {
             continue;
         };
         let value = &fields[key];
+        // a model of a provider renamed since the profile was saved is the
+        // same model by its new id
+        let value = crate::provider::rename::renamed_ref(value);
         let Ok(current) = agent::find(agent_id) else {
             continue;
         };
@@ -250,12 +253,12 @@ fn apply_fields(fields: &BTreeMap<String, String>) -> Result<usize> {
             .values()?
             .into_iter()
             .find(|(key, _)| *key == field)
-            .is_some_and(|(_, here)| here == *value);
+            .is_some_and(|(_, here)| here == value);
         if set {
             continue;
         }
         current
-            .set(field, value)
+            .set(field, &value)
             .with_context(|| format!("apply profile field {key:?}"))?;
         changed += 1;
     }

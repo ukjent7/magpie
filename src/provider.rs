@@ -20,6 +20,8 @@ mod import;
 mod import_apps;
 pub mod modelprefs;
 pub(crate) mod planquota;
+pub mod rename;
+pub mod rename;
 mod test;
 pub(crate) mod zcode;
 pub(crate) use import::command as import_command;
@@ -530,6 +532,11 @@ struct KeyAccount {
 #[serde(default, rename_all = "camelCase")]
 pub(crate) struct Provider {
     id: String,
+    // was are the ids this provider had before it was renamed, so an agent
+    // still running on a config that names it the old way reaches it, and its
+    // usage so far is counted with it.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    was: Vec<String>,
     name: String,
     #[serde(skip_serializing_if = "String::is_empty")]
     icon: String,
@@ -1776,25 +1783,28 @@ fn set_provider(id: &str, assignments: &[String]) -> Result<()> {
     if assignments.is_empty() {
         bail!("magpie provider set <id> k=v…");
     }
-    for assignment in assignments {
-        if let Some((key, _)) = assignment.split_once('=')
-            && key.eq_ignore_ascii_case("id")
-        {
-            bail!("a provider's id can't change; groups and agents name it by it");
-        }
-    }
     let mut file = load()?;
     let provider = find_provider_mut(&mut file, id)?;
+    // id= renames it: the rest is saved under the id it has, then the groups
+    // and agents on its models move to the new one
+    let from = provider.id.clone();
     for assignment in assignments {
         let (key, value) = assignment
             .split_once('=')
             .with_context(|| format!("expected key=value, got {assignment:?}"))?;
         apply_assignment(provider, key, value.trim())?;
     }
+    let to = provider.id.trim().to_lowercase();
+    provider.id.clone_from(&from);
     let name = provider.name.clone();
-    let provider_id = provider.id.clone();
     store(file)?;
-    println!("✓ saved {name} ({provider_id})");
+    if to != from {
+        let moved = rename::rename_provider(&from, &to)?;
+        if !moved.is_empty() {
+            println!("✓ {} moved to {to}/…", moved.join(", "));
+        }
+    }
+    println!("✓ saved {name} ({to})");
     Ok(())
 }
 
@@ -2785,10 +2795,13 @@ fn remove_provider_data(id: &str) -> Result<Provider> {
 }
 
 fn find(id: &str) -> Result<Provider> {
-    providers_with_local_accounts(load()?.providers)
-        .into_iter()
+    let all = providers_with_local_accounts(load()?.providers);
+    let found = all
+        .iter()
         .find(|provider| provider.id == id || provider.name.eq_ignore_ascii_case(id))
-        .with_context(|| format!("no provider {id:?}; magpie providers lists them"))
+        // an id it had before it was renamed is still this provider's
+        .or_else(|| all.iter().find(|provider| provider.was.iter().any(|was| was == id)));
+    found.cloned().with_context(|| format!("no provider {id:?}; magpie providers lists them"))
 }
 
 fn load() -> Result<ProviderFile> {
@@ -2984,6 +2997,10 @@ pub(crate) fn restore_backup_providers(
                 provider.key_name.clone_from(&existing.key_name);
                 provider.keys.clone_from(&existing.keys);
                 provider.key_protocol.clone_from(&existing.key_protocol);
+            }
+            if provider.was.is_empty() {
+                // the ids it had before are kept by the record it replaces
+                provider.was = std::mem::take(&mut file.providers[index].was);
             }
             file.providers[index] = provider;
             replaced += 1;

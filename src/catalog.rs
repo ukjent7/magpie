@@ -570,6 +570,15 @@ fn live_path(provider_id: &str) -> Option<PathBuf> {
     })
 }
 
+// rename_live carries the vendor's list last fetched to the id a provider has
+// now, so a rename doesn't ask for it again.
+pub fn rename_live(from: &str, to: &str) {
+    let (Some(from), Some(to)) = (live_path(from), live_path(to)) else {
+        return;
+    };
+    let _ = std::fs::rename(from, to);
+}
+
 fn candidate_urls(base: &str) -> Vec<String> {
     let mut urls = Vec::with_capacity(4);
     let mut add = |url: String| {

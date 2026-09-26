@@ -1231,10 +1231,15 @@ pub fn sync_catalog_models() -> Result<()> {
 
 pub(crate) fn is_gateway_model(value: &str) -> Result<bool> {
     let (groups, entries) = crate::provider::desktop_group_data()?;
-    Ok(entries.iter().any(|entry| entry.id == value)
-        || groups
-            .iter()
-            .any(|group| !group.hidden && format!("group/{}", group.id) == value))
+    let holds = |value: &str| {
+        entries.iter().any(|entry| entry.id == value)
+            || groups
+                .iter()
+                .any(|group| !group.hidden && format!("group/{}", group.id) == value)
+    };
+    // a provider renamed since an agent was set on its model is the same
+    // model by its new id
+    Ok(holds(value) || holds(&crate::provider::rename::renamed_ref(value)))
 }
 
 fn claude_gateway_configured(agent: &Agent) -> Result<bool> {

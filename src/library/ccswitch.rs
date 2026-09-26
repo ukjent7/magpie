@@ -350,9 +350,9 @@ mod tests {
     #[cfg(unix)]
     use crate::library::testing::Sandbox;
     #[cfg(unix)]
-    use crate::library::{Homes, Store};
-    #[cfg(unix)]
     use crate::library::testing::write;
+    #[cfg(unix)]
+    use crate::library::{Homes, Store};
     #[cfg(unix)]
     use std::sync::{Arc, Mutex};
 

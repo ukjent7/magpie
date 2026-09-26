@@ -86,7 +86,7 @@ fn loaded() -> Preferences {
 // forget is what a change to the settings does to the remembered ones: the
 // file may keep the same size and its time may not move, and a name the
 // user just gave has to show at once.
-fn forget() {
+pub(crate) fn forget() {
     *PREFS.lock().unwrap_or_else(PoisonError::into_inner) = None;
 }
 
