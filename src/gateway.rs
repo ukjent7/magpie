@@ -28,6 +28,7 @@ use crate::{
 };
 
 pub mod ir;
+pub mod parse;
 pub mod prompt;
 
 const DEFAULT_ADDR: &str = "127.0.0.1:3425";
@@ -1851,7 +1852,7 @@ fn group_candidates<'a>(
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ApiProtocol {
+pub enum ApiProtocol {
     Chat,
     Responses,
     Anthropic,
