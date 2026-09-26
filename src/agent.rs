@@ -12,6 +12,94 @@ use crate::{
     settings,
 };
 
+mod alma;
+mod applied;
+mod grok;
+mod zcode;
+
+pub use applied::Drift;
+
+// magpie_id is the provider id these agents know the gateway by; a catalog
+// model is spelled "magpie/<provider>/<model>" where the agent needs to
+// tell magpie's models from its own.
+pub(crate) const MAGPIE_ID: &str = "magpie";
+pub(crate) const MAGPIE_PREFIX: &str = "magpie/";
+
+// MagpieModel is one model of the catalog as these agents are shown it, for
+// the ones that keep their own model files.
+#[derive(Clone)]
+pub(crate) struct MagpieModel {
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) efforts: Vec<String>,
+    pub(crate) images: bool,
+    pub(crate) context: usize,
+}
+
+// magpie_models is the catalog: one entry per model of every provider the
+// user added, then one per routing group.
+pub(crate) fn magpie_models() -> Result<Vec<MagpieModel>> {
+    #[cfg(test)]
+    {
+        if let Some(models) = testing::catalog() {
+            return Ok(models);
+        }
+    }
+    let (groups, entries) = crate::provider::desktop_group_data()?;
+    let entries_by_id = entries
+        .iter()
+        .map(|entry| (entry.id.as_str(), entry))
+        .collect::<HashMap<_, _>>();
+    let mut models = Vec::with_capacity(entries.len() + groups.len());
+    for entry in &entries {
+        let name = if entry.model.name.is_empty() {
+            &entry.model.id
+        } else {
+            &entry.model.name
+        };
+        models.push(MagpieModel {
+            id: entry.id.clone(),
+            name: format!("{name} · {}", entry.provider_name),
+            efforts: entry.model.efforts.clone(),
+            images: entry.model.images,
+            context: entry.model.context,
+        });
+    }
+    for group in groups.into_iter().filter(|group| !group.hidden) {
+        let members = group
+            .members
+            .iter()
+            .filter_map(|member| entries_by_id.get(member.as_str()).copied())
+            .collect::<Vec<_>>();
+        let Some((first, rest)) = members.split_first() else {
+            continue;
+        };
+        let efforts = first
+            .model
+            .efforts
+            .iter()
+            .filter(|effort| {
+                rest.iter()
+                    .all(|member| member.model.efforts.contains(effort))
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        models.push(MagpieModel {
+            id: format!("group/{}", group.id),
+            name: format!("{} · routing group", group.name),
+            efforts,
+            images: members.iter().all(|member| member.model.images),
+            context: members
+                .iter()
+                .map(|member| member.model.context)
+                .filter(|context| *context > 0)
+                .min()
+                .unwrap_or_default(),
+        });
+    }
+    Ok(models)
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct FieldSpec {
     pub key: &'static str,
@@ -149,6 +237,10 @@ const OMP_MODEL: FieldSpec = field("model", "model", "modelRoles.default");
 const DEVIN_MODEL: FieldSpec = field("model", "model", "agent.model");
 const HERMES_MODEL: FieldSpec = provider_model("model", "model", "model.provider", "model.default");
 const DSH_MODEL: FieldSpec = field("model", "model", "model");
+const GROK_MODEL: FieldSpec = field("model", "model", "models.default");
+const GROK_EFFORT: FieldSpec = field("effort", "effort", "models.default_reasoning_effort");
+const ZCODE_PROVIDER: FieldSpec = field("provider", "provider", "provider.magpie");
+const ALMA_MODEL: FieldSpec = field("model", "model", "chat.defaultModel");
 
 pub static ALL_AGENTS: &[AgentSpec] = &[
     AgentSpec {
@@ -277,6 +369,33 @@ pub static ALL_AGENTS: &[AgentSpec] = &[
         format: ConfigFormat::Yaml,
         fields: &[HERMES_MODEL],
     },
+    AgentSpec {
+        id: "grok",
+        name: "Grok Build",
+        aliases: &["grok-build", "grok-cli"],
+        executable: "",
+        relative_path: ".grok/config.toml",
+        format: ConfigFormat::Toml,
+        fields: &[GROK_MODEL, GROK_EFFORT],
+    },
+    AgentSpec {
+        id: "zcode",
+        name: "ZCode",
+        aliases: &["z-code"],
+        executable: "",
+        relative_path: ".zcode/v2/config.json",
+        format: ConfigFormat::Jsonc,
+        fields: &[ZCODE_PROVIDER],
+    },
+    AgentSpec {
+        id: "alma",
+        name: "Alma",
+        aliases: &[],
+        executable: "",
+        relative_path: "",
+        format: ConfigFormat::Jsonc,
+        fields: &[ALMA_MODEL],
+    },
 ];
 
 pub fn all() -> Vec<Agent> {
@@ -328,6 +447,11 @@ pub fn find(query: &str) -> Result<Agent> {
 
 impl Agent {
     pub fn is_detected(&self) -> bool {
+        if self.spec.id == "alma" {
+            // Alma keeps its providers in the app; its data directory is
+            // the only trace magpie can see.
+            return self.path.is_dir();
+        }
         if self.path.is_file() || self.path.parent().is_some_and(|path| path.is_dir()) {
             return true;
         }
@@ -337,6 +461,20 @@ impl Agent {
     pub fn values(&self) -> Result<Vec<(&'static str, String)>> {
         if self.spec.id == "dsh" {
             return Ok(vec![("model", crate::dsh::get(&self.path)?)]);
+        }
+        if self.spec.id == "zcode" {
+            let wired = zcode::wired(&self.path)?;
+            return Ok(vec![(
+                "provider",
+                if wired {
+                    MAGPIE_ID.to_owned()
+                } else {
+                    String::new()
+                },
+            )]);
+        }
+        if self.spec.id == "alma" {
+            return Ok(vec![("model", alma::get())]);
         }
 
         self.spec
@@ -365,26 +503,19 @@ impl Agent {
     }
 
     pub fn set(&self, field_name: &str, value: &str) -> Result<()> {
-        let field = self
-            .spec
-            .fields
-            .iter()
-            .find(|field| field.key == field_name || field.label == field_name)
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "{} has no field {field_name:?}; fields: {}",
-                    self.spec.name,
-                    self.spec
-                        .fields
-                        .iter()
-                        .map(|field| field.key)
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                )
-            })?;
+        let field = self.find_field(field_name)?;
 
         if self.spec.id == "dsh" && field.key == "model" {
             return crate::dsh::set(&self.path, value);
+        }
+        if self.spec.id == "grok" && field.key == "model" {
+            return grok::set_model(&self.path, value);
+        }
+        if self.spec.id == "zcode" && field.key == "provider" {
+            return zcode::set(&self.path, value);
+        }
+        if self.spec.id == "alma" && field.key == "model" {
+            return alma::set(value);
         }
         if self.spec.id == "opencode" && !field.catalog_prefix.is_empty() {
             return self.set_opencode_model(field, value);
@@ -443,6 +574,71 @@ impl Agent {
             config::set(&self.path, self.spec.format, field.path, value)?;
         }
         Ok(())
+    }
+
+    // find_field looks a field up by key or, as it is shown, by label.
+    fn find_field(&self, field_name: &str) -> Result<&FieldSpec> {
+        self.spec
+            .fields
+            .iter()
+            .find(|field| field.key == field_name || field.label == field_name)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "{} has no field {field_name:?}; fields: {}",
+                    self.spec.name,
+                    self.spec
+                        .fields
+                        .iter()
+                        .map(|field| field.key)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            })
+    }
+
+    // apply sets one of the agent's fields and remembers it as magpie's, so
+    // it can be told apart from what something else writes there later.
+    // Every setting of a field by the user goes through here.
+    pub fn apply(&self, field_name: &str, value: &str) -> Result<()> {
+        let Ok(field) = self.find_field(field_name) else {
+            return Ok(());
+        };
+        self.set(field.key, value)?;
+        let applied_value = self
+            .values()
+            .ok()
+            .and_then(|values| values.into_iter().find(|(key, _)| *key == field.key))
+            .map_or_else(String::new, |(_, value)| value);
+        let _ = applied::record(self.spec.id, field.key, &applied_value);
+        Ok(())
+    }
+
+    // drift says what, if anything, keeps the agent off what magpie set on
+    // it, None when nothing does.
+    pub fn drift(&self) -> Option<Drift> {
+        applied::drift(self)
+    }
+
+    // reapply sets again what magpie set on the agent.
+    pub fn reapply(&self) -> Result<()> {
+        applied::reapply(self)
+    }
+
+    // keep takes the agent's config as it is now: what magpie set before is
+    // forgotten, and no longer said to have been changed.
+    pub fn keep(&self) -> Result<()> {
+        applied::forget(self.spec.id)
+    }
+
+    // sync rewrites the model list magpie wrote into this agent's files, as
+    // the catalog is now.
+    pub fn sync(&self) -> Result<()> {
+        match self.spec.id {
+            "grok" => grok::sync(&self.path),
+            "zcode" => zcode::sync(&self.path),
+            "alma" => alma::sync(),
+            _ => Ok(()),
+        }
     }
 
     fn set_opencode_model(&self, field: &FieldSpec, value: &str) -> Result<()> {
@@ -883,6 +1079,16 @@ pub fn sync_catalog_models() -> Result<()> {
     if let Some(agent) = all().into_iter().find(|agent| agent.spec.id == "dsh") {
         crate::dsh::sync(&agent.path)?;
     }
+
+    if let Some(agent) = all().into_iter().find(|agent| agent.spec.id == "grok") {
+        grok::sync(&agent.path)?;
+    }
+
+    if let Some(agent) = all().into_iter().find(|agent| agent.spec.id == "zcode") {
+        zcode::sync(&agent.path)?;
+    }
+
+    alma::sync()?;
 
     let Some(agent) = all().into_iter().find(|agent| agent.spec.id == "opencode") else {
         return Ok(());
@@ -1872,6 +2078,11 @@ fn resolve_path(spec: &AgentSpec) -> PathBuf {
         "dsh" => env_path("DSH_HOME")
             .unwrap_or_else(|| home.join(".dsh"))
             .join("config.yaml"),
+        "grok" => env_path("GROK_HOME")
+            .unwrap_or_else(|| home.join(".grok"))
+            .join("config.toml"),
+        "zcode" => home.join(".zcode/v2/config.json"),
+        "alma" => alma::dir(),
         "hermes" => env_path("HERMES_HOME")
             .unwrap_or_else(|| home.join(".hermes"))
             .join("config.yaml"),
@@ -1899,6 +2110,9 @@ fn env_path(name: &str) -> Option<PathBuf> {
 }
 
 fn executable_exists(name: &str) -> bool {
+    if name.is_empty() {
+        return false;
+    }
     let Some(path) = env::var_os("PATH") else {
         return false;
     };
@@ -1922,6 +2136,115 @@ fn executable_exists(name: &str) -> bool {
             executable.is_file()
         })
     })
+}
+
+#[cfg(test)]
+pub(crate) mod testing {
+    use std::{
+        fs,
+        path::PathBuf,
+        sync::{
+            Mutex, MutexGuard, PoisonError,
+            atomic::{AtomicU64, Ordering},
+        },
+    };
+
+    static LOCK: Mutex<()> = Mutex::new(());
+    static CATALOG: Mutex<Option<Vec<super::MagpieModel>>> = Mutex::new(None);
+    static APPLIED: Mutex<Option<PathBuf>> = Mutex::new(None);
+    static ALMA: Mutex<Option<PathBuf>> = Mutex::new(None);
+    static ALMA_API: Mutex<Option<String>> = Mutex::new(None);
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+
+    pub(crate) fn catalog() -> Option<Vec<super::MagpieModel>> {
+        CATALOG
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    pub(crate) fn applied_path() -> Option<PathBuf> {
+        APPLIED
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    pub(crate) fn alma_dir() -> Option<PathBuf> {
+        ALMA.lock().unwrap_or_else(PoisonError::into_inner).clone()
+    }
+
+    pub(crate) fn alma_api() -> Option<String> {
+        ALMA_API
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    pub(crate) fn set_catalog(models: Vec<super::MagpieModel>) {
+        *CATALOG.lock().unwrap_or_else(PoisonError::into_inner) = Some(models);
+    }
+
+    pub(crate) fn set_alma_api(base: &str) {
+        *ALMA_API.lock().unwrap_or_else(PoisonError::into_inner) = Some(base.to_owned());
+    }
+
+    // model is one catalog entry of the fake catalog: no efforts, no
+    // context, no images.
+    pub(crate) fn model(id: &str, name: &str) -> super::MagpieModel {
+        super::MagpieModel {
+            id: id.to_owned(),
+            name: name.to_owned(),
+            efforts: Vec::new(),
+            images: false,
+            context: 0,
+        }
+    }
+
+    // isolation replaces the catalog with two models of one provider, and
+    // redirects applied.json and Alma's data directory at a fresh temp
+    // directory — the real user's files are never touched. While an
+    // Isolation is alive, tests that hold another wait.
+    pub(crate) fn isolation() -> Isolation {
+        let guard = LOCK.lock().unwrap_or_else(PoisonError::into_inner);
+        let n = NEXT.fetch_add(1, Ordering::Relaxed);
+        let home =
+            std::env::temp_dir().join(format!("magpie-agent-test-{}-{n}", std::process::id()));
+        let _ = fs::remove_dir_all(&home);
+        fs::create_dir_all(&home).unwrap();
+        *CATALOG.lock().unwrap_or_else(PoisonError::into_inner) = Some(vec![
+            model("deepseek/pro", "pro · DeepSeek"),
+            model("deepseek/flash", "flash · DeepSeek"),
+        ]);
+        *APPLIED.lock().unwrap_or_else(PoisonError::into_inner) = Some(home.join("applied.json"));
+        *ALMA.lock().unwrap_or_else(PoisonError::into_inner) = Some(home.join("alma"));
+        *ALMA_API.lock().unwrap_or_else(PoisonError::into_inner) = None;
+        Isolation {
+            _guard: guard,
+            home,
+        }
+    }
+
+    pub(crate) struct Isolation {
+        _guard: MutexGuard<'static, ()>,
+        home: PathBuf,
+    }
+
+    impl Isolation {
+        pub(crate) fn path(&self) -> &std::path::Path {
+            &self.home
+        }
+    }
+
+    impl Drop for Isolation {
+        fn drop(&mut self) {
+            *CATALOG.lock().unwrap_or_else(PoisonError::into_inner) = None;
+            *APPLIED.lock().unwrap_or_else(PoisonError::into_inner) = None;
+            *ALMA.lock().unwrap_or_else(PoisonError::into_inner) = None;
+            *ALMA_API.lock().unwrap_or_else(PoisonError::into_inner) = None;
+            let _ = fs::remove_dir_all(&self.home);
+        }
+    }
 }
 
 #[cfg(test)]

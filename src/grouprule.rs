@@ -136,7 +136,7 @@ impl Rule {
                 }
             }
         }
-        if !self.agents.is_empty() && !self.agents.iter().any(|agent| *agent == q.agent) {
+        if !self.agents.is_empty() && !self.agents.contains(&q.agent) {
             return false;
         }
         !self.conditions().is_empty()
@@ -201,7 +201,7 @@ pub fn intents(rules: &[Rule], q: &RuleRequest) -> Vec<String> {
 fn clean_list(value: &str) -> Vec<String> {
     let mut out = Vec::new();
     for item in value
-        .split(|character: char| character == ',' || character == ' ')
+        .split([',', ' '])
         .map(str::trim)
         .filter(|item| !item.is_empty())
     {
@@ -228,7 +228,7 @@ pub fn clean_rules(rules: &[Rule], members: &[String]) -> Result<Vec<Rule>> {
             "rule {n}: which model it sends to is missing"
         );
         ensure!(
-            members.iter().any(|member| *member == rule.use_),
+            members.contains(&rule.use_),
             "rule {n}: {} is not in the group",
             rule.use_
         );
@@ -1275,6 +1275,7 @@ pub fn member_contexts(members: &[String]) -> BTreeMap<String, i64> {
 
 // ruleAnswered keeps what the vendor counted a conversation's request as,
 // for its next turn's rules to go by.
+#[allow(dead_code)] // called by the usage/trace hook once it records completions
 pub fn rule_answered(key: &str, usage: crate::usage::TokenUsage) {
     let tokens = (usage.input + usage.cache_read + usage.cache_write) as i64;
     if tokens <= 0 {

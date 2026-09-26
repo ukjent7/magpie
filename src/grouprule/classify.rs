@@ -49,12 +49,12 @@ struct ClassifyFailure {
     at: Instant,
 }
 
-static ANSWERED: LazyLock<
-    Mutex<(
-        std::collections::HashMap<String, ClassifiedAs>,
-        std::collections::HashMap<String, ClassifyFailure>,
-    )>,
-> = LazyLock::new(|| {
+type AnsweredState = (
+    std::collections::HashMap<String, ClassifiedAs>,
+    std::collections::HashMap<String, ClassifyFailure>,
+);
+
+static ANSWERED: LazyLock<Mutex<AnsweredState>> = LazyLock::new(|| {
     Mutex::new((
         std::collections::HashMap::new(),
         std::collections::HashMap::new(),

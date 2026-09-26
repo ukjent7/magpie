@@ -139,7 +139,7 @@ pub(crate) async fn command(args: &[String]) -> Result<()> {
         agent_filter = Some(agent);
     }
 
-    let rows = collected_rows(agent_filter.as_deref()).await?;
+    let rows = collected_rows(agent_filter).await?;
 
     if as_json {
         println!("{}", serde_json::to_string_pretty(&rows)?);

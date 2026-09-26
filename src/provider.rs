@@ -664,6 +664,40 @@ fn providers_with_local_accounts(mut providers: Vec<Provider>) -> Vec<Provider> 
             ..Provider::default()
         });
     }
+    // saved ZCode subscriptions the agent itself is not signed in with
+    // also serve, each as its own provider
+    if let Ok(saved) = crate::accounts::saved_zcode_logins() {
+        for (user, key) in saved {
+            if providers.iter().any(|provider| {
+                matches!(
+                    provider.account.as_ref(),
+                    Some(ProviderAccount::Zcode {
+                        key: saved_key, ..
+                    }) if saved_key.api_key == key.api_key
+                )
+            }) {
+                continue;
+            }
+            let id = if user.is_empty() {
+                "zcode".to_owned()
+            } else {
+                format!("zcode-{}", slug(&user))
+            };
+            if providers.iter().any(|provider| provider.id == id) {
+                continue;
+            }
+            providers.push(Provider {
+                id,
+                name: format!("ZCode · {user}"),
+                icon: "zcode".to_owned(),
+                anthropic: key.endpoint().to_owned(),
+                catalog: "zcode".to_owned(),
+                website: "https://zcode.z.ai".to_owned(),
+                account: Some(ProviderAccount::Zcode { user, key }),
+                ..Provider::default()
+            });
+        }
+    }
     providers
 }
 

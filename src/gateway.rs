@@ -2347,7 +2347,7 @@ fn with_token_floor(body: &Value, floor: u64) -> Option<Value> {
         config.insert("maxOutputTokens".to_owned(), json!(floor));
         raised = true;
     }
-    raised.then(|| Value::Object(object))
+    raised.then_some(Value::Object(object))
 }
 
 // upstream_error_response passes a vendor's failure on to the agent, but a

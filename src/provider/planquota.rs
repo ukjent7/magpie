@@ -6,7 +6,7 @@ use std::{
 use anyhow::{Context, Result, bail, ensure};
 use futures_util::future::join_all;
 use serde_json::Value;
-use time::{OffsetDateTime, format_description::well_known::Rfc3339};
+use time::{Duration as TimeDuration, OffsetDateTime, format_description::well_known::Rfc3339};
 
 use super::Provider;
 use super::zcode::millis_to_rfc3339;
@@ -26,7 +26,9 @@ pub(crate) struct PlanWindow {
     pub(crate) resets_at: Option<String>,
     // how long the window runs, zero when not known
     pub(crate) span_secs: u64,
-    // aside when using it up doesn't stop the models
+    // aside when using it up doesn't stop the models; routing keeps such
+    // a window out of its picks
+    #[allow(dead_code)]
     pub(crate) aside: bool,
 }
 
@@ -374,11 +376,18 @@ fn quota_of(card: &PlanQuota) -> crate::quota::Quota {
         card.windows
             .iter()
             .map(|window| {
+                let resets_at = window.resets_at.clone().or_else(|| {
+                    (window.span_secs > 0).then(|| {
+                        (OffsetDateTime::now_utc() + TimeDuration::seconds(window.span_secs as i64))
+                            .format(&Rfc3339)
+                            .ok()
+                    })
+                });
                 crate::quota::QuotaSpan::new(
                     window.name.clone(),
                     window.used,
                     (100.0 - window.used).max(0.0),
-                    window.resets_at.clone(),
+                    resets_at,
                     String::new(),
                 )
             })

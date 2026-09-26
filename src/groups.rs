@@ -74,19 +74,16 @@ fn set(args: &[String]) -> Result<()> {
     let entries = provider::available_model_entries()?;
     let existing_members = group.members.clone();
     let mut renamed: Option<String> = None;
-    let pairs = pairs
-        .iter()
-        .filter(|pair| {
-            pair.split_once('=')
-                .is_some_and(|(key, _)| key.eq_ignore_ascii_case("id"))
-                .then(|| {
-                    renamed = pair.split_once('=').map(|(_, value)| value.to_owned());
-                    false
-                })
-                .unwrap_or(true)
-        })
-        .cloned()
-        .collect::<Vec<_>>();
+    let mut pairs = Vec::new();
+    for pair in pairs {
+        if let Some((key, value)) = pair.split_once('=')
+            && key.eq_ignore_ascii_case("id")
+        {
+            renamed = Some(value.to_owned());
+            continue;
+        }
+        pairs.push(pair.clone());
+    }
     let from = group.id.clone();
     apply_pairs(&mut group, &pairs, &entries, &existing_members, false)?;
     ensure!(
@@ -94,6 +91,7 @@ fn set(args: &[String]) -> Result<()> {
         "a group needs at least one model"
     );
     provider::save_group(group.clone())?;
+    let _ = crate::grouprule::prune_rules(&group);
     if let Some(to) = renamed
         && !to.trim().eq_ignore_ascii_case(&from)
     {

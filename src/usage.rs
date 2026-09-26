@@ -463,6 +463,8 @@ pub(crate) fn agent_of(user_agent: &str) -> String {
     const USER_AGENT_PREFIXES: &[(&str, &str)] = &[
         ("claude-cli", "claude"),
         ("claude-code", "claude"),
+        ("grok", "grok"),
+        ("xai-grok-build", "grok"),
         ("codex", "codex"),
         ("geminicli", "gemini"),
         ("gemini-cli", "gemini"),
