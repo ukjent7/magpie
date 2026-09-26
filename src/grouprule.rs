@@ -1162,13 +1162,17 @@ pub async fn rule_for(
     // the first to match waits on its intent
     let intents = intents(rules, &q);
     if !intents.is_empty() {
+        // a message that only carries on is of the turn before's kind, so the
+        // classifier is told what that one was
+        let after = if had && intents.contains(&tr.intent) {
+            tr.intent.clone()
+        } else {
+            String::new()
+        };
         let mut classified = Classified {
             by: classifier.to_owned(),
             intents: intents.clone(),
-            // a message that only carries on is of the turn before's kind
-            after: (had && intents.contains(&tr.intent))
-                .then(|| tr.intent.clone())
-                .unwrap_or_default(),
+            after,
             ..Classified::default()
         };
         let text = user_text(req);
