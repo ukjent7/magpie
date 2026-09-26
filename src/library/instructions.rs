@@ -47,11 +47,14 @@ fn wanted(store: &Store, l: &Library, agent: &str) -> String {
     if !l.instructions.agents.iter().any(|id| id == agent) {
         return String::new();
     }
-    [read_text(&shared_path(store)), read_text(&extra_path(store, agent))]
-        .into_iter()
-        .filter(|part| !part.is_empty())
-        .collect::<Vec<_>>()
-        .join("\n\n")
+    [
+        read_text(&shared_path(store)),
+        read_text(&extra_path(store, agent)),
+    ]
+    .into_iter()
+    .filter(|part| !part.is_empty())
+    .collect::<Vec<_>>()
+    .join("\n\n")
 }
 
 // split takes a file apart: what is before magpie's part, magpie's part,
@@ -64,7 +67,12 @@ pub(crate) fn split(file: &str) -> (&str, &str, &str, bool) {
     let Some(j) = rest.find(BLOCK_END) else {
         return (file, "", "", false);
     };
-    (&file[..i], rest[..j].trim(), &rest[j + BLOCK_END.len()..], true)
+    (
+        &file[..i],
+        rest[..j].trim(),
+        &rest[j + BLOCK_END.len()..],
+        true,
+    )
 }
 
 // own is the file without magpie's part: the user's own instructions.
@@ -309,13 +317,9 @@ pub fn import_instructions(id: &str) -> Result<SyncResult> {
     import_instructions_at(&crate::library::store(), &Homes::detect(), id)
 }
 
-pub(crate) fn import_instructions_at(
-    store: &Store,
-    homes: &Homes,
-    id: &str,
-) -> Result<SyncResult> {
-    let t = crate::library::target_by_id(homes, id)
-        .and_then(|t| t.instructions.map(|path| (t, path)));
+pub(crate) fn import_instructions_at(store: &Store, homes: &Homes, id: &str) -> Result<SyncResult> {
+    let t =
+        crate::library::target_by_id(homes, id).and_then(|t| t.instructions.map(|path| (t, path)));
     let Some((_, path)) = t else {
         anyhow::bail!("{id} has no instructions file magpie knows");
     };
@@ -336,7 +340,11 @@ pub(crate) fn import_instructions_at(
         let mut b = Backups::new();
         b.keep(id, &path)?;
         let (_, block, _, ok) = split(&file);
-        let next = if ok { with_block("", block) } else { String::new() };
+        let next = if ok {
+            with_block("", block)
+        } else {
+            String::new()
+        };
         if next.is_empty() {
             std::fs::remove_file(&path)?;
         } else {

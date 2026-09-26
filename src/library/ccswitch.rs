@@ -36,7 +36,11 @@ fn repo_ok(repo: &str) -> bool {
 // cc_switch_origin is where on GitHub CC Switch got a skill the library
 // has from CC Switch's folder — linked to there, or a copy CC Switch gave
 // an agent that was taken in.
-pub(crate) fn cc_switch_origin(store: &Store, homes: &Homes, s: &skills::Skill) -> Option<skills::Source> {
+pub(crate) fn cc_switch_origin(
+    store: &Store,
+    homes: &Homes,
+    s: &skills::Skill,
+) -> Option<skills::Source> {
     let skills_dir = cc_switch_skills_dir(homes);
     let mut dir = skills_dir.join(&s.name);
     match &s.source {
@@ -184,10 +188,7 @@ impl Sqlite {
         let mut pointers = Vec::with_capacity(cells);
         for i in 0..cells {
             let at = base + header_len + i * 2;
-            pointers.push(usize::from(u16::from_be_bytes([
-                page[at],
-                page[at + 1],
-            ])));
+            pointers.push(usize::from(u16::from_be_bytes([page[at], page[at + 1]])));
         }
         match kind {
             5 => {
@@ -195,8 +196,9 @@ impl Sqlite {
                     if at + 4 > page.len() {
                         bail!("truncated interior cell");
                     }
-                    let left = u32::from_be_bytes([page[at], page[at + 1], page[at + 2], page[at + 3]])
-                        as usize;
+                    let left =
+                        u32::from_be_bytes([page[at], page[at + 1], page[at + 2], page[at + 3]])
+                            as usize;
                     self.walk(left, rows, depth + 1)?;
                 }
                 let right = u32::from_be_bytes([
@@ -247,8 +249,8 @@ impl Sqlite {
         let mut remaining = len - local;
         while next != 0 && remaining > 0 {
             let overflow = self.page(next)?;
-            next = u32::from_be_bytes([overflow[0], overflow[1], overflow[2], overflow[3]])
-                as usize;
+            next =
+                u32::from_be_bytes([overflow[0], overflow[1], overflow[2], overflow[3]]) as usize;
             let take = remaining.min(self.usable - 4);
             out.extend_from_slice(&overflow[4..4 + take]);
             remaining -= take;
@@ -319,11 +321,17 @@ fn serial(payload: &[u8], at: usize, t: u64) -> Result<(Value, usize)> {
         10 | 11 => bail!("reserved SQLite serial type {t}"),
         n if n % 2 == 0 => {
             let n = ((n - 12) / 2) as usize;
-            (Value::String(String::from_utf8_lossy(take(n)?).into_owned()), n)
+            (
+                Value::String(String::from_utf8_lossy(take(n)?).into_owned()),
+                n,
+            )
         }
         n => {
             let n = ((n - 13) / 2) as usize;
-            (Value::String(String::from_utf8_lossy(take(n)?).into_owned()), n)
+            (
+                Value::String(String::from_utf8_lossy(take(n)?).into_owned()),
+                n,
+            )
         }
     })
 }
@@ -351,8 +359,12 @@ mod tests {
 
     #[test]
     fn reads_the_skills_table() {
-        let db = Sqlite::open(base64::engine::general_purpose::STANDARD.decode(DB).unwrap())
-            .unwrap();
+        let db = Sqlite::open(
+            base64::engine::general_purpose::STANDARD
+                .decode(DB)
+                .unwrap(),
+        )
+        .unwrap();
         let rows = db.read_table("skills").unwrap();
         assert_eq!(rows.len(), 2);
         let dirs: Vec<String> = rows
@@ -360,15 +372,14 @@ mod tests {
             .map(|row| row.get(3).and_then(value_str).unwrap_or_default())
             .collect();
         assert_eq!(dirs, vec!["pdf", "mine"]);
-        let owner = rows[1]
-            .get(4)
-            .map(|v| v.is_null())
-            .unwrap_or(false);
+        let owner = rows[1].get(4).map(|v| v.is_null()).unwrap_or(false);
         assert!(owner, "mine has no repo_owner");
     }
 
     fn homes_with_db(sb: &Sandbox) -> Homes {
-        let db = base64::engine::general_purpose::STANDARD.decode(DB).unwrap();
+        let db = base64::engine::general_purpose::STANDARD
+            .decode(DB)
+            .unwrap();
         crate::library::testing::write_bytes(sb.home.join(".cc-switch/cc-switch.db"), &db);
         Homes::at(&sb.home)
     }
@@ -390,7 +401,10 @@ mod tests {
         write(ccs.join("skills/mine/SKILL.md"), "---\nname: mine\n---\n");
 
         let tarball = crate::library::archive::tar_gz_for_tests(&[
-            ("owner-repo-abc/skills/pdf/SKILL.md", "---\nname: pdf\ndescription: new\n---\n"),
+            (
+                "owner-repo-abc/skills/pdf/SKILL.md",
+                "---\nname: pdf\ndescription: new\n---\n",
+            ),
             ("owner-repo-abc/skills/pdf/forms.md", "forms"),
         ]);
         let (base, asked) = serve_tarball(tarball).await;
@@ -436,9 +450,12 @@ mod tests {
         let forms = std::fs::read_to_string(sb.home.join(".claude/skills/pdf/forms.md")).unwrap();
         assert_eq!(forms, "forms");
         let theirs = std::fs::read_to_string(ccs.join("skills/pdf/SKILL.md")).unwrap();
-        assert!(theirs.contains("old"), "CC Switch's folder changed: {theirs}");
-        let meta = std::fs::symlink_metadata(crate::library::skills::skill_dir(&store, "pdf"))
-            .unwrap();
+        assert!(
+            theirs.contains("old"),
+            "CC Switch's folder changed: {theirs}"
+        );
+        let meta =
+            std::fs::symlink_metadata(crate::library::skills::skill_dir(&store, "pdf")).unwrap();
         assert!(
             !meta.file_type().is_symlink(),
             "the library's pdf is still a link"
@@ -476,5 +493,4 @@ mod tests {
         });
         (format!("http://{addr}"), asked)
     }
-
 }

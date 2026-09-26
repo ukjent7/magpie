@@ -110,7 +110,11 @@ async fn test_skills_from_folder() {
         &sb.homes,
         src.to_str().unwrap(),
         &["pdf".to_owned()],
-        &["claude".to_owned(), "codex".to_owned(), "opencode".to_owned()],
+        &[
+            "claude".to_owned(),
+            "codex".to_owned(),
+            "opencode".to_owned(),
+        ],
     )
     .await
     .unwrap();
@@ -131,13 +135,8 @@ async fn test_skills_from_folder() {
     assert_eq!(v.skills[0].description, "Changed");
     assert_eq!(v.skills[0].kind, "folder");
 
-    crate::library::skills::skill_agents_at(
-        &sb.store,
-        &sb.homes,
-        "pdf",
-        vec!["claude".to_owned()],
-    )
-    .unwrap();
+    crate::library::skills::skill_agents_at(&sb.store, &sb.homes, "pdf", vec!["claude".to_owned()])
+        .unwrap();
     assert!(
         !sb.home.join(".codex/skills/pdf").exists(),
         "codex still has it"
@@ -237,7 +236,10 @@ async fn test_skills_from_github() {
                     "owner-repo-abc/skills/docx/SKILL.md",
                     "---\nname: docx\ndescription: Word\n---\n",
                 ),
-                ("owner-repo-abc/template/SKILL.md", "---\nname: template\n---\n"),
+                (
+                    "owner-repo-abc/template/SKILL.md",
+                    "---\nname: template\n---\n",
+                ),
             ]);
             (axum::http::StatusCode::OK, tarball)
         }
@@ -268,7 +270,10 @@ async fn test_skills_from_github() {
     )
     .await
     .unwrap();
-    assert_eq!(read_file(sb.home.join(".claude/skills/pdf/forms.md")), "forms");
+    assert_eq!(
+        read_file(sb.home.join(".claude/skills/pdf/forms.md")),
+        "forms"
+    );
 
     // update: the library fetches again, the links go on pointing at it
     write(

@@ -68,10 +68,7 @@ fn has(homes: &Homes, a: &agent::Agent) -> bool {
     match id {
         "claude" => contains(&homes.claude.join("settings.json"), "rtk hook claude"),
         "codex" => contains(&homes.codex.join("hooks.json"), "rtk hook codex"),
-        "gemini" => contains(
-            &homes.home.join(".gemini/settings.json"),
-            "rtk-hook-gemini",
-        ),
+        "gemini" => contains(&homes.home.join(".gemini/settings.json"), "rtk-hook-gemini"),
         "opencode" => exists(
             &a.path
                 .parent()
@@ -184,9 +181,7 @@ fn rtk_path() -> Option<PathBuf> {
                     .map(str::to_owned)
                     .collect()
             })
-            .unwrap_or_else(|| {
-                vec![".EXE".to_owned(), ".BAT".to_owned(), ".CMD".to_owned()]
-            })
+            .unwrap_or_else(|| vec![".EXE".to_owned(), ".BAT".to_owned(), ".CMD".to_owned()])
     } else {
         vec![String::new()]
     };
@@ -387,7 +382,12 @@ pub(crate) async fn set_rtk_in(
     Ok(v)
 }
 
-async fn rtk_install(homes: &Homes, bin: &Path, env: &[(&str, &str)], a: &agent::Agent) -> Result<()> {
+async fn rtk_install(
+    homes: &Homes,
+    bin: &Path,
+    env: &[(&str, &str)],
+    a: &agent::Agent,
+) -> Result<()> {
     let sp = spec(a.spec.id).context("rtk has no hook for this agent")?;
     let d = dir(homes, a);
     if !d.as_os_str().is_empty() {
@@ -402,11 +402,8 @@ async fn rtk_install(homes: &Homes, bin: &Path, env: &[(&str, &str)], a: &agent:
     let tmp;
     let mut tmp_text = String::new();
     if sp.with_claude {
-        tmp = std::env::temp_dir().join(format!(
-            "magpie-rtk-{}-{}",
-            std::process::id(),
-            now_nanos()
-        ));
+        tmp =
+            std::env::temp_dir().join(format!("magpie-rtk-{}-{}", std::process::id(), now_nanos()));
         std::fs::create_dir_all(&tmp).with_context(|| format!("create {}", tmp.display()))?;
         tmp_text = tmp.to_string_lossy().into_owned();
         env_all.push(("CLAUDE_CONFIG_DIR", tmp_text.as_str()));
@@ -437,9 +434,11 @@ fn now_nanos() -> u128 {
 pub fn rtk_takes(q: &str) -> Result<String> {
     let a = agent::find(q)?;
     if spec(a.spec.id).is_none() {
-        let mut ids: Vec<&str> = ["claude", "codex", "gemini", "opencode", "cursor", "copilot", "pi", "omp", "hermes"]
-            .into_iter()
-            .collect();
+        let mut ids: Vec<&str> = [
+            "claude", "codex", "gemini", "opencode", "cursor", "copilot", "pi", "omp", "hermes",
+        ]
+        .into_iter()
+        .collect();
         ids.sort();
         bail!(
             "rtk has no hook for {} (it has for {})",
@@ -555,9 +554,16 @@ esac
     }
 
     async fn switch(sb: &Sandbox, rtk: &FakeRtk, id: &str, on: bool) {
-        set_rtk_in(&sb.store, &sb.homes, Some(rtk.bin.clone()), id, on, &rtk.env())
-            .await
-            .unwrap();
+        set_rtk_in(
+            &sb.store,
+            &sb.homes,
+            Some(rtk.bin.clone()),
+            id,
+            on,
+            &rtk.env(),
+        )
+        .await
+        .unwrap();
     }
 
     async fn want(sb: &Sandbox, rtk: &FakeRtk, claude: bool, opencode: bool, cursor: bool) {
@@ -597,13 +603,24 @@ esac
         want(&sb, &rtk, true, false, false).await;
 
         assert!(
-            set_rtk_in(&sb.store, &sb.homes, Some(rtk.bin.clone()), "goose", true, &rtk.env())
-                .await
-                .is_err(),
+            set_rtk_in(
+                &sb.store,
+                &sb.homes,
+                Some(rtk.bin.clone()),
+                "goose",
+                true,
+                &rtk.env()
+            )
+            .await
+            .is_err(),
             "goose has no rtk hook, yet it was switched on"
         );
         let v = read_rtk_in(&sb.homes, None).await;
-        assert!(v.path.is_empty(), "rtk found at {} with no binary given", v.path);
+        assert!(
+            v.path.is_empty(),
+            "rtk found at {} with no binary given",
+            v.path
+        );
         assert!(
             set_rtk_in(&sb.store, &sb.homes, None, "claude", false, &rtk.env())
                 .await

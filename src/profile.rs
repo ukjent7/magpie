@@ -179,7 +179,10 @@ pub fn report(applied: &Applied) -> Vec<String> {
     };
     let mut lines = Vec::new();
     if !result.changed.is_empty() {
-        lines.push(format!("library written into {}", result.changed.join(", ")));
+        lines.push(format!(
+            "library written into {}",
+            result.changed.join(", ")
+        ));
     }
     if !result.missing.is_empty() {
         lines.push(format!(

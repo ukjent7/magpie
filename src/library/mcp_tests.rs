@@ -9,10 +9,7 @@ use crate::library::Target;
 use crate::library::testing::{Sandbox, ok, read as read_file, write};
 
 fn ids(targets: &[Target]) -> Vec<String> {
-    targets
-        .iter()
-        .map(|t| t.agent.spec.id.to_owned())
-        .collect()
+    targets.iter().map(|t| t.agent.spec.id.to_owned()).collect()
 }
 
 fn stdio_server(name: &str, agents: Vec<String>) -> Server {
@@ -55,7 +52,9 @@ fn test_targets() {
 fn test_takes_refuses_alma() {
     let sb = Sandbox::new();
     for kind in ["instructions", "mcp", "skills"] {
-        let error = crate::library::takes(&sb.homes, "alma", kind).unwrap_err().to_string();
+        let error = crate::library::takes(&sb.homes, "alma", kind)
+            .unwrap_err()
+            .to_string();
         assert!(
             error.contains("Alma has no user-wide place"),
             "{kind}: {error}"
@@ -127,7 +126,10 @@ fn test_server_every_format() {
         "codex config lost the user's:\n{codex}"
     );
     let opencode = read_file(sb.home.join(".config/opencode/opencode.json"));
-    assert!(opencode.contains("// mine"), "opencode lost its comment:\n{opencode}");
+    assert!(
+        opencode.contains("// mine"),
+        "opencode lost its comment:\n{opencode}"
+    );
 
     ok(remove_server_at(&sb.store, &sb.homes, "fs"));
     ok(remove_server_at(&sb.store, &sb.homes, "web"));
@@ -171,13 +173,15 @@ fn test_server_keeps_users_keys() {
     ));
     let cfg = sb.home.join(".codex/config.toml");
     let text = read_file(&cfg);
-    write(&cfg, &text.replace("command = ", "startup_timeout_sec = 30\ncommand = "));
+    write(
+        &cfg,
+        &text.replace("command = ", "startup_timeout_sec = 30\ncommand = "),
+    );
     let cp = sb.home.join(".copilot/mcp-config.json");
     let text = read_file(&cp);
     write(&cp, &text.replacen(r#""*""#, r#""read""#, 1));
     let gm = sb.home.join(".gemini/settings.json");
-    let mut g: Value =
-        serde_json::from_str(&read_file(&gm)).unwrap();
+    let mut g: Value = serde_json::from_str(&read_file(&gm)).unwrap();
     g["mcpServers"]["fs"]["trust"] = json!(true);
     write(&gm, &serde_json::to_string(&g).unwrap());
 
@@ -225,7 +229,8 @@ fn test_del_codex_removes_child_tables() {
     codex_del(&path, "x").unwrap();
     let got = read_file(&path);
     assert_eq!(
-        got, format!("{before}{after}"),
+        got,
+        format!("{before}{after}"),
         "the server and its child tables should be gone"
     );
     // nothing implicitly recreated the removed server
@@ -373,11 +378,7 @@ fn test_server_sse() {
             name: "s".to_owned(),
             transport: "sse".to_owned(),
             url: "http://localhost:9/sse".to_owned(),
-            agents: vec![
-                "claude".to_owned(),
-                "codex".to_owned(),
-                "goose".to_owned(),
-            ],
+            agents: vec!["claude".to_owned(), "codex".to_owned(), "goose".to_owned()],
             ..Server::default()
         },
     )
@@ -552,9 +553,15 @@ fn test_claude_desktop_mcp() {
     assert_eq!(doc["globalShortcut"], json!("Alt+Space"));
     let v = crate::library::read_at(&sb.store, &sb.homes, &[]).unwrap();
     let a = v.agents.iter().find(|a| a.id == "claude-desktop").unwrap();
-    assert!(a.no_remote, "claude-desktop not said to take no remote server");
+    assert!(
+        a.no_remote,
+        "claude-desktop not said to take no remote server"
+    );
     let s = v.servers.iter().find(|s| s.server.name == "web").unwrap();
-    assert_eq!(s.problems.get("claude-desktop").map(String::as_str), Some("no-remote"));
+    assert_eq!(
+        s.problems.get("claude-desktop").map(String::as_str),
+        Some("no-remote")
+    );
 }
 
 // A server on no agent is listed with none, not null: the page looks in

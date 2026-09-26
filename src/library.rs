@@ -12,15 +12,14 @@ pub mod rtk;
 pub mod skills;
 
 pub use instructions::{
-    InstructionsChange, InstructionsView, import_instructions, read_instructions,
-    save_instructions,
+    InstructionsChange, InstructionsView, import_instructions, read_instructions, save_instructions,
 };
 pub use mcp::{Found, Server, import_server, remove_server, save_server, server_agents};
+pub use rtk::{RTKAgent, RTKGain, RTKView, read_rtk, rtk_takes, set_rtk};
 pub use skills::{
     Candidate, Probe, Skill, SkillView, import_skill, install_skills, probe_skills, remove_skill,
     skill_agents, skill_path, skill_text, update_skill,
 };
-pub use rtk::{RTKAgent, RTKGain, RTKView, read_rtk, set_rtk, rtk_takes};
 
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
@@ -517,7 +516,10 @@ impl Library {
 pub(crate) fn is_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= 64
-        && name.chars().next().is_some_and(|c| c.is_ascii_alphanumeric())
+        && name
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphanumeric())
         && name
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
@@ -600,8 +602,7 @@ impl Backups {
         }
         let dst = self.dir.join(agent).join(file_name(path)?);
         if let Some(parent) = dst.parent() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("create {}", parent.display()))?;
+            fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
         }
         fs::write(&dst, data).with_context(|| format!("write {}", dst.display()))
     }
@@ -819,7 +820,10 @@ impl Setup {
     // agent.
     pub fn on(&self) -> (usize, usize) {
         (
-            self.mcp.values().filter(|agents| !agents.is_empty()).count(),
+            self.mcp
+                .values()
+                .filter(|agents| !agents.is_empty())
+                .count(),
             self.skills
                 .values()
                 .filter(|agents| !agents.is_empty())
@@ -1075,7 +1079,10 @@ pub(crate) fn read_at(store: &Store, homes: &Homes, problems: &[Problem]) -> Res
         let meta = skills::read_meta(&skills::skill_dir(store, &s.name));
         skills.push(SkillView {
             name: s.name.clone(),
-            description: meta.as_ref().map(|m| m.description.clone()).unwrap_or_default(),
+            description: meta
+                .as_ref()
+                .map(|m| m.description.clone())
+                .unwrap_or_default(),
             source,
             kind,
             origin,
@@ -1283,7 +1290,13 @@ async fn status() -> Result<()> {
     if v.instructions.shared.trim().is_empty() {
         println!("  none yet · magpie library instructions set <file>");
     } else {
-        let lines = v.instructions.shared.trim_end_matches('\n').matches('\n').count() + 1;
+        let lines = v
+            .instructions
+            .shared
+            .trim_end_matches('\n')
+            .matches('\n')
+            .count()
+            + 1;
         println!("  {lines} lines → {}", on(&to));
     }
     for a in &v.instructions.agents {
@@ -1425,7 +1438,9 @@ pub(crate) mod testing {
     }
 
     // ok fails a test on an error or a problem: ok(save_server_at(…)).
-    pub(crate) fn ok(result: anyhow::Result<crate::library::SyncResult>) -> crate::library::SyncResult {
+    pub(crate) fn ok(
+        result: anyhow::Result<crate::library::SyncResult>,
+    ) -> crate::library::SyncResult {
         let res = result.unwrap();
         assert!(
             res.problems.is_empty(),

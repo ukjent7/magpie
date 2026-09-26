@@ -101,7 +101,6 @@ impl<'a> Bits<'a> {
     fn align(&mut self) {
         self.count = 0;
     }
-
 }
 
 // A Huffman table: code lengths per symbol, and the symbols sorted by
@@ -161,8 +160,8 @@ fn decode(bits: &mut Bits, h: &Huffman) -> Result<u16> {
 }
 
 const LENGTH_BASE: [u16; 29] = [
-    3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59, 67, 83, 99, 115,
-    131, 163, 195, 227, 258,
+    3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59, 67, 83, 99, 115, 131,
+    163, 195, 227, 258,
 ];
 const LENGTH_EXTRA: [u8; 29] = [
     0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0,
@@ -172,8 +171,8 @@ const DIST_BASE: [u16; 30] = [
     2049, 3073, 4097, 6145, 8193, 12289, 16385, 24577,
 ];
 const DIST_EXTRA: [u8; 30] = [
-    0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12,
-    13, 13,
+    0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13,
+    13,
 ];
 const CODE_LENGTH_ORDER: [usize; 19] = [
     16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15,
@@ -223,7 +222,13 @@ fn inflate(data: &[u8], max_out: usize) -> Result<Vec<u8>> {
                     };
                 }
                 let dists = [5u8; 30];
-                codes(&mut bits, &mut out, &construct(&lengths)?, &construct(&dists)?, max_out)?;
+                codes(
+                    &mut bits,
+                    &mut out,
+                    &construct(&lengths)?,
+                    &construct(&dists)?,
+                    max_out,
+                )?;
             }
             2 => {
                 let hlit = bits.bits(5)? + 257;
@@ -307,8 +312,8 @@ fn codes(
                 if dsym >= DIST_BASE.len() {
                     bail!("bad distance symbol");
                 }
-                let distance = usize::from(DIST_BASE[dsym])
-                    + bits.bits(u32::from(DIST_EXTRA[dsym]))? as usize;
+                let distance =
+                    usize::from(DIST_BASE[dsym]) + bits.bits(u32::from(DIST_EXTRA[dsym]))? as usize;
                 if distance > out.len() {
                     bail!("a distance before the start of the output");
                 }
@@ -365,9 +370,7 @@ pub(crate) fn untar(data: &[u8], dst: &std::path::Path, max_total: u64) -> Resul
                 0 | b'0' => {
                     total += size;
                     if total > max_total {
-                        bail!(
-                            "the repository is too big to install skills from (over 200 MB)"
-                        );
+                        bail!("the repository is too big to install skills from (over 200 MB)");
                     }
                     if let Some(parent) = p.parent() {
                         std::fs::create_dir_all(parent)
@@ -521,7 +524,9 @@ mod tests {
 
     #[test]
     fn untar_drops_the_top_folder_and_never_goes_outside() {
-        let data = unbase64("H4sIAJzXt2oC/+3TMQrCMBSA4cw9RS8QG9vq4CaoIFYQPUG1EYu2KYni9W11kYKDKB30/5YXQiDD4zfXUltpdWVkut0F7pifTi6osn2wWcyTpFdk4mOqNozj+6y1p1KDp3Nz349VFApfiQ5c3Dm19ffiP0kpvTIt9Mivd+5l2u1sXp1zU4781WTmfFNqr3kj8JPMy/73xhaum/7VoN1/pOi/E/ctkwH9P/pfT8eT5fQr1b/Tf9jqP1RRTP9dOOQ0AAAAAAAAAAAAAAC/4AaXg+vDACgAAA==");
+        let data = unbase64(
+            "H4sIAJzXt2oC/+3TMQrCMBSA4cw9RS8QG9vq4CaoIFYQPUG1EYu2KYni9W11kYKDKB30/5YXQiDD4zfXUltpdWVkut0F7pifTi6osn2wWcyTpFdk4mOqNozj+6y1p1KDp3Nz349VFApfiQ5c3Dm19ffiP0kpvTIt9Mivd+5l2u1sXp1zU4781WTmfFNqr3kj8JPMy/73xhaum/7VoN1/pOi/E/ctkwH9P/pfT8eT5fQr1b/Tf9jqP1RRTP9dOOQ0AAAAAAAAAAAAAAC/4AaXg+vDACgAAA==",
+        );
         let dir = std::env::temp_dir().join(format!("magpie-archive-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -532,7 +537,10 @@ mod tests {
             std::fs::read_to_string(dir.join("skills/pdf/forms.md")).unwrap(),
             "forms"
         );
-        assert_eq!(std::fs::read_to_string(dir.join("README.md")).unwrap(), "hi");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("README.md")).unwrap(),
+            "hi"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

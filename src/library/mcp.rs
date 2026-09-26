@@ -145,17 +145,28 @@ pub(crate) fn supports(format: &Format, transport: &str) -> Option<&'static str>
 
 // encode is the server as this agent writes it.
 fn encode(format: Format, s: &Server) -> Value {
-    let optional_map = |object: &mut serde_json::Map<String, Value>, key: &str, m: &BTreeMap<String, String>| {
-        if !m.is_empty() {
-            object.insert(
-                key.to_owned(),
-                Value::Object(m.iter().map(|(k, v)| (k.clone(), Value::String(v.clone()))).collect()),
-            );
-        }
+    let optional_map =
+        |object: &mut serde_json::Map<String, Value>, key: &str, m: &BTreeMap<String, String>| {
+            if !m.is_empty() {
+                object.insert(
+                    key.to_owned(),
+                    Value::Object(
+                        m.iter()
+                            .map(|(k, v)| (k.clone(), Value::String(v.clone())))
+                            .collect(),
+                    ),
+                );
+            }
+        };
+    let list = |a: &[String]| -> Value {
+        Value::Array(a.iter().map(|v| Value::String(v.clone())).collect())
     };
-    let list = |a: &[String]| -> Value { Value::Array(a.iter().map(|v| Value::String(v.clone())).collect()) };
     let str_map = |m: &BTreeMap<String, String>| -> Value {
-        Value::Object(m.iter().map(|(k, v)| (k.clone(), Value::String(v.clone()))).collect())
+        Value::Object(
+            m.iter()
+                .map(|(k, v)| (k.clone(), Value::String(v.clone())))
+                .collect(),
+        )
     };
     let mut o = serde_json::Map::new();
     match format {
@@ -220,14 +231,20 @@ fn encode(format: Format, s: &Server) -> Value {
                 o.insert("args".to_owned(), list(&s.args));
                 optional_map(&mut o, "env", &s.env);
             }
-            o.insert("tools".to_owned(), Value::Array(vec![Value::String("*".to_owned())]));
+            o.insert(
+                "tools".to_owned(),
+                Value::Array(vec![Value::String("*".to_owned())]),
+            );
         }
         Format::Goose => {
             o.insert("enabled".to_owned(), Value::Bool(true));
             o.insert("name".to_owned(), Value::String(s.name.clone()));
             match s.transport.as_str() {
                 "http" => {
-                    o.insert("type".to_owned(), Value::String("streamable_http".to_owned()));
+                    o.insert(
+                        "type".to_owned(),
+                        Value::String("streamable_http".to_owned()),
+                    );
                     o.insert("uri".to_owned(), Value::String(s.url.clone()));
                     optional_map(&mut o, "headers", &s.headers);
                 }
@@ -248,7 +265,11 @@ fn encode(format: Format, s: &Server) -> Value {
             // pi-mcp-extension reads the transport from "transport",
             // pi-mcp-adapter from "httpTransport"; each ignores the other's
             if s.remote() {
-                let t = if s.transport == "sse" { "sse" } else { "streamable-http" };
+                let t = if s.transport == "sse" {
+                    "sse"
+                } else {
+                    "streamable-http"
+                };
                 o.insert("transport".to_owned(), Value::String(t.to_owned()));
                 o.insert("httpTransport".to_owned(), Value::String(t.to_owned()));
                 o.insert("url".to_owned(), Value::String(s.url.clone()));
@@ -329,23 +350,43 @@ fn decode(format: Format, name: &str, m: &Value) -> Option<Server> {
     match format {
         Format::OpenCode => {
             if value_str(m, "type") == "remote" {
-                remote("http", value_str(m, "url"), m.get("headers").unwrap_or(&Value::Null));
+                remote(
+                    "http",
+                    value_str(m, "url"),
+                    m.get("headers").unwrap_or(&Value::Null),
+                );
             } else {
                 let command = value_list_at(m, "command");
                 if let Some((first, rest)) = command.split_first() {
-                    local(first.clone(), &Value::Array(rest.iter().cloned().map(Value::String).collect()), m.get("environment").unwrap_or(&Value::Null));
+                    local(
+                        first.clone(),
+                        &Value::Array(rest.iter().cloned().map(Value::String).collect()),
+                        m.get("environment").unwrap_or(&Value::Null),
+                    );
                 }
             }
         }
         Format::Goose => match value_str(m, "type").as_str() {
             "stdio" => {
-                local(value_str(m, "cmd"), m.get("args").unwrap_or(&Value::Null), m.get("envs").unwrap_or(&Value::Null));
+                local(
+                    value_str(m, "cmd"),
+                    m.get("args").unwrap_or(&Value::Null),
+                    m.get("envs").unwrap_or(&Value::Null),
+                );
             }
             "streamable_http" => {
-                remote("http", value_str(m, "uri"), m.get("headers").unwrap_or(&Value::Null));
+                remote(
+                    "http",
+                    value_str(m, "uri"),
+                    m.get("headers").unwrap_or(&Value::Null),
+                );
             }
             "sse" => {
-                remote("sse", value_str(m, "uri"), m.get("headers").unwrap_or(&Value::Null));
+                remote(
+                    "sse",
+                    value_str(m, "uri"),
+                    m.get("headers").unwrap_or(&Value::Null),
+                );
             }
             _ => {}
         },
@@ -354,7 +395,11 @@ fn decode(format: Format, name: &str, m: &Value) -> Option<Server> {
             if !url.is_empty() {
                 remote("http", url, m.get("http_headers").unwrap_or(&Value::Null));
             } else {
-                local(value_str(m, "command"), m.get("args").unwrap_or(&Value::Null), m.get("env").unwrap_or(&Value::Null));
+                local(
+                    value_str(m, "command"),
+                    m.get("args").unwrap_or(&Value::Null),
+                    m.get("env").unwrap_or(&Value::Null),
+                );
             }
         }
         Format::Gemini => {
@@ -363,16 +408,25 @@ fn decode(format: Format, name: &str, m: &Value) -> Option<Server> {
             if !http_url.is_empty() {
                 remote("http", http_url, m.get("headers").unwrap_or(&Value::Null));
             } else if !url.is_empty() {
-                let t = if value_str(m, "type") == "http" { "http" } else { "sse" };
+                let t = if value_str(m, "type") == "http" {
+                    "http"
+                } else {
+                    "sse"
+                };
                 remote(t, url, m.get("headers").unwrap_or(&Value::Null));
             } else {
-                local(value_str(m, "command"), m.get("args").unwrap_or(&Value::Null), m.get("env").unwrap_or(&Value::Null));
+                local(
+                    value_str(m, "command"),
+                    m.get("args").unwrap_or(&Value::Null),
+                    m.get("env").unwrap_or(&Value::Null),
+                );
             }
         }
         Format::Pi => {
             let url = value_str(m, "url");
             if !url.is_empty() {
-                let t = if value_str(m, "transport") == "sse" || value_str(m, "httpTransport") == "sse"
+                let t = if value_str(m, "transport") == "sse"
+                    || value_str(m, "httpTransport") == "sse"
                 {
                     "sse"
                 } else {
@@ -380,7 +434,11 @@ fn decode(format: Format, name: &str, m: &Value) -> Option<Server> {
                 };
                 remote(t, url, m.get("headers").unwrap_or(&Value::Null));
             } else {
-                local(value_str(m, "command"), m.get("args").unwrap_or(&Value::Null), m.get("env").unwrap_or(&Value::Null));
+                local(
+                    value_str(m, "command"),
+                    m.get("args").unwrap_or(&Value::Null),
+                    m.get("env").unwrap_or(&Value::Null),
+                );
             }
         }
         // Claude Code, Cursor, Copilot, Crush, ZCode, Desktop
@@ -393,7 +451,11 @@ fn decode(format: Format, name: &str, m: &Value) -> Option<Server> {
                 }
                 remote(&t, url, m.get("headers").unwrap_or(&Value::Null));
             } else {
-                local(value_str(m, "command"), m.get("args").unwrap_or(&Value::Null), m.get("env").unwrap_or(&Value::Null));
+                local(
+                    value_str(m, "command"),
+                    m.get("args").unwrap_or(&Value::Null),
+                    m.get("env").unwrap_or(&Value::Null),
+                );
             }
         }
     }
@@ -482,11 +544,9 @@ fn yaml_to_json(v: &yaml_edit::YamlValue) -> Value {
                 .map(|(k, v)| (k.clone(), yaml_to_json(v)))
                 .collect(),
         ),
-        yaml_edit::YamlValue::Set(s) => Value::Array(
-            s.iter()
-                .map(|k| Value::String(k.clone()))
-                .collect(),
-        ),
+        yaml_edit::YamlValue::Set(s) => {
+            Value::Array(s.iter().map(|k| Value::String(k.clone())).collect())
+        }
         yaml_edit::YamlValue::OrderedMapping(pairs) | yaml_edit::YamlValue::Pairs(pairs) => {
             Value::Object(
                 pairs
@@ -527,16 +587,12 @@ fn toml_value_to_json(v: &toml_edit::Value) -> Value {
     match v {
         toml_edit::Value::String(s) => Value::String(s.value().to_owned()),
         toml_edit::Value::Integer(i) => Value::Number(i.value().into()),
-        toml_edit::Value::Float(f) => {
-            serde_json::Number::from_f64(f.value())
-                .map(Value::Number)
-                .unwrap_or(Value::Null)
-        }
+        toml_edit::Value::Float(f) => serde_json::Number::from_f64(f.value())
+            .map(Value::Number)
+            .unwrap_or(Value::Null),
         toml_edit::Value::Boolean(b) => Value::Bool(b.value()),
         toml_edit::Value::Datetime(d) => Value::String(d.to_string()),
-        toml_edit::Value::Array(a) => {
-            Value::Array(a.iter().map(toml_value_to_json).collect())
-        }
+        toml_edit::Value::Array(a) => Value::Array(a.iter().map(toml_value_to_json).collect()),
         toml_edit::Value::InlineTable(t) => Value::Object(
             t.iter()
                 .map(|(k, v)| (k.to_owned(), toml_value_to_json(v)))
@@ -588,13 +644,30 @@ pub(crate) fn read(f: &McpFile) -> Result<BTreeMap<String, Server>> {
 // are the user's, and kept when magpie writes the server again.
 fn owned(format: Format) -> &'static [&'static str] {
     match format {
-        Format::Gemini => &["type", "httpUrl", "url", "headers", "command", "args", "env"],
-        Format::OpenCode => &["type", "url", "headers", "command", "environment", "enabled"],
+        Format::Gemini => &[
+            "type", "httpUrl", "url", "headers", "command", "args", "env",
+        ],
+        Format::OpenCode => &[
+            "type",
+            "url",
+            "headers",
+            "command",
+            "environment",
+            "enabled",
+        ],
         Format::Goose => &[
             "enabled", "name", "type", "uri", "headers", "cmd", "args", "envs",
         ],
         Format::Codex => &["url", "http_headers", "command", "args", "env"],
-        Format::Pi => &["transport", "httpTransport", "url", "headers", "command", "args", "env"],
+        Format::Pi => &[
+            "transport",
+            "httpTransport",
+            "url",
+            "headers",
+            "command",
+            "args",
+            "env",
+        ],
         _ => &["type", "url", "headers", "command", "args", "env"],
     }
 }
@@ -632,7 +705,9 @@ fn put(f: &McpFile, s: &Server, old: Option<&Value>) -> Result<()> {
     let entry = merged(f.format, s, old);
     match f.format {
         Format::Codex => codex_put(&f.path, &s.name, &entry),
-        Format::Goose => config::set_yaml_values(&f.path, &[(format!("extensions.{}", s.name), entry)]),
+        Format::Goose => {
+            config::set_yaml_values(&f.path, &[(format!("extensions.{}", s.name), entry)])
+        }
         _ => config::set_jsonc_value(&f.path, &format!("{}.{}", key(f.format), s.name), &entry),
     }
 }
@@ -641,7 +716,11 @@ fn put(f: &McpFile, s: &Server, old: Option<&Value>) -> Result<()> {
 fn del(f: &McpFile, name: &str) -> Result<()> {
     match f.format {
         Format::Codex => codex_del(&f.path, name),
-        Format::Goose => config::delete(&f.path, config::ConfigFormat::Yaml, &format!("extensions.{name}")),
+        Format::Goose => config::delete(
+            &f.path,
+            config::ConfigFormat::Yaml,
+            &format!("extensions.{name}"),
+        ),
         _ => config::delete(
             &f.path,
             config::ConfigFormat::Jsonc,
@@ -727,16 +806,11 @@ pub(crate) fn sync_mcp(l: &mut Library, t: &Target, b: &mut Backups, res: &mut S
         }
     };
     let mut mine = Vec::new();
-    let had = l
-        .applied
-        .get(id)
-        .map(|a| a.mcp.clone())
-        .unwrap_or_default();
+    let had = l.applied.get(id).map(|a| a.mcp.clone()).unwrap_or_default();
     for name in had {
         let keep = match l.server(&name) {
             Some(s) => {
-                s.agents.iter().any(|x| x == id)
-                    && supports(&f.format, &s.transport).is_none()
+                s.agents.iter().any(|x| x == id) && supports(&f.format, &s.transport).is_none()
             }
             None => false,
         };
@@ -912,9 +986,14 @@ fn app_owned(s: &Server) -> bool {
         return false;
     }
     let cmd = s.command.to_lowercase().replace('\\', "/");
-    [".app/contents/", "/windowsapps/", "/cua_node/", "/openai/codex/runtimes/"]
-        .iter()
-        .any(|inside| cmd.contains(inside))
+    [
+        ".app/contents/",
+        "/windowsapps/",
+        "/cua_node/",
+        "/openai/codex/runtimes/",
+    ]
+    .iter()
+    .any(|inside| cmd.contains(inside))
 }
 
 pub(crate) fn found_servers(l: &Library, homes: &Homes) -> Vec<Found> {
@@ -932,22 +1011,22 @@ pub(crate) fn found_servers(l: &Library, homes: &Homes) -> Vec<Found> {
             .unwrap_or_default();
         let id = t.agent.spec.id;
         for (name, mut s) in have {
-            if mine.iter().any(|x| x == &name)
-                || l.server(&name).is_some()
-                || !is_name(&name)
-            {
+            if mine.iter().any(|x| x == &name) || l.server(&name).is_some() || !is_name(&name) {
                 continue;
             }
             match by_name.get_mut(&name) {
                 None => {
                     s.agents = vec![id.to_owned()];
                     names.push(name.clone());
-                    by_name.insert(name, Found {
-                        own: app_owned(&s),
-                        server: s,
-                        others: Vec::new(),
-                        icon: String::new(),
-                    });
+                    by_name.insert(
+                        name,
+                        Found {
+                            own: app_owned(&s),
+                            server: s,
+                            others: Vec::new(),
+                            icon: String::new(),
+                        },
+                    );
                 }
                 Some(found) if found.server.same(&s) => {
                     found.server.agents.push(id.to_owned());

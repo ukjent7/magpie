@@ -11,7 +11,9 @@ use anyhow::{Context, Result, bail};
 use serde::Serialize;
 use time::OffsetDateTime;
 
-use crate::library::{Homes, Library, Store, SyncResult, Target, change_in, check_name, is_name, store, timestamp};
+use crate::library::{
+    Homes, Library, Store, SyncResult, Target, change_in, check_name, is_name, store, timestamp,
+};
 
 // Skill is a folder with a SKILL.md, kept in the library and linked into
 // the agents that get it.
@@ -50,7 +52,11 @@ impl std::fmt::Display for Source {
         }
         let mut url = format!("https://github.com/{}", self.repo);
         if !self.ref_.is_empty() || !self.path.is_empty() {
-            let ref_ = if self.ref_.is_empty() { "HEAD" } else { &self.ref_ };
+            let ref_ = if self.ref_.is_empty() {
+                "HEAD"
+            } else {
+                &self.ref_
+            };
             url.push_str(&format!("/tree/{ref_}"));
             if !self.path.is_empty() {
                 url.push('/');
@@ -178,8 +184,7 @@ fn clean(p: &Path) -> PathBuf {
 fn make_link(target: &Path, p: &Path) -> Result<()> {
     #[cfg(unix)]
     {
-        std::os::unix::fs::symlink(target, p)
-            .with_context(|| format!("link {}", p.display()))
+        std::os::unix::fs::symlink(target, p).with_context(|| format!("link {}", p.display()))
     }
     #[cfg(windows)]
     {
@@ -205,8 +210,11 @@ fn link(p: &Path, name: &str, store: &Store) -> Result<()> {
         let _ = std::fs::remove_dir_all(p);
         return Err(error);
     }
-    std::fs::write(p.join(MARKER), format!("copied from {}\n", target.display()))
-        .with_context(|| format!("write marker in {}", p.display()))
+    std::fs::write(
+        p.join(MARKER),
+        format!("copied from {}\n", target.display()),
+    )
+    .with_context(|| format!("write marker in {}", p.display()))
 }
 
 fn unlink(p: &Path) -> Result<()> {
@@ -431,7 +439,10 @@ fn tarball_url(repo: &str, ref_: &str) -> String {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .clone()
     {
-        return format!("{base}/{repo}/{}", if ref_.is_empty() { "HEAD" } else { ref_ });
+        return format!(
+            "{base}/{repo}/{}",
+            if ref_.is_empty() { "HEAD" } else { ref_ }
+        );
     }
     let ref_ = if ref_.is_empty() { "HEAD" } else { ref_ };
     format!(
@@ -572,9 +583,7 @@ pub(crate) async fn probe_skills_at(store: &Store, input: &str) -> Result<Probe>
             .as_ref()
             .map(|m| {
                 m.iter()
-                    .filter(|(_, e)| {
-                        OffsetDateTime::now_utc() - e.at > time::Duration::minutes(15)
-                    })
+                    .filter(|(_, e)| OffsetDateTime::now_utc() - e.at > time::Duration::minutes(15))
                     .map(|(k, _)| k.clone())
                     .collect::<Vec<_>>()
             })
@@ -820,9 +829,8 @@ fn finish_update(
                 renamed = false;
             }
             Ok(_) => {
-                std::fs::rename(skill_dir(&store, &name), &old).with_context(|| {
-                    format!("move {}", skill_dir(&store, &name).display())
-                })?;
+                std::fs::rename(skill_dir(&store, &name), &old)
+                    .with_context(|| format!("move {}", skill_dir(&store, &name).display()))?;
             }
             Err(_) => {
                 let _ = std::fs::remove_dir_all(&next);
@@ -836,16 +844,13 @@ fn finish_update(
             }
             return Err(error).with_context(|| format!("move {}", next.display()));
         }
-        if adopt
-            && let Some(s) = l.skill_mut(&name)
-        {
+        if adopt && let Some(s) = l.skill_mut(&name) {
             s.source = Some(src);
         }
         if !renamed {
             return Ok(());
         }
-        std::fs::remove_dir_all(&old_path)
-            .with_context(|| format!("remove {}", old_path.display()))
+        std::fs::remove_dir_all(&old_path).with_context(|| format!("remove {}", old_path.display()))
     })
 }
 
@@ -1058,13 +1063,14 @@ pub(crate) fn copy_dir(from: &Path, to: &Path) -> Result<()> {
 
 fn copy_dir_inner(root: &Path, from: &Path, to: &Path) -> Result<()> {
     std::fs::create_dir_all(to).with_context(|| format!("create {}", to.display()))?;
-    let entries =
-        std::fs::read_dir(from).with_context(|| format!("read {}", from.display()))?;
+    let entries = std::fs::read_dir(from).with_context(|| format!("read {}", from.display()))?;
     for entry in entries.flatten() {
         let name = entry.file_name();
         let p = entry.path();
         let dst = to.join(&name);
-        let kind = entry.file_type().with_context(|| format!("read {}", p.display()))?;
+        let kind = entry
+            .file_type()
+            .with_context(|| format!("read {}", p.display()))?;
         if kind.is_symlink() {
             if let Ok(target) = std::fs::read_link(&p) {
                 #[cfg(unix)]
@@ -1128,8 +1134,7 @@ fn move_dir(from: &Path, to: &Path) -> Result<()> {
 pub fn skill_text(name: &str) -> Result<String> {
     check_name("skill", name)?;
     let path = skill_dir(&store(), name).join("SKILL.md");
-    std::fs::read_to_string(&path)
-        .with_context(|| format!("{name} has no SKILL.md in the library"))
+    std::fs::read_to_string(&path).with_context(|| format!("{name} has no SKILL.md in the library"))
 }
 
 // SkillPath is where a library skill's folder is.
