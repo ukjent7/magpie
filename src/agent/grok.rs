@@ -295,7 +295,7 @@ mod tests {
     }
 
     fn table(path: &Path, keys: &[&str]) -> Option<Table> {
-        let doc = std::str::FromStr::from_str(&read(path)).unwrap();
+        let doc: DocumentMut = std::str::FromStr::from_str(&read(path)).unwrap();
         let (last, parents) = keys.split_last().unwrap();
         let mut item = doc.as_table();
         for key in parents {

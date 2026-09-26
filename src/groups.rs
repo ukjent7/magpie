@@ -74,7 +74,7 @@ fn set(args: &[String]) -> Result<()> {
     let entries = provider::available_model_entries()?;
     let existing_members = group.members.clone();
     let mut renamed: Option<String> = None;
-    let mut pairs: Vec<String> = Vec::new();
+    let mut assignments: Vec<String> = Vec::new();
     for pair in pairs {
         if let Some((key, value)) = pair.split_once('=')
             && key.eq_ignore_ascii_case("id")
@@ -82,10 +82,10 @@ fn set(args: &[String]) -> Result<()> {
             renamed = Some(value.to_owned());
             continue;
         }
-        pairs.push(pair.clone());
+        assignments.push(pair.clone());
     }
     let from = group.id.clone();
-    apply_pairs(&mut group, &pairs, &entries, &existing_members, false)?;
+    apply_pairs(&mut group, &assignments, &entries, &existing_members, false)?;
     ensure!(
         !group.members.is_empty(),
         "a group needs at least one model"
