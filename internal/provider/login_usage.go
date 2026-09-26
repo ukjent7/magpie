@@ -132,11 +132,8 @@ func CodexUsedUp(ctx context.Context) bool {
 		if !l.Active {
 			continue
 		}
-		q := loginQuota(ctx, l)
-		for _, w := range q.Windows {
-			if !w.Aside && w.Model == "" && w.Used >= 100 {
-				return true
-			}
+		if usedUp(loginQuota(ctx, l)) {
+			return true
 		}
 	}
 	return false

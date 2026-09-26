@@ -103,6 +103,24 @@ func TestCodexOwnModelMovesToNextAccount(t *testing.T) {
 	}
 }
 
+// Codex signed in to the next account once the one it was on is out
+// (provider.SwitchCodexWhenUsedUp): the one out still rests, now beside it,
+// and the one it is on now doesn't take that rest over.
+func TestCodexSwitchedAccountRestsAsItself(t *testing.T) {
+	codexSignedIn(t, "spare@example.com")
+	var tried, models []string
+	usedUp(t, &tried, &models)
+	codexPost(t, `{"model":"gpt-5.5","stream":true,"input":"ping"}`)
+	if err := provider.SwitchLogin("codex", "spare@example.com"); err != nil {
+		t.Fatal(err)
+	}
+	tried, models = nil, nil
+	code, body := codexPost(t, `{"model":"gpt-5.5","stream":true,"input":"ping"}`)
+	if code != 200 || strings.Join(tried, ",") != "acct-2" {
+		t.Fatalf("%d %s tried %v", code, body, tried)
+	}
+}
+
 // With no other account on, Codex's own model goes as it came: its own
 // sign-in, and the refusal back to Codex as ChatGPT said it.
 func TestCodexOwnModelOneAccountRelayed(t *testing.T) {

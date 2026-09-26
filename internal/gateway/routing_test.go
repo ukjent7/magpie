@@ -47,8 +47,8 @@ func TestRouting(t *testing.T) {
 
 	p.ID, p.Routing = "u", provider.LeastUsed
 	cs = []candidate{{rest: "u#a"}, {rest: "u#b"}, {rest: "u#c"}}
-	served("u#a", 5000)
-	served("u#c", 10)
+	served("u#a", "u#a", 5000)
+	served("u#c", "u#c", 10)
 	if got := restsOf(route(p, cs, "m", provider.Chat)); got != "u#b u#c u#a " {
 		t.Fatalf("least used: %s", got)
 	}
@@ -170,7 +170,7 @@ func TestSmartRouting(t *testing.T) {
 	if until("t#credit") != creditRest || until("t#rate") != 5*time.Minute || until("t#fail") != 2*time.Minute {
 		t.Fatalf("rests: %v %v %v", until("t#credit"), until("t#rate"), until("t#fail"))
 	}
-	served("t#fail", 1)
+	served("t#fail", "t#fail", 1)
 	s.restAfter(key("t#fail"), 500, http.Header{}, nil)
 	if until("t#fail") != time.Minute {
 		t.Fatalf("answering again starts over: %v", until("t#fail"))
@@ -181,13 +181,13 @@ func TestSmartRouting(t *testing.T) {
 	s.restAfter(acct("q"), 429, http.Header{}, []byte("You've hit your limit · resets 5pm"))
 	s.restAfter(acct("r"), 429, http.Header{}, []byte("Claude AI usage limit reached|"+strconv.FormatInt(now.Add(2*time.Hour).Unix(), 10)))
 	s.restAfter(acct("o"), 429, http.Header{}, []byte("You've hit your limit"))
-	if until("s#q") != 3*time.Hour || until("s#r") != 2*time.Hour || until("s#o") != quotaRest {
-		t.Fatalf("subscription rests: %v %v %v", until("s#q"), until("s#r"), until("s#o"))
+	if until(acct("q").restKey()) != 3*time.Hour || until(acct("r").restKey()) != 2*time.Hour || until(acct("o").restKey()) != quotaRest {
+		t.Fatalf("subscription rests: %v %v %v", until(acct("q").restKey()), until(acct("r").restKey()), until(acct("o").restKey()))
 	}
 	// and so does one that failed some other way with a window full
 	s.restAfter(acct("q"), 502, http.Header{}, []byte("Claude Code ended without an answer"))
-	if until("s#q") != 3*time.Hour {
-		t.Fatalf("failed full: %v", until("s#q"))
+	if until(acct("q").restKey()) != 3*time.Hour {
+		t.Fatalf("failed full: %v", until(acct("q").restKey()))
 	}
 
 	h = http.Header{}

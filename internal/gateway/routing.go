@@ -44,8 +44,9 @@ func (u tokenUse) now(t time.Time) float64 {
 	return u.n * math.Exp2(-t.Sub(u.at).Seconds()/usageHalfLife.Seconds())
 }
 
-// served counts what a candidate just answered against it.
-func served(rest string, tokens int) {
+// served counts what a candidate just answered against it; key is what it
+// rests by (restKey).
+func served(rest, key string, tokens int) {
 	if tokens <= 0 {
 		tokens = 1 // it answered, whether or not it said how much
 	}
@@ -56,8 +57,8 @@ func served(rest string, tokens int) {
 	routed.Unlock()
 	// one that answered — tried all the same, or again — rests no longer
 	restingUntil.Lock()
-	delete(restingUntil.m, rest)
-	delete(restingUntil.note, rest)
+	delete(restingUntil.m, key)
+	delete(restingUntil.note, key)
 	restingUntil.Unlock()
 }
 
@@ -182,8 +183,8 @@ func (s *Server) restAfter(c candidate, status int, header http.Header, body []b
 	}
 	r.Until = now.Add(d)
 	restingUntil.Lock()
-	restingUntil.m[c.rest] = r.Until
-	restingUntil.note[c.rest] = r
+	restingUntil.m[c.restKey()] = r.Until
+	restingUntil.note[c.restKey()] = r
 	restingUntil.Unlock()
 	return r
 }

@@ -146,6 +146,8 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 	// the magpie serving the gateway, and only it, keeps the saved accounts
 	// signed in, so two never refresh one sign-in at once
 	go provider.KeepLoginsAlive(ctx)
+	// and signs Codex in to its next account when the one it is on is out
+	go provider.KeepCodexOnAnAccountWithRoom(ctx)
 	for _, f := range WhileServing {
 		go f(ctx)
 	}
@@ -636,7 +638,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 		hw.release()
 		model = c.model
 		if call.Status < 400 {
-			served(c.rest, call.Usage.Input+call.Usage.Output+call.Usage.CacheRead+call.Usage.CacheWrite)
+			served(c.rest, c.restKey(), call.Usage.Input+call.Usage.Output+call.Usage.CacheRead+call.Usage.CacheWrite)
 			answered(stuck, c, aff.Turn, call.Usage.CacheRead)
 			if hit != nil {
 				ruleAnswered(ruleAt, call.Usage)
