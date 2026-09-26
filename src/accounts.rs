@@ -787,6 +787,7 @@ fn live_codex_login() -> Result<Option<SavedLogin>> {
         first: false,
         auth: Some(auth),
         profile: None,
+        home: None,
         extra: BTreeMap::new(),
     }))
 }
