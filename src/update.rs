@@ -74,6 +74,12 @@ pub async fn command(args: &[String]) -> Result<()> {
         is_released(VERSION),
         "this magpie was built from source; update it the way you built it, or get the release from {SITE}"
     );
+    // Homebrew keeps magpie in its Cellar and has to be the one to upgrade it
+    if let Ok(exe) = env::current_exe()
+        && homebrew(&exe.to_string_lossy())
+    {
+        bail!("this magpie was installed with Homebrew; update it with: brew upgrade magpie");
+    }
 
     let asset_name = binary_asset_name()?;
     let asset = release
@@ -439,6 +445,13 @@ fn is_newer(left: &str, right: &str) -> bool {
         .is_some_and(|(left, right)| compare_versions(&left, &right) == Ordering::Greater)
 }
 
+// homebrew is whether this binary came from `brew install magpie`, which keeps
+// it in its Cellar and has to be the one to upgrade it: a binary replaced
+// under it leaves brew thinking the old version is there.
+fn homebrew(exe: &str) -> bool {
+    exe.replace('\\', "/").contains("/Cellar/magpie/")
+}
+
 fn is_released(value: &str) -> bool {
     let Some(version) = parse_version(value) else {
         return false;
@@ -454,4 +467,25 @@ fn is_released(value: &str) -> bool {
         && commits.bytes().all(|byte| byte.is_ascii_digit())
         && !hash.is_empty()
         && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::homebrew;
+
+    #[test]
+    fn a_brew_install_is_told_to_use_brew() {
+        for installed in [
+            "/opt/homebrew/Cellar/magpie/0.1.126/bin/magpie",
+            "/home/linuxbrew/.linuxbrew/Cellar/magpie/0.1.126/bin/magpie",
+            "C:\\Users\\me\\magpie.exe",
+        ] {
+            assert_eq!(
+                homebrew(installed),
+                installed.contains("/Cellar/magpie/"),
+                "{installed:?}"
+            );
+        }
+        assert!(!homebrew("/usr/local/bin/magpie"));
+    }
 }
