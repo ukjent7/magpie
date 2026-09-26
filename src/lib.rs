@@ -22,6 +22,7 @@ pub mod gateway;
 mod gemini;
 mod grouprule;
 pub mod groups;
+pub mod library;
 mod netproxy;
 pub mod profile;
 pub mod provider;

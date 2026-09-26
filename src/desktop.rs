@@ -146,6 +146,20 @@ enum Action {
 pub async fn command(start_hidden: bool) -> Result<()> {
     settings::migrate();
     agent::sync_catalog_models()?;
+    // The library written into the agents again, once: an agent installed
+    // or updated since (or an edit by hand) gets it without a visit to the
+    // Library page.
+    std::thread::spawn(|| match crate::library::sync() {
+        Ok(result) => {
+            for problem in result.problems {
+                eprintln!(
+                    "magpie: library sync: {} {}: {}",
+                    problem.agent, problem.what, problem.error
+                );
+            }
+        }
+        Err(error) => eprintln!("magpie: library sync: {error:#}"),
+    });
     let gateway = crate::gateway::start_background().await?;
     let icon = window_icon_data()?;
     let native_options = eframe::NativeOptions {
@@ -2082,9 +2096,12 @@ impl App {
             Action::ApplyProfile(name) => {
                 self.confirm_profile_apply = None;
                 match profile::apply_named(&name) {
-                    Ok(changed) => match self.reload_agent_values() {
+                    Ok(applied) => match self.reload_agent_values() {
                         Ok(()) => self.set_status(
-                            &format!("Applied profile {name} · {changed} settings changed"),
+                            &format!(
+                                "Applied profile {name} · {} settings changed",
+                                applied.changed
+                            ),
                             true,
                         ),
                         Err(error) => self.set_status(

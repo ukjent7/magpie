@@ -98,12 +98,17 @@ async fn run(cli: Cli) -> Result<()> {
             Ok(())
         }
         [command, rest @ ..] if command == "usage" => crate::usage::command(rest),
-        [command, rest @ ..] if command == "accounts" => crate::accounts::command(rest).await,
+        [command, rest @ ..] if matches!(command.as_str(), "accounts" | "account") => {
+            crate::accounts::command(rest).await
+        }
         [command, rest @ ..] if command == "serve" => crate::gateway::command(rest).await,
         [command, rest @ ..] if command == "backup" => crate::backup::backup_command(rest),
         [command, rest @ ..] if command == "restore" => crate::backup::restore_command(rest),
         [command, rest @ ..] if command == "import" => crate::provider::import_command(rest).await,
         [command, rest @ ..] if command == "update" => crate::update::command(rest).await,
+        [command, rest @ ..] if matches!(command.as_str(), "library" | "lib") => {
+            crate::library::command(rest).await
+        }
         [command, rest @ ..] if command == "claude-mcp-helper" => {
             crate::claudebridge::run(rest).await
         }
@@ -113,7 +118,9 @@ async fn run(cli: Cli) -> Result<()> {
         [command, rest @ ..] if command == "visible" => {
             crate::provider::visible_command(rest).await
         }
-        [command, rest @ ..] if command == "quota" => crate::quota::command(rest).await,
+        [command, rest @ ..] if matches!(command.as_str(), "quota" | "quotas") => {
+            crate::quota::command(rest).await
+        }
         [command] if command == "groups" => crate::groups::command(&[]),
         [command, rest @ ..] if command == "group" => crate::groups::command(rest),
         [command, rest @ ..] if command == "provider" => crate::provider::command(rest).await,
@@ -270,6 +277,14 @@ fn usage() -> String {
         "  magpie rm <name>                delete a profile",
         "  magpie backup [--no-keys] [file] encrypt settings into a backup",
         "  magpie restore [--no-agents] <file> restore an encrypted backup",
+        "",
+        "  magpie library                  what the library gives each agent: instructions, MCP servers, skills",
+        "  magpie library sync             write it into the agents again",
+        "  magpie library instructions [set <file|->]  read or replace the shared instructions",
+        "  magpie library mcp add|agents|rm <name>     an MCP server the agents can call",
+        "  magpie library skill agents|rm <name>       a skill an agent can load",
+        "  magpie library rtk [on|off <agent>]         which agents run their shell commands through RTK",
+        "",
         "  magpie import [-y] <link>       add a provider from a magpie:// link",
         "  magpie import apps [claude|codex] [-y] import configured providers",
         "  magpie accounts [agent] [--json] list subscription accounts",

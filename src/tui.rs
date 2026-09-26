@@ -736,10 +736,13 @@ impl App {
                 Err(error) => self.set_status(&format!("{error:#}"), false),
             },
             PickerPurpose::Profiles => match profile::apply_named(&value) {
-                Ok(changed) => {
+                Ok(applied) => {
                     self.reload_values();
                     self.set_status(
-                        &format!("Applied profile {value} · {changed} settings changed"),
+                        &format!(
+                            "Applied profile {value} · {} settings changed",
+                            applied.changed
+                        ),
                         true,
                     );
                 }
