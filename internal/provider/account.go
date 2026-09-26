@@ -660,6 +660,9 @@ func Accounts() []Provider {
 	if p, ok := devinAccount(); ok {
 		out = append(out, p)
 	}
+	if p, ok := kiroAccount(); ok {
+		out = append(out, p)
+	}
 	if p, ok := zcodeAccount(); ok {
 		out = append(out, p)
 	}

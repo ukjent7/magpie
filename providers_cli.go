@@ -413,7 +413,7 @@ func providerCmd(args []string) error {
 		if err != nil {
 			return err
 		}
-		fmt.Println(green.Render("✓"), len(ms), "models from", p.Host())
+		fmt.Println(green.Render("✓"), len(ms), "models from", fetchedFrom(*p))
 		return showProvider(*p)
 	}
 	// `magpie provider <id>`
@@ -484,7 +484,7 @@ func announce(id string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	if ms, err := saved.Fetch(ctx); err == nil {
-		fmt.Println(green.Render("✓"), len(ms), "models from", saved.Host())
+		fmt.Println(green.Render("✓"), len(ms), "models from", fetchedFrom(*saved))
 	}
 	n := len(saved.Exposed())
 	if n == 0 {
@@ -545,7 +545,7 @@ func showProvider(p provider.Provider) error {
 	ms := p.Exposed()
 	src := "models.dev"
 	if t, ok := p.Fetched(); ok {
-		src = p.Host() + " · fetched " + ago(t)
+		src = fetchedFrom(p) + " · fetched " + ago(t)
 	}
 	kv("models", fmt.Sprintf("%d exposed of %d %s", len(ms), len(p.Available()), muted.Render("from "+src)))
 	names := p.ModelNames()
@@ -768,4 +768,14 @@ func importCmd(args []string) error {
 		fmt.Println(amber.Render("!"), "the link has no key · magpie provider key", p.ID, "<key>")
 	}
 	return saveNew(p)
+}
+
+// fetchedFrom is where a provider's models were fetched: its API's host, or
+// for a subscription run through its own CLI (Kiro, Devin, Cursor …), which
+// has none, its name.
+func fetchedFrom(p provider.Provider) string {
+	if h := p.Host(); h != "" {
+		return h
+	}
+	return p.Name
 }
