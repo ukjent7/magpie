@@ -7,7 +7,9 @@ use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 use crate::{codex, copilot, settings};
 
-const USAGE: &str = "usage: magpie accounts [claude|codex|grok|copilot|gemini|antigravity] [--json] | magpie accounts switch|forget codex <user>";
+mod codex_oauth;
+
+const USAGE: &str = "usage: magpie accounts [claude|codex|grok|copilot|gemini|antigravity] [--json] | magpie accounts add codex | magpie accounts switch|forget codex <user>";
 
 #[derive(Clone, Default, Deserialize, Serialize)]
 #[serde(default)]
@@ -35,7 +37,7 @@ struct AccountRow {
     windows: Vec<Value>,
 }
 
-pub(crate) fn command(args: &[String]) -> Result<()> {
+pub(crate) async fn command(args: &[String]) -> Result<()> {
     if args
         .first()
         .is_some_and(|arg| arg == "--help" || arg == "-h")
@@ -49,6 +51,13 @@ pub(crate) fn command(args: &[String]) -> Result<()> {
         .is_some_and(|arg| arg.eq_ignore_ascii_case("switch") || arg.eq_ignore_ascii_case("forget"))
     {
         return mutate_account(args);
+    }
+
+    if args
+        .first()
+        .is_some_and(|arg| arg.eq_ignore_ascii_case("add"))
+    {
+        return codex_oauth::command(args).await;
     }
 
     if let Some(subcommand) = args.first().filter(|arg| {
@@ -174,13 +183,15 @@ fn switch_codex_account(user: &str) -> Result<()> {
         "the saved Codex sign-in is unreadable"
     );
 
-    if codex::signed_in_identity()
-        .is_some_and(|(active, _)| active.eq_ignore_ascii_case(&target.user))
+    let current = live_codex_login()?;
+    if current
+        .as_ref()
+        .is_some_and(|current| same_login(current, &target))
     {
         return Ok(());
     }
 
-    if let Some(mut current) = live_codex_login()? {
+    if let Some(mut current) = current {
         current.on = target.on;
         upsert_login(&mut logins, current);
         for login in &mut logins {
@@ -246,16 +257,29 @@ fn usable_codex_auth(auth: &Value) -> bool {
 }
 
 fn upsert_login(logins: &mut Vec<SavedLogin>, mut login: SavedLogin) {
-    if let Some(saved) = logins
-        .iter_mut()
-        .find(|saved| saved.agent == login.agent && saved.user.eq_ignore_ascii_case(&login.user))
-    {
+    if let Some(saved) = logins.iter_mut().find(|saved| same_login(saved, &login)) {
         login.on |= saved.on;
         login.extra = std::mem::take(&mut saved.extra);
         *saved = login;
     } else {
         logins.push(login);
     }
+}
+
+fn same_login(left: &SavedLogin, right: &SavedLogin) -> bool {
+    if left.agent != right.agent {
+        return false;
+    }
+    if left.agent == "codex"
+        && let (Some(left_auth), Some(right_auth)) = (&left.auth, &right.auth)
+        && let (Some(left_id), Some(right_id)) = (
+            codex::account_id_from_auth(left_auth),
+            codex::account_id_from_auth(right_auth),
+        )
+    {
+        return left_id == right_id;
+    }
+    left.user.eq_ignore_ascii_case(&right.user)
 }
 
 fn account_row(login: SavedLogin) -> AccountRow {

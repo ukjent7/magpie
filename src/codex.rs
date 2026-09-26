@@ -18,8 +18,8 @@ use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
 
 const CODEX_BASE: &str = "https://chatgpt.com/backend-api/codex";
-const TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
-const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
+pub(crate) const TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
+pub(crate) const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 const CLIENT_VERSION: &str = "0.155.1";
 const MAX_TOKEN_RESPONSE_BYTES: usize = 1 << 20;
 const MAX_MODEL_RESPONSE_BYTES: usize = 4 << 20;
@@ -115,7 +115,14 @@ pub(crate) fn auth_file_path() -> Option<PathBuf> {
 pub(crate) fn signed_in_identity() -> Option<(String, String)> {
     let contents = std::fs::read(signed_in_auth_file()?).ok()?;
     let auth: Value = serde_json::from_slice(&contents).ok()?;
-    let id_token = auth.pointer("/tokens/id_token").and_then(Value::as_str)?;
+    identity_from_auth(&auth)
+}
+
+pub(crate) fn identity_from_auth(auth: &Value) -> Option<(String, String)> {
+    let id_token = auth
+        .pointer("/tokens/id_token")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
     let claims = jwt_claims(id_token);
     let account_claims = claims.get("https://api.openai.com/auth");
     let email = claims
@@ -135,14 +142,23 @@ pub(crate) fn signed_in_identity() -> Option<(String, String)> {
         _ => email.to_owned(),
     };
     let user = if user.is_empty() {
-        auth.pointer("/tokens/account_id")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_owned()
+        account_id_from_auth(auth).unwrap_or_default()
     } else {
         user
     };
     (!user.is_empty()).then(|| (user, plan.to_owned()))
+}
+
+pub(crate) fn account_id_from_auth(auth: &Value) -> Option<String> {
+    auth.pointer("/tokens/account_id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
+        .map(str::to_owned)
+        .or_else(|| {
+            auth.pointer("/tokens/id_token")
+                .and_then(Value::as_str)
+                .and_then(account_id_from_id_token)
+        })
 }
 
 pub(crate) fn cached_models() -> Vec<String> {
@@ -323,7 +339,7 @@ fn jwt_claims(token: &str) -> Value {
         .unwrap_or(Value::Null)
 }
 
-fn account_id_from_id_token(token: &str) -> Option<String> {
+pub(crate) fn account_id_from_id_token(token: &str) -> Option<String> {
     jwt_claims(token)
         .get("https://api.openai.com/auth")
         .and_then(|claims| claims.get("chatgpt_account_id"))

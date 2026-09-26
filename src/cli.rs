@@ -98,7 +98,7 @@ async fn run(cli: Cli) -> Result<()> {
             Ok(())
         }
         [command, rest @ ..] if command == "usage" => crate::usage::command(rest),
-        [command, rest @ ..] if command == "accounts" => crate::accounts::command(rest),
+        [command, rest @ ..] if command == "accounts" => crate::accounts::command(rest).await,
         [command, rest @ ..] if command == "serve" => crate::gateway::command(rest).await,
         [command, rest @ ..] if command == "backup" => crate::backup::backup_command(rest),
         [command, rest @ ..] if command == "restore" => crate::backup::restore_command(rest),
@@ -269,6 +269,7 @@ fn usage() -> String {
         "  magpie import [-y] <link>       add a provider from a magpie:// link",
         "  magpie import apps [claude|codex] [-y] import configured providers",
         "  magpie accounts [agent] [--json] list subscription accounts",
+        "  magpie accounts add codex        sign in to another ChatGPT account",
         "  magpie accounts switch codex <user> switch a remembered Codex account",
         "  magpie accounts forget codex <user> forget a saved Codex account",
         "",
