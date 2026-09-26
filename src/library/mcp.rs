@@ -2,7 +2,10 @@
 // that agent's own format, taking back only what magpie wrote.
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::{
+    path::Path,
+    str::FromStr,
+};
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -329,6 +332,21 @@ fn list_items(v: &Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
+// remote and local are the two shapes an agent's entry can take: a URL the
+// agent reaches, or a command it starts.
+fn remote(s: &mut Server, transport: &str, url: String, headers: &Value) {
+    s.transport = transport.to_owned();
+    s.url = url;
+    s.headers = object_to_map(headers);
+}
+
+fn local(s: &mut Server, cmd: String, args: &Value, env: &Value) {
+    s.transport = "stdio".to_owned();
+    s.command = cmd;
+    s.args = list_items(args);
+    s.env = object_to_map(env);
+}
+
 // decode reads one of the agent's entries; none for one magpie can't read
 // as a server (a Goose builtin, say).
 fn decode(format: Format, name: &str, m: &Value) -> Option<Server> {
@@ -336,21 +354,10 @@ fn decode(format: Format, name: &str, m: &Value) -> Option<Server> {
         name: name.to_owned(),
         ..Server::default()
     };
-    let remote = |transport: &str, url: String, headers: &Value| {
-        s.transport = transport.to_owned();
-        s.url = url;
-        s.headers = object_to_map(headers);
-    };
-    let local = |cmd: String, args: &Value, env: &Value| {
-        s.transport = "stdio".to_owned();
-        s.command = cmd;
-        s.args = list_items(args);
-        s.env = object_to_map(env);
-    };
     match format {
         Format::OpenCode => {
             if value_str(m, "type") == "remote" {
-                remote(
+                remote(&mut s, 
                     "http",
                     value_str(m, "url"),
                     m.get("headers").unwrap_or(&Value::Null),
@@ -358,7 +365,7 @@ fn decode(format: Format, name: &str, m: &Value) -> Option<Server> {
             } else {
                 let command = value_list_at(m, "command");
                 if let Some((first, rest)) = command.split_first() {
-                    local(
+                    local(&mut s, 
                         first.clone(),
                         &Value::Array(rest.iter().cloned().map(Value::String).collect()),
                         m.get("environment").unwrap_or(&Value::Null),
@@ -368,21 +375,21 @@ fn decode(format: Format, name: &str, m: &Value) -> Option<Server> {
         }
         Format::Goose => match value_str(m, "type").as_str() {
             "stdio" => {
-                local(
+                local(&mut s, 
                     value_str(m, "cmd"),
                     m.get("args").unwrap_or(&Value::Null),
                     m.get("envs").unwrap_or(&Value::Null),
                 );
             }
             "streamable_http" => {
-                remote(
+                remote(&mut s, 
                     "http",
                     value_str(m, "uri"),
                     m.get("headers").unwrap_or(&Value::Null),
                 );
             }
             "sse" => {
-                remote(
+                remote(&mut s, 
                     "sse",
                     value_str(m, "uri"),
                     m.get("headers").unwrap_or(&Value::Null),
@@ -393,9 +400,9 @@ fn decode(format: Format, name: &str, m: &Value) -> Option<Server> {
         Format::Codex => {
             let url = value_str(m, "url");
             if !url.is_empty() {
-                remote("http", url, m.get("http_headers").unwrap_or(&Value::Null));
+                remote(&mut s, "http", url, m.get("http_headers").unwrap_or(&Value::Null));
             } else {
-                local(
+                local(&mut s, 
                     value_str(m, "command"),
                     m.get("args").unwrap_or(&Value::Null),
                     m.get("env").unwrap_or(&Value::Null),
@@ -406,16 +413,16 @@ fn decode(format: Format, name: &str, m: &Value) -> Option<Server> {
             let http_url = value_str(m, "httpUrl");
             let url = value_str(m, "url");
             if !http_url.is_empty() {
-                remote("http", http_url, m.get("headers").unwrap_or(&Value::Null));
+                remote(&mut s, "http", http_url, m.get("headers").unwrap_or(&Value::Null));
             } else if !url.is_empty() {
                 let t = if value_str(m, "type") == "http" {
                     "http"
                 } else {
                     "sse"
                 };
-                remote(t, url, m.get("headers").unwrap_or(&Value::Null));
+                remote(&mut s, t, url, m.get("headers").unwrap_or(&Value::Null));
             } else {
-                local(
+                local(&mut s, 
                     value_str(m, "command"),
                     m.get("args").unwrap_or(&Value::Null),
                     m.get("env").unwrap_or(&Value::Null),
@@ -432,9 +439,9 @@ fn decode(format: Format, name: &str, m: &Value) -> Option<Server> {
                 } else {
                     "http"
                 };
-                remote(t, url, m.get("headers").unwrap_or(&Value::Null));
+                remote(&mut s, t, url, m.get("headers").unwrap_or(&Value::Null));
             } else {
-                local(
+                local(&mut s, 
                     value_str(m, "command"),
                     m.get("args").unwrap_or(&Value::Null),
                     m.get("env").unwrap_or(&Value::Null),
@@ -449,9 +456,9 @@ fn decode(format: Format, name: &str, m: &Value) -> Option<Server> {
                 if t != "sse" {
                     t = "http".to_owned();
                 }
-                remote(&t, url, m.get("headers").unwrap_or(&Value::Null));
+                remote(&mut s, &t, url, m.get("headers").unwrap_or(&Value::Null));
             } else {
-                local(
+                local(&mut s, 
                     value_str(m, "command"),
                     m.get("args").unwrap_or(&Value::Null),
                     m.get("env").unwrap_or(&Value::Null),
@@ -586,11 +593,11 @@ fn toml_table_to_json<'a>(entries: impl Iterator<Item = (&'a str, &'a Item)>) ->
 fn toml_value_to_json(v: &toml_edit::Value) -> Value {
     match v {
         toml_edit::Value::String(s) => Value::String(s.value().to_owned()),
-        toml_edit::Value::Integer(i) => Value::Number(i.value().into()),
-        toml_edit::Value::Float(f) => serde_json::Number::from_f64(f.value())
+        toml_edit::Value::Integer(i) => Value::Number((*i.value()).into()),
+        toml_edit::Value::Float(f) => serde_json::Number::from_f64(*f.value())
             .map(Value::Number)
             .unwrap_or(Value::Null),
-        toml_edit::Value::Boolean(b) => Value::Bool(b.value()),
+        toml_edit::Value::Boolean(b) => Value::Bool(*b.value()),
         toml_edit::Value::Datetime(d) => Value::String(d.to_string()),
         toml_edit::Value::Array(a) => Value::Array(a.iter().map(toml_value_to_json).collect()),
         toml_edit::Value::InlineTable(t) => Value::Object(
@@ -706,7 +713,10 @@ fn put(f: &McpFile, s: &Server, old: Option<&Value>) -> Result<()> {
     match f.format {
         Format::Codex => codex_put(&f.path, &s.name, &entry),
         Format::Goose => {
-            config::set_yaml_values(&f.path, &[(format!("extensions.{}", s.name), entry)])
+            config::set_yaml_values(
+            &f.path,
+            &[(&format!("extensions.{}", s.name), entry)],
+        )
         }
         _ => config::set_jsonc_value(&f.path, &format!("{}.{}", key(f.format), s.name), &entry),
     }

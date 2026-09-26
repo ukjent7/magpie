@@ -116,7 +116,7 @@ fn test_server_every_format() {
                 want.name
             );
         }
-        if got.get("mine").is_none() && before[t.agent.spec.id.as_str()].contains("mine") {
+        if got.get("mine").is_none() && before[t.agent.spec.id].contains("mine") {
             panic!("{} lost the user's server", t.agent.spec.id);
         }
     }
@@ -147,7 +147,8 @@ fn test_server_every_format() {
         let t = crate::library::target_by_id(&sb.homes, id).unwrap();
         let f = t.mcp.as_ref().unwrap();
         let a = before[id].trim();
-        let b = read_file(&f.path).trim();
+        let file = read_file(&f.path);
+        let b = file.trim();
         assert_eq!(a, b, "{id} isn't as it was");
     }
 }

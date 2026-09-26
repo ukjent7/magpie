@@ -399,18 +399,25 @@ async fn rtk_install(
         args.push("--auto-patch");
     }
     let mut env_all: Vec<(&str, &str)> = env.to_vec();
-    let tmp;
-    let mut tmp_text = String::new();
-    if sp.with_claude {
-        tmp =
-            std::env::temp_dir().join(format!("magpie-rtk-{}-{}", std::process::id(), now_nanos()));
-        std::fs::create_dir_all(&tmp).with_context(|| format!("create {}", tmp.display()))?;
-        tmp_text = tmp.to_string_lossy().into_owned();
-        env_all.push(("CLAUDE_CONFIG_DIR", tmp_text.as_str()));
+    // Claude Code is given a directory of its own to install into, so the
+    // hook lands where magpie can see it, not in the user's real one.
+    let aside = if sp.with_claude {
+        let dir = std::env::temp_dir()
+            .join(format!("magpie-rtk-{}-{}", std::process::id(), now_nanos()));
+        std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
+        Some(dir)
+    } else {
+        None
+    };
+    let text = aside
+        .as_ref()
+        .map(|dir| dir.to_string_lossy().into_owned());
+    if let Some(dir) = &text {
+        env_all.push(("CLAUDE_CONFIG_DIR", dir));
     }
     let out = rtk_run(bin, &args, &env_all).await;
-    if sp.with_claude {
-        let _ = std::fs::remove_dir_all(&tmp);
+    if let Some(dir) = aside {
+        let _ = std::fs::remove_dir_all(dir);
     }
     let out = out?;
     if !has(homes, a) {

@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use serde_json::Value;
 
-use crate::library::{Homes, Store, skills};
+use crate::library::{Homes, skills};
 
 // ccSwitchSkillsDir is the folder CC Switch keeps the skills it installs in.
 pub(crate) fn cc_switch_skills_dir(homes: &Homes) -> PathBuf {
@@ -36,11 +36,7 @@ fn repo_ok(repo: &str) -> bool {
 // cc_switch_origin is where on GitHub CC Switch got a skill the library
 // has from CC Switch's folder — linked to there, or a copy CC Switch gave
 // an agent that was taken in.
-pub(crate) fn cc_switch_origin(
-    store: &Store,
-    homes: &Homes,
-    s: &skills::Skill,
-) -> Option<skills::Source> {
+pub(crate) fn cc_switch_origin(homes: &Homes, s: &skills::Skill) -> Option<skills::Source> {
     let skills_dir = cc_switch_skills_dir(homes);
     let mut dir = skills_dir.join(&s.name);
     match &s.source {

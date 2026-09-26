@@ -5,7 +5,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::{str::FromStr, sync::Mutex};
 
 use anyhow::{Context, Result, bail};
 use serde::Serialize;
@@ -754,7 +754,7 @@ pub(crate) async fn update_skill_at(
         _ => {
             // one CC Switch installed from GitHub becomes the library's own,
             // fetched from there, leaving CC Switch's folder as it is
-            let Some(o) = crate::library::ccswitch::cc_switch_origin(store, homes, &s) else {
+            let Some(o) = crate::library::ccswitch::cc_switch_origin(homes, &s) else {
                 bail!("{name} isn't from GitHub; it's kept as it is");
             };
             adopt = true;
@@ -807,50 +807,48 @@ fn finish_update(
             if src.path.is_empty() { "." } else { &src.path }
         );
     }
-    let store = store.clone();
-    let homes = homes.clone();
-    let name = name.to_owned();
-    change_in(&store, &homes, move |l| {
-        let next = skill_dir(&store, &format!(".{name}.next"));
-        let old = skill_dir(&store, &format!(".{name}.old"));
+    change_in(store, homes, move |l| {
+        let next = skill_dir(store, &format!(".{name}.next"));
+        let old = skill_dir(store, &format!(".{name}.old"));
+        let here = skill_dir(store, &name);
         let _ = std::fs::remove_dir_all(&next);
         let _ = std::fs::remove_dir_all(&old);
         if let Err(error) = copy_dir(&from, &next) {
             let _ = std::fs::remove_dir_all(&next);
             return Err(error);
         }
-        let mut old_path = old;
+        // what is set aside goes back if the new folder can't be put in
         let mut renamed = true;
-        match std::fs::symlink_metadata(skill_dir(&store, &name)) {
+        match std::fs::symlink_metadata(&here) {
             Ok(meta) if meta.file_type().is_symlink() => {
                 // a link to CC Switch's folder: only the link goes
-                std::fs::remove_file(skill_dir(&store, &name))
+                std::fs::remove_file(&here)
                     .with_context(|| format!("remove the link to {name}"))?;
                 renamed = false;
             }
             Ok(_) => {
-                std::fs::rename(skill_dir(&store, &name), &old)
-                    .with_context(|| format!("move {}", skill_dir(&store, &name).display()))?;
+                std::fs::rename(&here, &old)
+                    .with_context(|| format!("move {}", here.display()))?;
             }
             Err(_) => {
                 let _ = std::fs::remove_dir_all(&next);
-                bail!("{} has no folder in the library", name);
+                bail!("{name} has no folder in the library");
             }
         }
-        if let Err(error) = std::fs::rename(&next, skill_dir(&store, &name)) {
+        if let Err(error) = std::fs::rename(&next, &here) {
             let _ = std::fs::remove_dir_all(&next);
             if renamed {
-                let _ = std::fs::rename(&old_path, skill_dir(&store, &name));
+                let _ = std::fs::rename(&old, &here);
             }
             return Err(error).with_context(|| format!("move {}", next.display()));
         }
-        if adopt && let Some(s) = l.skill_mut(&name) {
-            s.source = Some(src);
+        if adopt && let Some(s) = l.skill_mut(name) {
+            s.source = Some(src.clone());
         }
         if !renamed {
             return Ok(());
         }
-        std::fs::remove_dir_all(&old_path).with_context(|| format!("remove {}", old_path.display()))
+        std::fs::remove_dir_all(&old).with_context(|| format!("remove {}", old.display()))
     })
 }
 

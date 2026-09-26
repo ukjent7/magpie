@@ -3,7 +3,7 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
@@ -318,9 +318,9 @@ pub fn import_instructions(id: &str) -> Result<SyncResult> {
 }
 
 pub(crate) fn import_instructions_at(store: &Store, homes: &Homes, id: &str) -> Result<SyncResult> {
-    let t =
-        crate::library::target_by_id(homes, id).and_then(|t| t.instructions.map(|path| (t, path)));
-    let Some((_, path)) = t else {
+    let Some(path) = crate::library::target_by_id(homes, id)
+        .and_then(|target| target.instructions)
+    else {
         anyhow::bail!("{id} has no instructions file magpie knows");
     };
     change_in(store, homes, |l| {

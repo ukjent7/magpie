@@ -339,7 +339,8 @@ pub(crate) fn untar(data: &[u8], dst: &std::path::Path, max_total: u64) -> Resul
             return Ok(());
         }
         let mut name = cstr(&header[..100]);
-        let size = octal(&header[124..136])?;
+        let size = usize::try_from(octal(&header[124..136])?)
+            .context("a tar entry too large for this machine")?;
         let typeflag = header[156];
         let mode = octal(&header[100..108]).unwrap_or(0o644);
         let data_start = pos + 512;
@@ -437,8 +438,9 @@ pub(crate) fn gzip_stored_for_tests(data: &[u8]) -> Vec<u8> {
     let last = data.len().saturating_sub(1) / 65535;
     for (i, chunk) in data.chunks(65535).enumerate() {
         out.push(u8::from(i == last));
-        out.extend_from_slice(&(chunk.len() as u16).to_le_bytes());
-        out.extend_from_slice(&!(chunk.len() as u16).to_le_bytes());
+        let len = chunk.len() as u16;
+        out.extend_from_slice(&len.to_le_bytes());
+        out.extend_from_slice(&(!len).to_le_bytes());
         out.extend_from_slice(chunk);
     }
     out.extend_from_slice(&crc32(data).to_le_bytes());

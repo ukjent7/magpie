@@ -2,7 +2,7 @@
 // ccswitch_test.go's GitHub update.
 
 use super::*;
-use crate::library::testing::{Sandbox, read_file, write};
+use crate::library::testing::{Sandbox, read as read_file, write};
 
 fn skill_folder(dir: &std::path::Path, name: &str, description: &str) {
     write(

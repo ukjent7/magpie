@@ -576,7 +576,7 @@ const KEEP_BACKUPS: usize = 30;
 
 // Backups copies each file once, the first time a change is about to write
 // it: one folder a change, named by when, a folder an agent in it.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub(crate) struct Backups {
     pub(crate) dir: PathBuf,
     done: HashSet<PathBuf>,
@@ -860,7 +860,7 @@ pub fn snapshot() -> Result<Setup> {
 pub(crate) fn snapshot_at(store: &Store) -> Result<Setup> {
     let _guard = lock();
     let l = load(store)?;
-    let mut s = Setup {
+    let s = Setup {
         instructions: SetupInstructions {
             shared: read_text(&instructions::shared_path(store)),
             agents: l.instructions.agents.clone(),
@@ -1070,7 +1070,7 @@ pub(crate) fn read_at(store: &Store, homes: &Homes, problems: &[Problem]) -> Res
             source = src.to_string();
             kind = src.kind.clone();
         }
-        let origin = ccswitch::cc_switch_origin(store, homes, s)
+        let origin = ccswitch::cc_switch_origin(homes, s)
             .map(|mut o| {
                 o.dir = String::new();
                 o.to_string()
