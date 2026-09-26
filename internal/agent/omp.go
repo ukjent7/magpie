@@ -98,6 +98,18 @@ func omp(home string) *Agent {
 			Options: func(cur map[string]string) []Option {
 				return append(ownOptions("", cur["model"]), viaMagpie("omp", magpieID+"/")...)
 			},
+		}, {
+			// the thinking level sessions start with, as omp's settings save
+			// it; unset omp takes high (it also knows auto, its own pick)
+			Key: "effort", Label: "thinking",
+			Get: func() string { v, _ := edit.GetYAML(path, "defaultThinkingLevel"); return v },
+			Set: func(v string) error {
+				if v == "" {
+					return edit.DelYAML(path, "defaultThinkingLevel")
+				}
+				return edit.SetYAML(path, edit.KV{Path: "defaultThinkingLevel", Value: v})
+			},
+			Options: func(map[string]string) []Option { return static(ompEfforts...) },
 		}},
 	}
 }

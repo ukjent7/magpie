@@ -419,6 +419,20 @@ func goose(home, cfg string) *Agent {
 			Options: func(cur map[string]string) []Option {
 				return ownOptions("", cur["model"], "anthropic", "openai", "google", "openrouter")
 			},
+		}, {
+			// GOOSE_THINKING_EFFORT, the effort goose asks of a model that
+			// thinks, for every provider
+			Key: "effort", Label: "effort",
+			Get: func() string { v, _ := get("GOOSE_THINKING_EFFORT"); return v },
+			Set: func(v string) error {
+				if v == "" {
+					return edit.DelYAMLTop(path, "GOOSE_THINKING_EFFORT")
+				}
+				return set(edit.KV{Path: "GOOSE_THINKING_EFFORT", Value: v})
+			},
+			Options: func(map[string]string) []Option {
+				return static("off", "low", "medium", "high", "max")
+			},
 		}},
 	}
 }
@@ -469,6 +483,21 @@ func copilot(home string) *Agent {
 					out = append(out, options(live, "")...)
 				}
 				return out
+			},
+		}, {
+			// effortLevel, which Copilot saves beside the model and clears
+			// when its own /model changes the model; the levels are the
+			// model's, low to xhigh when Copilot's list does not say
+			Key: "effort", Label: "effort",
+			Get: jsonGet(path, "effortLevel"),
+			Set: jsonSet(path, "effortLevel"),
+			Options: func(cur map[string]string) []Option {
+				if live, _, ok := catalog.Live("copilot"); ok {
+					if e := catalog.Efforts(live, cur["model"]); len(e) > 0 {
+						return static(e...)
+					}
+				}
+				return static("low", "medium", "high", "xhigh")
 			},
 		}},
 	}
@@ -541,6 +570,22 @@ func crush(home, cfg string) *Agent {
 		Fields: []Field{
 			{Key: "model", Label: "large", Get: pairGet(get, "models.large.provider", "models.large.model"), Set: setter("models.large.provider", "models.large.model"), Options: opts("model")},
 			{Key: "small", Label: "small", Get: pairGet(get, "models.small.provider", "models.small.model"), Set: setter("models.small.provider", "models.small.model"), Options: opts("small")},
+			{
+				// the large model's reasoning_effort, which Crush's schema
+				// takes as low, medium or high (for OpenAI-style models)
+				Key: "effort", Label: "effort",
+				Get: func() string { v, _ := get("models.large.reasoning_effort"); return v },
+				Set: func(v string) error {
+					if v == "" {
+						return edit.DelJSON(path, "models.large.reasoning_effort")
+					}
+					if m, _ := get("models.large.model"); m == "" {
+						return fmt.Errorf("pick Crush's large model first; the effort is kept with it")
+					}
+					return set(edit.KV{Path: "models.large.reasoning_effort", Value: v})
+				},
+				Options: func(map[string]string) []Option { return static("low", "medium", "high") },
+			},
 		},
 	}
 }
