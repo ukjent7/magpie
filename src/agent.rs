@@ -1,6 +1,7 @@
-use std::{env, path::PathBuf};
+use std::{collections::HashMap, env, path::PathBuf};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
+use serde_json::{Value, json};
 
 use crate::config::{self, ConfigFormat};
 
@@ -10,6 +11,7 @@ pub struct FieldSpec {
     pub label: &'static str,
     pub path: &'static str,
     pub provider_path: Option<&'static str>,
+    pub catalog_prefix: &'static str,
     pub choices: &'static [&'static str],
 }
 
@@ -36,6 +38,23 @@ const fn field(key: &'static str, label: &'static str, path: &'static str) -> Fi
         label,
         path,
         provider_path: None,
+        catalog_prefix: "",
+        choices: &[],
+    }
+}
+
+const fn prefixed_field(
+    key: &'static str,
+    label: &'static str,
+    path: &'static str,
+    catalog_prefix: &'static str,
+) -> FieldSpec {
+    FieldSpec {
+        key,
+        label,
+        path,
+        provider_path: None,
+        catalog_prefix,
         choices: &[],
     }
 }
@@ -51,6 +70,7 @@ const fn choices_field(
         label,
         path,
         provider_path: None,
+        catalog_prefix: "",
         choices,
     }
 }
@@ -66,6 +86,7 @@ const fn provider_model(
         label,
         path: model_path,
         provider_path: Some(provider_path),
+        catalog_prefix: "",
         choices: &[],
     }
 }
@@ -80,8 +101,8 @@ const CODEX_EFFORT: FieldSpec = choices_field(
 );
 const GEMINI_MODEL: FieldSpec = field("model", "model", "model.name");
 const GEMINI_AUTH: FieldSpec = field("auth", "auth", "security.auth.selectedType");
-const OPENCODE_MODEL: FieldSpec = field("model", "model", "model");
-const OPENCODE_SMALL: FieldSpec = field("small", "small", "small_model");
+const OPENCODE_MODEL: FieldSpec = prefixed_field("model", "model", "model", "magpie/");
+const OPENCODE_SMALL: FieldSpec = prefixed_field("small", "small", "small_model", "magpie/");
 const PI_MODEL: FieldSpec = provider_model("model", "model", "defaultProvider", "defaultModel");
 const PI_EFFORT: FieldSpec = choices_field(
     "effort",
@@ -338,6 +359,10 @@ impl Agent {
                 )
             })?;
 
+        if self.spec.id == "opencode" && !field.catalog_prefix.is_empty() {
+            return self.set_opencode_model(field, value);
+        }
+
         if value.is_empty() {
             if let Some(provider_path) = field.provider_path {
                 config::delete_many(&self.path, self.spec.format, &[field.path, provider_path])?;
@@ -358,6 +383,123 @@ impl Agent {
             config::set(&self.path, self.spec.format, field.path, value)?;
         }
         Ok(())
+    }
+
+    fn set_opencode_model(&self, field: &FieldSpec, value: &str) -> Result<()> {
+        if let Some(model) = value.strip_prefix(field.catalog_prefix) {
+            let provider = opencode_provider()?;
+            let models = provider
+                .get("models")
+                .and_then(Value::as_object)
+                .context("OpenCode model catalog is not an object")?;
+            ensure!(
+                models.contains_key(model),
+                "{model:?} is not a model currently served by magpie"
+            );
+            config::set_jsonc_values(
+                &self.path,
+                &[
+                    ("provider.magpie", provider),
+                    (field.path, Value::String(value.to_owned())),
+                ],
+            )?;
+        } else if value.is_empty() {
+            config::delete(&self.path, self.spec.format, field.path)?;
+        } else {
+            config::set(&self.path, self.spec.format, field.path, value)?;
+        }
+
+        if !opencode_has_magpie_model(self)? {
+            config::delete(&self.path, self.spec.format, "provider.magpie")?;
+        }
+        Ok(())
+    }
+}
+
+pub fn sync_catalog_models() -> Result<()> {
+    let Some(agent) = all().into_iter().find(|agent| agent.spec.id == "opencode") else {
+        return Ok(());
+    };
+    if opencode_has_magpie_model(&agent)? {
+        config::set_jsonc_value(&agent.path, "provider.magpie", &opencode_provider()?)?;
+    }
+    Ok(())
+}
+
+fn opencode_has_magpie_model(agent: &Agent) -> Result<bool> {
+    ["model", "small_model"]
+        .into_iter()
+        .try_fold(false, |found, path| {
+            if found {
+                return Ok(true);
+            }
+            Ok(config::get(&agent.path, agent.spec.format, path)?
+                .is_some_and(|value| value.starts_with("magpie/")))
+        })
+}
+
+fn opencode_provider() -> Result<Value> {
+    let entries = crate::provider::available_model_entries()?;
+    let entries_by_id = entries
+        .iter()
+        .map(|entry| (entry.id.as_str(), entry))
+        .collect::<HashMap<_, _>>();
+    let mut models = serde_json::Map::new();
+    for entry in &entries {
+        let name = if entry.model.name.is_empty() {
+            &entry.model.id
+        } else {
+            &entry.model.name
+        };
+        models.insert(
+            entry.id.clone(),
+            opencode_model(
+                &format!("{name} · {}", entry.provider_name),
+                entry.model.images,
+            ),
+        );
+    }
+    for group in crate::provider::groups()?
+        .into_iter()
+        .filter(|group| !group.hidden)
+    {
+        let members = group
+            .members
+            .iter()
+            .filter_map(|member| entries_by_id.get(member.as_str()).copied())
+            .collect::<Vec<_>>();
+        if members.is_empty() {
+            continue;
+        }
+        models.insert(
+            format!("group/{}", group.id),
+            opencode_model(
+                &format!("{} · routing group", group.name),
+                members.iter().all(|member| member.model.images),
+            ),
+        );
+    }
+
+    Ok(json!({
+        "npm": "@ai-sdk/openai-compatible",
+        "name": "magpie",
+        "options": {
+            "baseURL": crate::gateway::v1_url(),
+            "apiKey": crate::gateway::TOKEN,
+        },
+        "models": models,
+    }))
+}
+
+fn opencode_model(name: &str, images: bool) -> Value {
+    if images {
+        json!({
+            "name": name,
+            "attachment": true,
+            "modalities": {"input": ["text", "image"], "output": ["text"]},
+        })
+    } else {
+        json!({"name": name})
     }
 }
 

@@ -1,7 +1,11 @@
 use std::{fs, path::Path, str::FromStr};
 
 use anyhow::{Context, Result, bail};
-use jsonc_parser::{ParseOptions, cst::CstRootNode};
+use jsonc_parser::{
+    ParseOptions,
+    cst::{CstInputValue, CstRootNode},
+};
+use serde_json::Value;
 use toml_edit::{DocumentMut, Item, Table};
 use yaml_edit::{Document, path::YamlPath};
 
@@ -38,6 +42,16 @@ pub fn set_many(path: &Path, format: ConfigFormat, assignments: &[(&str, &str)])
         ConfigFormat::Toml => set_toml_many(&text, assignments)?,
         ConfigFormat::Yaml => set_yaml_many(&text, assignments)?,
     };
+    write_atomic(path, updated.as_bytes())
+}
+
+pub fn set_jsonc_value(path: &Path, key_path: &str, value: &Value) -> Result<()> {
+    set_jsonc_values(path, &[(key_path, value.clone())])
+}
+
+pub fn set_jsonc_values(path: &Path, assignments: &[(&str, Value)]) -> Result<()> {
+    let text = read_optional(path)?.unwrap_or_default();
+    let updated = set_jsonc_document_values(&text, assignments)?;
     write_atomic(path, updated.as_bytes())
 }
 
@@ -99,8 +113,14 @@ fn get_jsonc(text: &str, key_path: &str) -> Result<Option<String>> {
 }
 
 fn set_jsonc_many(text: &str, assignments: &[(&str, &str)]) -> Result<String> {
-    use jsonc_parser::cst::CstInputValue;
+    let values = assignments
+        .iter()
+        .map(|(path, value)| (*path, Value::String((*value).to_owned())))
+        .collect::<Vec<_>>();
+    set_jsonc_document_values(text, &values)
+}
 
+fn set_jsonc_document_values(text: &str, assignments: &[(&str, Value)]) -> Result<String> {
     let root = if text.trim().is_empty() {
         CstRootNode::parse("{}\n", &ParseOptions::default()).context("create JSONC document")?
     } else {
@@ -116,7 +136,7 @@ fn set_jsonc_many(text: &str, assignments: &[(&str, &str)]) -> Result<String> {
             object = object.object_value_or_set(key);
         }
         let last = parts[parts.len() - 1];
-        let new_value = CstInputValue::String((*value).to_owned());
+        let new_value = cst_input_value(value);
         if let Some(property) = object.get(last) {
             property.set_value(new_value);
         } else {
@@ -124,6 +144,22 @@ fn set_jsonc_many(text: &str, assignments: &[(&str, &str)]) -> Result<String> {
         }
     }
     Ok(root.to_string())
+}
+
+fn cst_input_value(value: &Value) -> CstInputValue {
+    match value {
+        Value::Null => CstInputValue::Null,
+        Value::Bool(value) => CstInputValue::Bool(*value),
+        Value::Number(value) => CstInputValue::Number(value.to_string()),
+        Value::String(value) => CstInputValue::String(value.clone()),
+        Value::Array(values) => CstInputValue::Array(values.iter().map(cst_input_value).collect()),
+        Value::Object(values) => CstInputValue::Object(
+            values
+                .iter()
+                .map(|(key, value)| (key.clone(), cst_input_value(value)))
+                .collect(),
+        ),
+    }
 }
 
 fn delete_jsonc_many(text: &str, key_paths: &[&str]) -> Result<Option<String>> {

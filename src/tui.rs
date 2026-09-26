@@ -217,11 +217,19 @@ pub async fn command(args: &[String]) -> Result<()> {
     if !args.is_empty() {
         bail!("usage: magpie tui");
     }
+    agent::sync_catalog_models()?;
+    let gateway = crate::gateway::start_background().await?;
     let mut app = App::new()?;
     if catalog::is_stale() {
         app.start_catalog_sync(false);
     }
-    ratatui::run(|terminal| app.run(terminal)).context("run terminal interface")
+    let terminal_result =
+        ratatui::run(|terminal| app.run(terminal)).context("run terminal interface");
+    let gateway_result = match gateway {
+        Some(gateway) => gateway.shutdown().await,
+        None => Ok(()),
+    };
+    terminal_result.and(gateway_result)
 }
 
 impl App {
@@ -786,11 +794,12 @@ impl App {
         let (sender, receiver) = mpsc::channel();
         let result_sender = sender;
         let sync = async move {
-            let result = if force {
+            let result = (if force {
                 catalog::sync_models_dev().await.map(Some)
             } else {
                 catalog::sync_if_stale().await
-            }
+            })
+            .and_then(|synced| crate::agent::sync_catalog_models().map(|()| synced))
             .map_err(|error| format!("{error:#}"));
             let _ = result_sender.send(result);
         };
@@ -856,30 +865,44 @@ fn field_options(field: &agent::FieldSpec) -> Vec<PickerOption> {
 }
 
 fn add_model_options(field: &agent::FieldSpec, items: &mut Vec<PickerOption>) -> Result<()> {
-    if field.key != "model" && field.key != "small" {
+    if (field.key != "model" && field.key != "small") || field.catalog_prefix.is_empty() {
         return Ok(());
     }
     let mut seen = items
         .iter()
         .map(|item| item.value.clone())
         .collect::<HashSet<_>>();
-    for entry in provider::available_model_entries()? {
-        if seen.insert(entry.id.clone()) {
-            items.push(PickerOption {
-                value: entry.id,
-                note: format!("{} · {}", entry.provider_name, entry.model.name),
-            });
-        }
-    }
-    for group in provider::groups()?
-        .into_iter()
-        .filter(|group| !group.hidden)
-    {
-        let value = format!("group/{}", group.id);
+    let entries = provider::available_model_entries()?;
+    let ready_models = entries
+        .iter()
+        .map(|entry| entry.id.as_str())
+        .collect::<HashSet<_>>();
+    for entry in entries {
+        let value = format!("{}{}", field.catalog_prefix, entry.id);
         if seen.insert(value.clone()) {
             items.push(PickerOption {
                 value,
-                note: format!("routing group · {} models", group.members.len()),
+                note: format!("{} · via magpie", entry.provider_name),
+            });
+        }
+    }
+    for group in provider::groups()?.into_iter().filter(|group| {
+        !group.hidden
+            && group
+                .members
+                .iter()
+                .any(|member| ready_models.contains(member.as_str()))
+    }) {
+        let value = format!("{}group/{}", field.catalog_prefix, group.id);
+        if seen.insert(value.clone()) {
+            let ready_members = group
+                .members
+                .iter()
+                .filter(|member| ready_models.contains(member.as_str()))
+                .count();
+            items.push(PickerOption {
+                value,
+                note: format!("routing group · {ready_members} ready models · via magpie"),
             });
         }
     }

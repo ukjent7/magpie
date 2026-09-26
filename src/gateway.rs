@@ -1,6 +1,7 @@
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     env,
+    future::Future,
     sync::{LazyLock, Mutex},
     time::{Duration, Instant},
 };
@@ -17,6 +18,7 @@ use axum::{
 use futures_util::{StreamExt, stream};
 use reqwest::Client;
 use serde_json::{Value, json};
+use tokio::{sync::oneshot, task::JoinHandle};
 use url::Url;
 
 use crate::{
@@ -25,6 +27,7 @@ use crate::{
 };
 
 const DEFAULT_ADDR: &str = "127.0.0.1:3425";
+pub const TOKEN: &str = "magpie";
 const MAX_REQUEST_BYTES: usize = 64 * 1024 * 1024;
 const MAX_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
 const UPSTREAM_TIMEOUT: Duration = Duration::from_secs(600);
@@ -35,8 +38,33 @@ struct GatewayState {
     client: Client,
 }
 
+pub(crate) struct BackgroundGateway {
+    shutdown: Option<oneshot::Sender<()>>,
+    task: Option<JoinHandle<Result<()>>>,
+}
+
+impl BackgroundGateway {
+    pub(crate) async fn shutdown(mut self) -> Result<()> {
+        if let Some(shutdown) = self.shutdown.take() {
+            let _ = shutdown.send(());
+        }
+        if let Some(task) = self.task.take() {
+            task.await.context("join background gateway task")??;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for BackgroundGateway {
+    fn drop(&mut self) {
+        if let Some(task) = self.task.take() {
+            task.abort();
+        }
+    }
+}
+
 pub async fn command(args: &[String]) -> Result<()> {
-    let mut addr = env::var("MAGPIE_ADDR").unwrap_or_else(|_| DEFAULT_ADDR.to_owned());
+    let mut addr = addr();
     let mut args = args.iter();
 
     while let Some(arg) = args.next() {
@@ -61,7 +89,80 @@ pub async fn command(args: &[String]) -> Result<()> {
     serve(&addr).await
 }
 
+pub fn addr() -> String {
+    env::var("MAGPIE_ADDR")
+        .ok()
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| DEFAULT_ADDR.to_owned())
+}
+
+pub fn url() -> String {
+    format!("http://{}", addr())
+}
+
+pub fn v1_url() -> String {
+    format!("{}/v1", url())
+}
+
+pub(crate) async fn start_background() -> Result<Option<BackgroundGateway>> {
+    if is_running().await {
+        return Ok(None);
+    }
+
+    let addr = addr();
+    let listener = tokio::net::TcpListener::bind(&addr)
+        .await
+        .with_context(|| format!("bind gateway to {addr}"))?;
+    let address = listener.local_addr().context("read gateway address")?;
+    let app = router()?;
+    let (shutdown, shutdown_receiver) = oneshot::channel();
+    let task = tokio::spawn(async move {
+        serve_listener(listener, app, async move {
+            let _ = shutdown_receiver.await;
+        })
+        .await
+    });
+
+    Ok(Some(BackgroundGateway {
+        shutdown: Some(shutdown),
+        task: Some(task),
+    }))
+}
+
+async fn is_running() -> bool {
+    let Ok(client) = Client::builder()
+        .no_proxy()
+        .timeout(Duration::from_millis(750))
+        .build()
+    else {
+        return false;
+    };
+    let Ok(response) = client.get(url()).send().await else {
+        return false;
+    };
+    if !response.status().is_success() {
+        return false;
+    }
+    let Ok(body) = response.bytes().await else {
+        return false;
+    };
+    serde_json::from_slice::<Value>(&body)
+        .ok()
+        .and_then(|body| body.get("name").and_then(Value::as_str).map(str::to_owned))
+        .is_some_and(|name| name == "magpie")
+}
+
 async fn serve(addr: &str) -> Result<()> {
+    let listener = tokio::net::TcpListener::bind(addr)
+        .await
+        .with_context(|| format!("bind gateway to {addr}"))?;
+    let address = listener.local_addr().context("read gateway address")?;
+    println!("magpie gateway listening on http://{address}");
+
+    serve_listener(listener, router()?, shutdown_signal()).await
+}
+
+fn router() -> Result<Router> {
     let state = GatewayState {
         client: crate::netproxy::builder()
             .user_agent(concat!("magpie/", env!("CARGO_PKG_VERSION")))
@@ -71,7 +172,7 @@ async fn serve(addr: &str) -> Result<()> {
             .build()
             .context("create gateway HTTP client")?,
     };
-    let app = Router::new()
+    Ok(Router::new()
         .route("/", get(info))
         .route("/v1/models", get(models))
         .route("/models", get(models))
@@ -83,16 +184,16 @@ async fn serve(addr: &str) -> Result<()> {
         .route("/messages", post(messages))
         .route("/v1/messages/count_tokens", post(count_tokens))
         .fallback(not_found)
-        .with_state(state);
+        .with_state(state))
+}
 
-    let listener = tokio::net::TcpListener::bind(addr)
-        .await
-        .with_context(|| format!("bind gateway to {addr}"))?;
-    let address = listener.local_addr().context("read gateway address")?;
-    println!("magpie gateway listening on http://{address}");
-
+async fn serve_listener(
+    listener: tokio::net::TcpListener,
+    app: Router,
+    shutdown: impl Future<Output = ()> + Send + 'static,
+) -> Result<()> {
     axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
+        .with_graceful_shutdown(shutdown)
         .await
         .context("serve gateway")
 }

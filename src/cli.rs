@@ -85,6 +85,7 @@ async fn run(cli: Cli) -> Result<()> {
             let providers = crate::catalog::sync_models_dev().await?;
             println!("✓ refreshed models.dev for {providers} providers");
             let refreshed = crate::provider::sync_live_models().await?;
+            crate::agent::sync_catalog_models()?;
             if !refreshed.is_empty() {
                 let models = refreshed
                     .iter()
