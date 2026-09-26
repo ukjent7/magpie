@@ -583,19 +583,19 @@ fn create_tray(ctx: &egui::Context, signals: &Signals) -> Result<TrayIcon> {
     let quit_id = quit.id().clone();
     let open_signal = Arc::clone(&signals.open);
     let quit_signal = Arc::clone(&signals.quit);
-    let ctx = ctx.clone();
+    let menu_ctx = ctx.clone();
     MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
         if event.id() == &open_id {
             open_signal.store(true, Ordering::Relaxed);
-            ctx.request_repaint();
+            menu_ctx.request_repaint();
         } else if event.id() == &quit_id {
             quit_signal.store(true, Ordering::Relaxed);
-            ctx.request_repaint();
+            menu_ctx.request_repaint();
         }
     }));
 
     let toggle_signal = Arc::clone(&signals.toggle);
-    let ctx = ctx.clone();
+    let tray_ctx = ctx.clone();
     TrayIconEvent::set_event_handler(Some(move |event| {
         if matches!(
             event,
@@ -606,7 +606,7 @@ fn create_tray(ctx: &egui::Context, signals: &Signals) -> Result<TrayIcon> {
             }
         ) {
             toggle_signal.store(true, Ordering::Relaxed);
-            ctx.request_repaint();
+            tray_ctx.request_repaint();
         }
     }));
     Ok(tray)
