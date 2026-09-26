@@ -761,25 +761,15 @@ pub(crate) async fn update_skill_at(
             o
         }
     };
-    let mut tmp = fetch(&src).await?;
-    if adopt && !src.ref_.is_empty() {
-        // the branch CC Switch recorded is gone: the default one
-        let fallback = Source {
-            ref_: String::new(),
-            ..src.clone()
-        };
-        match fetch(&fallback).await {
-            Ok(fallback_tmp) => {
-                let _ = std::fs::remove_dir_all(&tmp);
-                src = fallback;
-                tmp = fallback_tmp;
-            }
-            Err(error) => {
-                let _ = std::fs::remove_dir_all(&tmp);
-                return Err(error);
-            }
+    let mut tmp = match fetch(&src).await {
+        Ok(tmp) => tmp,
+        Err(error) if adopt && !src.ref_.is_empty() => {
+            // the branch CC Switch recorded is gone: the default one
+            src.ref_ = String::new();
+            fetch(&src).await?
         }
-    }
+        Err(error) => return Err(error),
+    };
     let result = finish_update(store, homes, name, &src, &tmp, adopt);
     let _ = std::fs::remove_dir_all(&tmp);
     result

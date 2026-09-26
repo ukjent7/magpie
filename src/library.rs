@@ -1452,6 +1452,32 @@ pub(crate) mod testing {
         );
         res
     }
+
+    // One global says where a fetched skill comes from, so the tests that
+    // serve their own tarballs take it in turn: asking while another holds
+    // it, a test would reach the other's server — or, once it has let go,
+    // GitHub's, and wait there for its answer.
+    #[cfg(unix)]
+    static SERVING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[cfg(unix)]
+    pub(crate) struct Served(Option<std::sync::MutexGuard<'static, ()>>);
+
+    // served points every fetch at url until what it gives back is dropped.
+    #[cfg(unix)]
+    pub(crate) fn served(url: String) -> Served {
+        let taken = SERVING.lock().unwrap_or_else(|gone| gone.into_inner());
+        crate::library::skills::set_tarball_base(Some(url));
+        Served(Some(taken))
+    }
+
+    #[cfg(unix)]
+    impl Drop for Served {
+        fn drop(&mut self) {
+            crate::library::skills::set_tarball_base(None);
+            let _ = self.0.take();
+        }
+    }
 }
 
 #[cfg(test)]

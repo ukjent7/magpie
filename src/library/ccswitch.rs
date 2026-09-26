@@ -412,7 +412,7 @@ mod tests {
             ("owner-repo-abc/skills/pdf/forms.md", "forms"),
         ]);
         let (base, asked) = serve_tarball(tarball).await;
-        crate::library::skills::set_tarball_base(Some(base));
+        let _served = crate::library::testing::served(base);
 
         crate::library::skills::install_skills_at(
             &store,
@@ -474,7 +474,6 @@ mod tests {
         crate::library::skills::update_skill_at(&store, &homes, "pdf")
             .await
             .unwrap();
-        crate::library::skills::set_tarball_base(None);
     }
 
     // serve_tarball answers every path with the same tarball, remembering

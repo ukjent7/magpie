@@ -250,7 +250,7 @@ async fn test_skills_from_github() {
     tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
     });
-    crate::library::skills::set_tarball_base(Some(format!("http://{addr}")));
+    let _served = crate::library::testing::served(format!("http://{addr}"));
 
     let missing = probe_skills_at(&sb.store, "owner/missing").await;
     let error = missing.unwrap_err().to_string();
@@ -308,5 +308,4 @@ async fn test_skills_from_github() {
     )
     .await;
     assert!(twice.is_err(), "installed twice");
-    crate::library::skills::set_tarball_base(None);
 }
