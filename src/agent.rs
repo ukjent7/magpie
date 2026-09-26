@@ -377,6 +377,12 @@ impl Agent {
         if self.spec.id == "opencode" && !field.catalog_prefix.is_empty() {
             return self.set_opencode_model(field, value);
         }
+        if self.spec.id == "gemini" && field.key == "model" {
+            return self.set_gemini_model(value);
+        }
+        if self.spec.id == "gemini" && field.key == "auth" && gemini_gateway_configured(self)? {
+            restore_gemini_config(self)?;
+        }
         if self.spec.id == "claude" && field.key == "model" {
             return self.set_claude_model(value);
         }
@@ -534,6 +540,51 @@ impl Agent {
             ],
         )
     }
+
+    fn set_gemini_model(&self, value: &str) -> Result<()> {
+        let env_path = gemini_env_path(self);
+        let routed = gemini_gateway_configured(self)?;
+
+        if value.is_empty() {
+            if routed {
+                forget_gemini_config()?;
+                config::delete_env_many(&env_path, &["GOOGLE_GEMINI_BASE_URL", "GEMINI_API_KEY"])?;
+                config::delete_many(
+                    &self.path,
+                    self.spec.format,
+                    &[GEMINI_AUTH.path, GEMINI_MODEL.path],
+                )?;
+                return Ok(());
+            }
+            return config::delete(&self.path, self.spec.format, GEMINI_MODEL.path);
+        }
+
+        if !is_gateway_model(value)? {
+            if routed {
+                restore_gemini_config(self)?;
+            }
+            return config::set(&self.path, self.spec.format, GEMINI_MODEL.path, value);
+        }
+
+        if !routed {
+            stash_gemini_config(self)?;
+        }
+        let base_url = crate::gateway::url();
+        config::set_env_many(
+            &env_path,
+            &[
+                ("GOOGLE_GEMINI_BASE_URL", &base_url),
+                ("GEMINI_API_KEY", crate::gateway::TOKEN),
+            ],
+        )?;
+        config::set_jsonc_values(
+            &self.path,
+            &[
+                (GEMINI_AUTH.path, Value::String("gemini-api-key".to_owned())),
+                (GEMINI_MODEL.path, Value::String(value.to_owned())),
+            ],
+        )
+    }
 }
 
 pub fn sync_catalog_models() -> Result<()> {
@@ -568,6 +619,112 @@ fn claude_gateway_configured(agent: &Agent) -> Result<bool> {
     let token = config::get(&agent.path, agent.spec.format, "env.ANTHROPIC_AUTH_TOKEN")?;
     Ok(base_url.as_deref().is_some_and(is_gateway_root_url)
         && token.as_deref() == Some(crate::gateway::TOKEN))
+}
+
+fn gemini_env_path(agent: &Agent) -> PathBuf {
+    agent.path.with_file_name(".env")
+}
+
+fn gemini_gateway_configured(agent: &Agent) -> Result<bool> {
+    let env_path = gemini_env_path(agent);
+    let base_url = config::get_env(&env_path, "GOOGLE_GEMINI_BASE_URL")?;
+    let token = config::get_env(&env_path, "GEMINI_API_KEY")?;
+    Ok(base_url.as_deref().is_some_and(is_gateway_root_url)
+        && token.as_deref() == Some(crate::gateway::TOKEN))
+}
+
+fn stash_gemini_config(agent: &Agent) -> Result<()> {
+    let env_path = gemini_env_path(agent);
+    let mut stash = read_agent_stash()?;
+    for (key, value) in [
+        (
+            "gemini.base_url",
+            config::get_env(&env_path, "GOOGLE_GEMINI_BASE_URL")?,
+        ),
+        (
+            "gemini.api_key",
+            config::get_env(&env_path, "GEMINI_API_KEY")?,
+        ),
+        (
+            "gemini.auth",
+            config::get(&agent.path, agent.spec.format, GEMINI_AUTH.path)?,
+        ),
+        (
+            "gemini.model",
+            config::get(&agent.path, agent.spec.format, GEMINI_MODEL.path)?,
+        ),
+    ] {
+        match value.filter(|value| !value.is_empty()) {
+            Some(value) => {
+                stash.insert(key.to_owned(), value);
+            }
+            None => {
+                stash.remove(key);
+            }
+        }
+    }
+    write_agent_stash(&stash)
+}
+
+fn restore_gemini_config(agent: &Agent) -> Result<()> {
+    let mut stash = read_agent_stash()?;
+    let restored_env = [
+        ("gemini.base_url", "GOOGLE_GEMINI_BASE_URL"),
+        ("gemini.api_key", "GEMINI_API_KEY"),
+    ]
+    .into_iter()
+    .filter_map(|(stash_key, env_key)| {
+        stash
+            .remove(stash_key)
+            .filter(|value| !value.is_empty())
+            .map(|value| (env_key, value))
+    })
+    .collect::<Vec<_>>();
+    let restored_json = [
+        ("gemini.auth", GEMINI_AUTH.path),
+        ("gemini.model", GEMINI_MODEL.path),
+    ]
+    .into_iter()
+    .filter_map(|(stash_key, key_path)| {
+        stash
+            .remove(stash_key)
+            .filter(|value| !value.is_empty())
+            .map(|value| (key_path, Value::String(value)))
+    })
+    .collect::<Vec<_>>();
+
+    let env_path = gemini_env_path(agent);
+    config::delete_env_many(&env_path, &["GOOGLE_GEMINI_BASE_URL", "GEMINI_API_KEY"])?;
+    let env_assignments = restored_env
+        .iter()
+        .map(|(key, value)| (*key, value.as_str()))
+        .collect::<Vec<_>>();
+    if !env_assignments.is_empty() {
+        config::set_env_many(&env_path, &env_assignments)?;
+    }
+
+    config::delete_many(
+        &agent.path,
+        agent.spec.format,
+        &[GEMINI_AUTH.path, GEMINI_MODEL.path],
+    )?;
+    if !restored_json.is_empty() {
+        config::set_jsonc_values(&agent.path, &restored_json)?;
+    }
+    write_agent_stash(&stash)
+}
+
+fn forget_gemini_config() -> Result<()> {
+    let mut stash = read_agent_stash()?;
+    for key in [
+        "gemini.base_url",
+        "gemini.api_key",
+        "gemini.auth",
+        "gemini.model",
+    ] {
+        stash.remove(key);
+    }
+    write_agent_stash(&stash)
 }
 
 fn is_gateway_root_url(value: &str) -> bool {

@@ -31,6 +31,128 @@ pub fn get(path: &Path, format: ConfigFormat, key_path: &str) -> Result<Option<S
     }
 }
 
+pub fn get_env(path: &Path, key: &str) -> Result<Option<String>> {
+    let Some(text) = read_optional(path)? else {
+        return Ok(None);
+    };
+    Ok(text.lines().find_map(|line| {
+        let (found, value) = dotenv_entry(line)?;
+        (found == key).then(|| unquote_env_value(value).unwrap_or_else(|| value.to_owned()))
+    }))
+}
+
+pub fn set_env_many(path: &Path, assignments: &[(&str, &str)]) -> Result<()> {
+    let text = read_optional(path)?.unwrap_or_default();
+    let mut lines = text.split('\n').map(str::to_owned).collect::<Vec<_>>();
+
+    for (key, value) in assignments {
+        let value = if value.chars().any(|character| " #\"'$".contains(character)) {
+            format!("\"{}\"", value.replace('"', "\\\""))
+        } else {
+            (*value).to_owned()
+        };
+        let replacement = format!("{key}={value}");
+        let mut last_assignment = None;
+        let mut replaced = false;
+
+        for (index, line) in lines.iter_mut().enumerate() {
+            let Some((found, _)) = dotenv_entry(line) else {
+                continue;
+            };
+            last_assignment = Some(index);
+            if found == *key {
+                *line = replacement.clone();
+                replaced = true;
+                break;
+            }
+        }
+
+        if !replaced {
+            lines.insert(last_assignment.map_or(0, |index| index + 1), replacement);
+        }
+    }
+
+    write_atomic(path, join_lines(&lines).as_bytes())
+}
+
+pub fn delete_env_many(path: &Path, keys: &[&str]) -> Result<()> {
+    let Some(text) = read_optional(path)? else {
+        return Ok(());
+    };
+    if text.is_empty() {
+        return Ok(());
+    }
+
+    let mut changed = false;
+    let lines = text
+        .split('\n')
+        .filter(|line| {
+            let remove = dotenv_entry(line).is_some_and(|(found, _)| keys.contains(&found));
+            changed |= remove;
+            !remove
+        })
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    if changed {
+        write_atomic(path, join_lines(&lines).as_bytes())?;
+    }
+    Ok(())
+}
+
+fn dotenv_entry(line: &str) -> Option<(&str, &str)> {
+    let line = line.trim_start();
+    let line = line
+        .strip_prefix("export")
+        .filter(|remainder| remainder.chars().next().is_some_and(char::is_whitespace))
+        .map_or(line, str::trim_start);
+    let (key, value) = line.split_once('=')?;
+    let key = key.trim_end();
+    let mut characters = key.chars();
+    let first = characters.next()?;
+    if !(first == '_' || first.is_ascii_alphabetic())
+        || !characters.all(|character| character == '_' || character.is_ascii_alphanumeric())
+    {
+        return None;
+    }
+    Some((key, value.trim()))
+}
+
+fn unquote_env_value(value: &str) -> Option<String> {
+    let quote = value.chars().next()?;
+    if !matches!(quote, '\'' | '"') {
+        return None;
+    }
+
+    let mut escaped = false;
+    for (index, character) in value.char_indices().skip(1) {
+        if quote == '"' && escaped {
+            escaped = false;
+            continue;
+        }
+        if quote == '"' && character == '\\' {
+            escaped = true;
+            continue;
+        }
+        if character == quote {
+            if quote == '\'' {
+                return Some(value[1..index].to_owned());
+            }
+            return Some(
+                serde_json::from_str(&value[..=index]).unwrap_or_else(|_| value[1..].to_owned()),
+            );
+        }
+    }
+    Some(value[1..].to_owned())
+}
+
+fn join_lines(lines: &[String]) -> String {
+    let mut text = lines.join("\n");
+    if !text.ends_with('\n') {
+        text.push('\n');
+    }
+    text
+}
+
 pub fn exists(path: &Path, format: ConfigFormat, key_path: &str) -> Result<bool> {
     let Some(text) = read_optional(path)? else {
         return Ok(false);
