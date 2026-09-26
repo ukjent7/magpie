@@ -26,10 +26,6 @@ use crate::{
 
 pub(crate) mod classify;
 
-pub use classify::{
-    GatewayClassifier, classify, classify_body, classify_effort, fit_effort, read_intent,
-};
-
 const GROUP_PREFIX: &str = "group/";
 
 // Efforts are the reasoning levels a rule can ask for, lowest first.
@@ -1173,7 +1169,8 @@ pub async fn rule_for(
             classified.error = "the message has no words to classify".to_owned();
         } else {
             let started = Instant::now();
-            match classify(ask.expect("checked above"), classifier, &intents, &text).await {
+            match classify::classify(ask.expect("checked above"), classifier, &intents, &text).await
+            {
                 Ok((intent, cached)) => {
                     classified.intent = intent;
                     classified.cached = cached;
@@ -1519,6 +1516,7 @@ fn show(group: &Group, rules: &[Rule]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::grouprule::classify::{classify_body, fit_effort, read_intent};
     use serde_json::json;
 
     fn chat(body: Value) -> TurnRequest {

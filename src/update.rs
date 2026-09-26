@@ -333,9 +333,7 @@ fn install(staged: &Path, executable: &Path) -> Result<()> {
     fs::rename(executable, &old).with_context(|| {
         format!(
             "couldn't move {} aside to put the new version in",
-            executable
-                .file_name()
-                .map_or_else(String::new, |name| name.to_string_lossy())
+            executable.display()
         )
     })?;
     if let Err(error) = fs::rename(staged, executable) {

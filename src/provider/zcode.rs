@@ -216,7 +216,7 @@ fn decrypt(secret: &[u8; 32], value: &str) -> Option<String> {
     }
     let cipher = Aes256Gcm::new_from_slice(secret.as_slice()).ok()?;
     let sealed = [ciphertext.as_slice(), tag.as_slice()].concat();
-    let plain = cipher.decrypt(aead_nonce(&iv), sealed.as_slice()).ok()?;
+    let plain = cipher.decrypt(&aead_nonce(&iv), sealed.as_slice()).ok()?;
     String::from_utf8(plain).ok()
 }
 
@@ -224,8 +224,8 @@ fn decode_part(part: &str) -> Option<Vec<u8>> {
     URL_SAFE_NO_PAD.decode(part.trim_end_matches('=')).ok()
 }
 
-fn aead_nonce(iv: &[u8]) -> &aes_gcm::aead::Nonce<Aes256Gcm> {
-    aes_gcm::aead::Nonce::<Aes256Gcm>::from_slice(iv)
+fn aead_nonce(iv: &[u8]) -> aes_gcm::aead::Nonce<Aes256Gcm> {
+    aes_gcm::aead::Nonce::<Aes256Gcm>::try_from(iv).expect("nonce")
 }
 
 // who names a Z.ai account: its email, or the phone number of one signed
@@ -818,7 +818,7 @@ mod tests {
         let cipher = Aes256Gcm::new_from_slice(secret.as_slice()).unwrap();
         let iv = b"0123456789ab";
         let sealed = cipher
-            .encrypt(aead_nonce(iv.as_slice()), value.as_bytes())
+            .encrypt(&aead_nonce(iv.as_slice()), value.as_bytes())
             .unwrap();
         let (ciphertext, tag) = sealed.split_at(sealed.len() - 16);
         format!(

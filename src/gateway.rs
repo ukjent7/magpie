@@ -948,13 +948,17 @@ async fn forward(
             // turned off) is asked again with thinking left to it
             if !unthinking && always_thinks(&error_text) {
                 let raised = body.as_object().and_then(|object| {
-                    let thinking = object.get("thinking")?;
-                    thinking.get("type").and_then(Value::as_str)
-                        == Some("disabled").then(|| {
-                            let mut without = object.clone();
-                            without.remove("thinking");
-                            Value::Object(without)
-                        })
+                    let disabled = object
+                        .get("thinking")
+                        .and_then(|thinking| thinking.get("type"))
+                        .and_then(Value::as_str)
+                        == Some("disabled");
+                    if !disabled {
+                        return None;
+                    }
+                    let mut without = object.clone();
+                    without.remove("thinking");
+                    Some(Value::Object(without))
                 });
                 if let Some(raised) = raised {
                     unthinking = true;
@@ -2411,7 +2415,12 @@ fn redact_request(bytes: &[u8]) -> (Vec<u8>, bool) {
         return (bytes.to_vec(), false);
     }
     if !crate::redact::known() {
-        crate::redact::set_key_path(crate::settings::path().with_file_name("redact.key"));
+        crate::redact::set_key_path(
+            crate::settings::path()
+                .with_file_name("redact.key")
+                .display()
+                .to_string(),
+        );
     }
     let options = crate::redact::Options {
         secrets: settings.redact,
@@ -2422,7 +2431,7 @@ fn redact_request(bytes: &[u8]) -> (Vec<u8>, bool) {
     (masked, count > 0)
 }
 
-fn finish_redact(response: Response, redacted: bool) -> Response {
+fn finish_redact(mut response: Response, redacted: bool) -> Response {
     if !redacted {
         return response;
     }
@@ -2443,6 +2452,7 @@ fn finish_redact(response: Response, redacted: bool) -> Response {
         content_type.as_deref(),
         content_encoding.as_deref(),
     )));
+    let finish_writer = writer.clone();
     let stream = response
         .into_body()
         .into_data_stream()
@@ -2457,7 +2467,7 @@ fn finish_redact(response: Response, redacted: bool) -> Response {
             Err(error) => Err(error),
         })
         .chain(stream::once(async move {
-            let out = writer
+            let out = finish_writer
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .finish();
@@ -2579,6 +2589,10 @@ mod tests {
             model_apis: HashMap::new(),
             account: None,
             hidden: false,
+            unlisted: false,
+            contexts: BTreeMap::new(),
+            family: String::new(),
+            catalog_id: String::new(),
         }
     }
 
@@ -2667,6 +2681,7 @@ mod tests {
             ],
             routing: "order".to_owned(),
             affinity: String::new(),
+            family: String::new(),
         };
 
         let candidates = group_candidates(&group, &providers, ApiProtocol::Chat, true);

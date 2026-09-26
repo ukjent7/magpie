@@ -19,6 +19,7 @@ use super::zcode::millis_to_rfc3339;
 const MAX_RESPONSE_BYTES: usize = 1 << 20;
 const CACHE_TTL: Duration = Duration::from_secs(60);
 
+#[derive(Clone, Debug)]
 pub(crate) struct PlanWindow {
     pub(crate) name: String,
     pub(crate) used: f64,
@@ -241,6 +242,7 @@ pub(crate) async fn plan_windows(
     }
 }
 
+#[derive(Clone, Debug)]
 struct PlanQuota {
     provider: String,
     name: String,
@@ -313,11 +315,12 @@ pub(crate) async fn plan_quotas() -> Vec<crate::quota::Quota> {
     }
     let shared = crate::netproxy::builder()
         .timeout(Duration::from_secs(10))
-        .build();
+        .build()
+        .ok();
     let cards: Vec<PlanQuota> = join_all(jobs.iter().map(|job| {
         let client = shared.clone();
         async move {
-            let Ok(client) = client else {
+            let Some(client) = client else {
                 return Some(PlanQuota {
                     provider: job.id.clone(),
                     name: job.name.clone(),
@@ -442,7 +445,7 @@ mod tests {
                 source.as_ref().map(|source| source.url.as_str()),
                 if url.is_empty() { None } else { Some(url) }
             );
-            assert_eq!(source.map(|source| source.sure), sure);
+            assert_eq!(source.is_some_and(|source| source.sure), sure);
         }
     }
 
