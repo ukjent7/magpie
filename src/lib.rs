@@ -5,6 +5,7 @@ pub const VERSION: &str = match option_env!("MAGPIE_VERSION") {
     None => "dev",
 };
 
+mod accounts;
 mod affinity;
 pub mod agent;
 pub mod backup;

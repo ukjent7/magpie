@@ -108,6 +108,39 @@ pub(crate) fn signed_in_auth_file() -> Option<PathBuf> {
     (auth_mode != "apikey" && !access_token.is_empty()).then_some(path)
 }
 
+pub(crate) fn signed_in_identity() -> Option<(String, String)> {
+    let contents = std::fs::read(signed_in_auth_file()?).ok()?;
+    let auth: Value = serde_json::from_slice(&contents).ok()?;
+    let id_token = auth.pointer("/tokens/id_token").and_then(Value::as_str)?;
+    let claims = jwt_claims(id_token);
+    let account_claims = claims.get("https://api.openai.com/auth");
+    let email = claims
+        .get("email")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let plan = account_claims
+        .and_then(|claims| claims.get("chatgpt_plan_type"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let user = match plan {
+        "team" | "business" | "enterprise" | "edu" if !email.is_empty() => {
+            let mut title = plan.to_owned();
+            title[..1].make_ascii_uppercase();
+            format!("{email} · {title}")
+        }
+        _ => email.to_owned(),
+    };
+    let user = if user.is_empty() {
+        auth.pointer("/tokens/account_id")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned()
+    } else {
+        user
+    };
+    (!user.is_empty()).then(|| (user, plan.to_owned()))
+}
+
 pub(crate) fn cached_models() -> Vec<String> {
     let Some(path) = codex_directory().map(|directory| directory.join("models_cache.json")) else {
         return Vec::new();
