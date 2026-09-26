@@ -1,16 +1,21 @@
 # magpie
 
 One place to pick every agent's model: Codex on DeepSeek, Claude Code
-on Kimi, Gemini CLI on GLM, from the menu bar. [usemagpie.ai](https://usemagpie.ai)
+on Kimi, Gemini CLI on GLM, from one native desktop app.
+[usemagpie.ai](https://usemagpie.ai)
 
 [![Discord](https://img.shields.io/badge/Discord-join%20the%20community-5865F2?logo=discord&logoColor=white)](https://discord.gg/vGSnD3ZKQF)
 
-`magpie` is a single screen that lists each AI agent on your machine and
-the model it is set to. Click a value, pick a model. That is the whole app.
+`magpie` lists each AI agent on your machine and the model it is set to.
+Change agent settings, manage providers and routing groups, save profiles,
+and review usage from the desktop app or command line.
 
-It lives in the menu bar: click the icon and a panel drops down; the same
-screen also opens as a normal window (`magpie`, or *Open magpie* in the tray menu),
-and there is a terminal version (`magpie tui`) and a plain CLI.
+The default command opens a native desktop window with a system tray icon.
+Choose *Open magpie* from the tray menu to show it again. `magpie tray` starts
+with the window hidden, `magpie tui` opens the keyboard-driven terminal UI,
+and the other subcommands provide a CLI.
+
+The terminal UI (`magpie tui`) looks like this:
 
 ```
   ◉ magpie
@@ -27,9 +32,9 @@ and there is a terminal version (`magpie tui`) and a plain CLI.
   ↑↓ agent  ·  ←→ field  ·  ↵ change  ·  s save profile  ·  p profiles  ·  q quit
 ```
 
-- **One small binary.** Under 15 MB with the desktop app (it uses the system
-  webview through [Wails](https://wails.io), nothing bundled), 7 MB for the
-  terminal-only build. macOS, Linux and Windows.
+- **Native desktop app.** Written in Rust with egui/eframe; the interface is a
+  native window, not a webview. A system tray icon is available on supported
+  desktop environments.
 - **Edits config files surgically.** Only the one key you change is touched;
   comments, ordering and indentation in your `settings.json`, `config.toml`,
   `opencode.jsonc` or `config.yaml` survive intact. Writes are atomic.
@@ -57,8 +62,10 @@ and there is a terminal version (`magpie tui`) and a plain CLI.
   the next refresh.
 - **Profiles.** Snapshot every agent's settings under a name and switch all of
   them back in one move.
-- **Real logos, no framework.** Plain HTML over the system webview; brand
-  icons from [lobehub/icons](https://github.com/lobehub/lobe-icons).
+- **Groups and usage.** Combine provider models into routing groups, then
+  review gateway usage by period, agent and model.
+- **Five desktop pages.** Manage Agents, Providers, Profiles, Groups and Usage
+  in the native app.
 
 ## Agents
 
@@ -138,8 +145,8 @@ keeps only tool-result requests there, and `off` disables stickiness.
 A routing group is several models, from one provider or many, that an agent
 picks as one: `group/<id>`. The gateway routes each request over every
 member's keys and accounts together. A model two of your providers serve
-under the same name becomes a group on its own; the Routing view in the app
-and `magpie group` make any other:
+under the same name becomes a group on its own; the Groups page in the app and
+`magpie group` make any other:
 
 ```sh
 magpie groups                           # yours, then those magpie found
@@ -162,8 +169,8 @@ default, while a warm vendor cache is worth keeping), `session`, `turn` or
 `models=` replaces the whole list, in order; a bare model id works when only
 one provider serves it.
 
-The app's Import from other apps dialog can copy providers from Claude Code's
-`settings.json` (`CLAUDE_CONFIG_DIR` when set) and Codex's `config.toml`
+The Rust CLI can import providers from Claude Code's `settings.json`
+(`CLAUDE_CONFIG_DIR` when set) and Codex's `config.toml`
 (`CODEX_HOME` when set) into magpie. Codex imports custom
 `[model_providers.*]` entries with an inline `experimental_bearer_token`,
 including fixed headers for custom providers in
@@ -180,8 +187,8 @@ Keychain or `~/.claude/.credentials.json`), Codex (a ChatGPT login in
 `~/.codex/auth.json`), Copilot (a GitHub login in
 `~/.config/github-copilot/apps.json` or the Copilot CLI's
 `~/.copilot/config.json`) and Devin (`devin auth login`, kept in
-`~/.local/share/devin/credentials.toml`) appear in `magpie providers` and in
-the Providers tab as *signed in as …*, with their models spelled
+`~/.local/share/devin/credentials.toml`) appear in `magpie providers` and on
+the Providers page as *signed in as …*, with their models spelled
 `claude/claude-sonnet-5`, `codex/gpt-5.5`, `copilot/claude-sonnet-4.5` or
 `devin/swe-2-max` in every other agent's picker. magpie reads the agent's own credentials each
 time, refreshes tokens the way the agent does — writing a rotated token
@@ -240,9 +247,9 @@ it:
 | Anthropic   | `http://127.0.0.1:3425`    | `ANTHROPIC_BASE_URL`, `ANTHROPIC_API_KEY=magpie` |
 | Gemini      | `http://127.0.0.1:3425`    | `GOOGLE_GEMINI_BASE_URL`, `GEMINI_API_KEY=magpie` |
 
-The *Gateway* tab in the app has this as copy buttons and ready-made
-snippets (shell, curl, Python, Node) for each API, the list of model ids,
-and the recent calls; `MAGPIE_DEBUG=1` logs every call to the terminal.
+The desktop app starts the local gateway with the window. Run `magpie serve`
+to start it without the app. `MAGPIE_DEBUG=1` logs gateway calls to the
+terminal.
 
 **Claude Code** gets `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN` and the
 model variables in the `env` block of `settings.json`; picking a native
@@ -322,54 +329,20 @@ downloads a new version in the background and installs it when you restart
 a terminal. Every release is on
 [yetone/magpie-releases](https://github.com/yetone/magpie-releases/releases).
 
-From source:
+## Rust development and CI
 
-```sh
-go install github.com/yetone/magpie@latest
-```
-
-or build locally:
-
-```sh
-make build            # ./magpie with the desktop app (needs cgo + the platform webview)
-make app              # macOS: magpie.app, a menu bar app with no Dock icon
-make cli              # terminal-only build, no cgo, cross-compiles anywhere
-make release          # dist/: native app build + cli builds for every platform
-make release-windows  # dist/: the Windows app, amd64 and arm64 (cross-compiles)
-make release-linux    # dist/: the Linux app for this machine's arch
-```
-
-Linux needs `libgtk-3-dev` and `libwebkit2gtk-4.1-dev` for the app build
-(the Makefile adds the `gtk3` tag; with plain `go build`, pass `-tags gtk3`);
-Windows uses the WebView2 runtime that ships with the OS.
-
-### Developing
-
-```sh
-make dev
-```
-
-builds with `-tags dev` and opens the app with the UI served straight from
-`internal/gui/assets`: save `app.css`, `app.js` or `index.html` and the window
-reloads itself. With `fswatch` installed (`brew install fswatch`), a change to a
-Go file rebuilds and relaunches the app too. The dev build uses its own gateway
-port (`DEV_ADDR`, default 127.0.0.1:3426), so a magpie you already run keeps
-serving your agents. Point it at a scratch home to keep your real agent
-configs out of it:
-
-```sh
-HOME=/tmp/magpie-home XDG_CONFIG_HOME=/tmp/magpie-home/.config make dev
-```
-
-`MAGPIE_THEME=light|dark` forces the palette and `MAGPIE_DEBUG=1` prints what the
-gateway translates.
+The Rust source uses edition 2024 and targets Rust 1.98.1. GitHub Actions is
+the build and verification environment for this migration: it runs formatting,
+Clippy, tests and release-mode compilation on Linux, macOS and Windows. See
+[`rust.yml`](.github/workflows/rust.yml) and
+[`rust-format.yml`](.github/workflows/rust-format.yml) for the workflows.
 
 ## Use
 
 ```sh
-magpie                          # open the app: a window plus the menu bar icon
-magpie tray                     # menu bar icon only (use this in your login items)
-magpie tui                      # the same thing, in the terminal
+magpie                          # open the app window and system tray icon
+magpie tray                     # start with the window hidden in the tray
+magpie tui                      # open the keyboard-driven terminal UI
 magpie ls                       # list every agent and its current settings
 magpie claude opus              # set a model (agent names accept prefixes: cc, oc, gem …)
 magpie codex gpt-5.6-sol
@@ -391,13 +364,10 @@ magpie rm work
 magpie sync                     # refresh the models.dev catalog and every live model list
 ```
 
-In the app, click any value to open a filtered list; type to search or to
-enter something that is not listed; `esc` closes the panel. Profiles are the
-chips at the bottom: click to apply, `×` to delete, *+ save current* to add.
-The *Providers* tab of the window lists your providers with the agents on
-each; click a row to change the key or the exposed models, *Test* it, or
-click an agent icon to point that agent at one of its models. *Add
-provider* shows the presets as tiles: pick one, paste the key.
+The desktop app has Agents, Providers, Profiles, Groups and Usage pages. Use
+them to edit agent settings, manage provider keys and model exposure, configure
+routing, switch saved profiles, and inspect usage. The keyboard-driven
+terminal interface is available separately with `magpie tui`.
 
 Keys in the terminal version:
 
