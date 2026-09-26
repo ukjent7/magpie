@@ -29,8 +29,10 @@ fn add(args: &[String]) -> Result<()> {
     let Some(name) = args.first().filter(|name| !name.contains('=')) else {
         bail!("usage: magpie group add <name> models=<model>[,<model>…]");
     };
-    let mut group = Group::default();
-    group.name = name.trim().to_owned();
+    let mut group = Group {
+        name: name.trim().to_owned(),
+        ..Group::default()
+    };
     let entries = provider::available_model_entries()?;
     apply_pairs(&mut group, &args[1..], &entries, &[], true)?;
 
