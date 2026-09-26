@@ -830,7 +830,8 @@ fn codex_del(path: &Path, name: &str) -> Result<()> {
             changed = true;
             let sep = removed
                 .as_table()
-                .and_then(|t| t.decor().prefix().map(|p| p.as_raw()))
+                .and_then(|t| t.decor().prefix())
+                .and_then(|p| p.as_str())
                 .unwrap_or_default();
             opened = !sep.contains('\n');
         }
