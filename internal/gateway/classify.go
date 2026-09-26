@@ -19,6 +19,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -37,8 +38,9 @@ var (
 )
 
 // classifier asks a model which of intents text is: the intent, or "" for
-// none of them.
-type classifier func(model string, intents []string, text string) (string, error)
+// none of them. prev is what the conversation's turn before was said to
+// be, "" when nothing: a message that only carries on from it is the same.
+type classifier func(model string, intents []string, prev, text string) (string, error)
 
 var classified = struct {
 	sync.Mutex
@@ -64,9 +66,9 @@ type answerError struct{ error }
 // when it can be: the same message and intents within classifyKeep. A
 // classifier that failed is left to rest for classifyRest rather than
 // making every turn wait out its timeout.
-func classify(ask classifier, model string, intents []string, text string) (intent string, cached bool, err error) {
+func classify(ask classifier, model string, intents []string, prev, text string) (intent string, cached bool, err error) {
 	h := sha256.New()
-	h.Write([]byte(model + "\x00" + strings.ToLower(strings.Join(intents, "\x00")) + "\x00" + text))
+	h.Write([]byte(model + "\x00" + strings.ToLower(strings.Join(intents, "\x00")) + "\x00" + prev + "\x00" + text))
 	key := hex.EncodeToString(h.Sum(nil))
 	now := time.Now()
 	classified.Lock()
@@ -79,7 +81,7 @@ func classify(ask classifier, model string, intents []string, text string) (inte
 		return "", false, fmt.Errorf("%s failed %s ago (%s); not asked again for now", model, now.Sub(f.at).Round(time.Second), f.err)
 	}
 	classified.Unlock()
-	intent, err = ask(model, intents, text)
+	intent, err = ask(model, intents, prev, text)
 	classified.Lock()
 	defer classified.Unlock()
 	if err != nil {
@@ -136,11 +138,18 @@ const classifyPrompt = "You route a user's message to a coding assistant. " +
 // classifyBody is the Chat request asking model which of intents text is,
 // at effort when it isn't "". A model that reasons does so before it
 // answers, and how long varies: 2048 leaves room for that and the number.
-func classifyBody(model, effort string, intents []string, text string) []byte {
+// When the turn before was one of intents (prev), it is told so: "go on"
+// says nothing of its own, and is of the kind of what it goes on with.
+func classifyBody(model, effort string, intents []string, prev, text string) []byte {
 	var b strings.Builder
 	b.WriteString("Kinds:\n")
 	for i, in := range intents {
 		fmt.Fprintf(&b, "%d. %s\n", i+1, in)
+	}
+	if i := slices.Index(intents, prev); i >= 0 {
+		fmt.Fprintf(&b, "\nThe user's message before this one, in the same conversation, was of kind %d. "+
+			"A message that only carries on from it — go on, yes, do it, fix that — is of kind %d too; "+
+			"one that asks for something of its own is of the kind that fits it.\n", i+1, i+1)
 	}
 	b.WriteString("\nThe user's message:\n<message>\n")
 	b.WriteString(text)
@@ -197,7 +206,7 @@ func classifyEffort(model string) string {
 }
 
 // askClassifier asks model through the gateway itself, as a client would.
-func (s *Server) askClassifier(model string, intents []string, text string) (string, error) {
+func (s *Server) askClassifier(model string, intents []string, prev, text string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), classifyTimeout)
 	defer cancel()
 	r, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://magpie/v1/chat/completions", nil)
@@ -207,7 +216,7 @@ func (s *Server) askClassifier(model string, intents []string, text string) (str
 	r.Header.Set("Content-Type", "application/json")
 	r.Header.Set("User-Agent", RouterAgent)
 	w := httptest.NewRecorder()
-	s.serve(w, r, provider.Chat, classifyBody(model, classifyEffort(model), intents, text))
+	s.serve(w, r, provider.Chat, classifyBody(model, classifyEffort(model), intents, prev, text))
 	if ctx.Err() != nil {
 		return "", fmt.Errorf("%s gave no answer in %s", model, classifyTimeout)
 	}

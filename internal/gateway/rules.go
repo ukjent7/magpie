@@ -48,6 +48,7 @@ type Classified struct {
 	By      string   `json:"by"`               // the classifier model
 	Intents []string `json:"intents"`          // what it chose among
 	Intent  string   `json:"intent,omitempty"` // what it said the message is; "" for none
+	After   string   `json:"after,omitempty"`  // what it said the turn before was, which it was told
 	Cached  bool     `json:"cached,omitempty"` // said before, for the same message
 	Ms      int      `json:"ms,omitempty"`     // how long asking it took
 	Error   string   `json:"error,omitempty"`  // why it couldn't say: no intent matches then
@@ -163,6 +164,9 @@ func ruleFor(key string, g provider.Group, ms []provider.Member, req *Request, a
 	// the first to match waits on its intent
 	if intents := provider.Intents(g.Rules, q); len(intents) > 0 {
 		c := &Classified{By: g.Classifier, Intents: intents}
+		if had && slices.Contains(intents, tr.intent) {
+			c.After = tr.intent // a message that only carries on is of its kind
+		}
 		text := userText(req)
 		switch {
 		case g.Classifier == "":
@@ -173,7 +177,7 @@ func ruleFor(key string, g provider.Group, ms []provider.Member, req *Request, a
 			c.Error = "the message has no words to classify"
 		default:
 			t0 := time.Now()
-			intent, cached, err := classify(ask, g.Classifier, intents, text)
+			intent, cached, err := classify(ask, g.Classifier, intents, c.After, text)
 			c.Intent, c.Cached, c.Ms = intent, cached, int(time.Since(t0).Milliseconds())
 			if err != nil {
 				c.Error = err.Error()

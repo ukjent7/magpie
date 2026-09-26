@@ -133,6 +133,15 @@ func TestIntentRoutesATurn(t *testing.T) {
 	if !strings.Contains(c.last(), "what does this function return?") || strings.Contains(c.last(), "add a unit test") {
 		t.Fatalf("turn 2 asked about %s", c.last())
 	}
+	// it was told what the turn before was, for a message that only
+	// carries on from it; after a turn that was none, nothing
+	if r.Rule.Classified.After != "writing or fixing tests" || !strings.Contains(c.last(), "was of kind 1") {
+		t.Fatalf("turn 2 not told of turn 1: %+v %s", r.Rule.Classified, c.last())
+	}
+	_, r = postOK(t, s, "s1", chat(msg, []string{"what does this function return?", "go on"}, 0, ""))
+	if r.Rule.Classified == nil || r.Rule.Classified.After != "" || strings.Contains(c.last(), "was of kind") || c.n() != 3 {
+		t.Fatalf("turn 3: %+v %s", r.Rule.Classified, c.last())
+	}
 	// the classifier's call is magpie's own, in the usage
 	var seen bool
 	for _, call := range s.Recent() {
@@ -207,7 +216,7 @@ func TestIntentNotAskedWhenItCantMatter(t *testing.T) {
 	g, ms, _ := provider.FindGroup("group/r")
 	img := &Request{Messages: []Message{{Role: "user", Parts: []Part{{Kind: Image}}}}}
 	asked := 0
-	hit := ruleFor("img", g, ms, img, "claude", func(string, []string, string) (string, error) { asked++; return "debugging", nil })
+	hit := ruleFor("img", g, ms, img, "claude", func(string, []string, string, string) (string, error) { asked++; return "debugging", nil })
 	if hit.N != 0 || hit.Classified == nil || !strings.Contains(hit.Classified.Error, "no words") || asked != 0 {
 		t.Fatalf("image: %+v %+v", hit, hit.Classified)
 	}

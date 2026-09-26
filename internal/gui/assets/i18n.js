@@ -640,6 +640,7 @@ const I18N = {
     "{by} was to tell which of {kinds} turn {turn} is, but couldn't — {err} — so no rule with an intent matches it.": "{by} 本应判断第 {turn} 轮属于 {kinds} 中的哪一个，但没能给出答案（{err}），所以带意图的规则都不命中。",
     "{by} was asked which of {kinds} turn {turn} is, and said none ({took}).": "问 {by} 第 {turn} 轮属于 {kinds} 中的哪一个，它说都不是（{took}）。",
     "{by} was asked which of {kinds} turn {turn} is, and said “{intent}” ({took}).": "问 {by} 第 {turn} 轮属于 {kinds} 中的哪一个，它说是“{intent}”（{took}）。",
+    "It was told turn {prev} was “{after}”, which a message that only carries on from it is too.": "同时告诉了它第 {prev} 轮是“{after}”，只是接着上一轮说的消息也算这一类。",
     "With two models or more, a rule can send some turns to one of them first.": "组里有两个及以上模型时，可以用规则把某些轮次先发给其中一个。",
     "Checked top first when you send a message: the first that matches sends that turn to its model first; the rest stay behind it if it fails. A turn under way is never moved.": "每次你发新消息时从上往下检查：第一条命中的规则把这一轮先发给它指定的模型，其余成员排在后面做故障转移。进行中的一轮不会中途换模型。",
     "Rule {n} ({when}) sent turn {turn} to {use} as it began; the turn stays there.": "第 {turn} 轮开始时命中规则 {n}（{when}），发给了 {use}；这一轮一直留在那里。",
