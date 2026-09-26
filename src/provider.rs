@@ -444,6 +444,15 @@ pub struct ModelEntry {
 }
 
 #[derive(Clone, Debug)]
+pub struct DesktopKey {
+    pub id: String,
+    pub name: String,
+    pub primary: bool,
+    pub active: bool,
+    pub protocol: String,
+}
+
+#[derive(Clone, Debug)]
 pub struct DesktopProvider {
     pub id: String,
     pub name: String,
@@ -455,6 +464,7 @@ pub struct DesktopProvider {
     pub account: bool,
     pub routing: String,
     pub affinity: String,
+    pub keys: Vec<DesktopKey>,
     pub hidden: bool,
     pub models: Vec<String>,
     pub model_count: usize,
@@ -813,6 +823,37 @@ pub fn desktop_providers() -> Result<Vec<DesktopProvider>> {
                 provider.routing.clone()
             };
             let affinity = affinity_name(&provider.affinity).to_owned();
+            let mut keys = Vec::with_capacity(provider.keys.len() + 1);
+            if !provider.key.is_empty() {
+                keys.push(DesktopKey {
+                    id: key_id(&provider.key),
+                    name: provider.key_name.clone(),
+                    primary: true,
+                    active: true,
+                    protocol: if provider.key_protocol.is_empty() {
+                        "any".to_owned()
+                    } else {
+                        provider.key_protocol.clone()
+                    },
+                });
+            }
+            keys.extend(
+                provider
+                    .keys
+                    .iter()
+                    .filter(|key| !key.key.is_empty())
+                    .map(|key| DesktopKey {
+                        id: key_id(&key.key),
+                        name: key.name.clone(),
+                        primary: false,
+                        active: !key.off,
+                        protocol: if key.protocol.is_empty() {
+                            "any".to_owned()
+                        } else {
+                            key.protocol.clone()
+                        },
+                    }),
+            );
 
             Ok(DesktopProvider {
                 id: provider.id,
@@ -825,6 +866,7 @@ pub fn desktop_providers() -> Result<Vec<DesktopProvider>> {
                 account,
                 routing,
                 affinity,
+                keys,
                 hidden: provider.hidden,
                 models,
                 model_count,
@@ -852,13 +894,65 @@ pub fn add_desktop_custom(name: &str, endpoint: &str, key: &str) -> Result<Strin
 
 pub fn set_desktop_key(id: &str, key: &str) -> Result<()> {
     ensure!(!key.trim().is_empty(), "provider key is empty");
+    let key = key.trim();
+    let fingerprint = key_id(key);
+    update_desktop_provider(id, |provider| {
+        ensure!(
+            provider.account.is_none(),
+            "signed-in provider keys are managed by the agent"
+        );
+        ensure!(
+            !provider
+                .keys
+                .iter()
+                .any(|saved| key_id(&saved.key) == fingerprint),
+            "key is already configured as a secondary key"
+        );
+        provider.key = key.to_owned();
+        Ok(())
+    })
+}
+
+pub fn add_desktop_key(id: &str, key: &str, name: &str, protocol: &str) -> Result<()> {
+    let key = key.trim();
+    let name = name.trim().to_owned();
+    let protocol = parse_key_protocol(protocol)?;
+    update_desktop_provider(id, |provider| {
+        ensure!(
+            provider.account.is_none(),
+            "signed-in provider keys are managed by the agent"
+        );
+        add_key_to_provider(provider, key, name, protocol)?;
+        Ok(())
+    })
+}
+
+pub fn update_desktop_key(id: &str, action: &str, reference: &str) -> Result<()> {
+    update_key_for(id, action, reference, false)
+}
+
+pub fn set_desktop_routing(id: &str, routing: &str) -> Result<()> {
+    let routing = normalize_routing(routing)?;
+    update_desktop_provider(id, |provider| {
+        provider.routing = routing;
+        Ok(())
+    })
+}
+
+pub fn set_desktop_affinity(id: &str, affinity: &str) -> Result<()> {
+    let affinity = normalize_affinity(affinity)?;
+    update_desktop_provider(id, |provider| {
+        provider.affinity = affinity;
+        Ok(())
+    })
+}
+
+fn update_desktop_provider(
+    id: &str,
+    update: impl FnOnce(&mut Provider) -> Result<()>,
+) -> Result<()> {
     let mut file = load()?;
-    let provider = find_provider_mut(&mut file, id)?;
-    ensure!(
-        provider.account.is_none(),
-        "signed-in provider keys are managed by the agent"
-    );
-    provider.key = key.trim().to_owned();
+    update(find_provider_mut(&mut file, id)?)?;
     store(file)
 }
 
@@ -1811,6 +1905,22 @@ fn add_key(id: &str, key: &str, options: &[String]) -> Result<()> {
 
     let mut file = load()?;
     let provider = find_provider_mut(&mut file, id)?;
+    let provider_name = provider.name.clone();
+    let provider_id = provider.id.clone();
+    let fingerprint = add_key_to_provider(provider, key, name, protocol)?;
+    store(file)?;
+    println!("✓ added API key to {provider_name} ({provider_id}) · {fingerprint}");
+    Ok(())
+}
+
+fn add_key_to_provider(
+    provider: &mut Provider,
+    key: &str,
+    name: String,
+    protocol: String,
+) -> Result<String> {
+    let key = key.trim();
+    ensure!(!key.is_empty(), "provider key is empty");
     let fingerprint = key_id(key);
     ensure!(
         provider.key.is_empty() || fingerprint != key_id(&provider.key),
@@ -1837,20 +1947,28 @@ fn add_key(id: &str, key: &str, options: &[String]) -> Result<()> {
             ..KeyAccount::default()
         });
     }
-    let provider_name = provider.name.clone();
-    let provider_id = provider.id.clone();
-    store(file)?;
-    println!("✓ added API key to {provider_name} ({provider_id}) · {fingerprint}");
-    Ok(())
+    Ok(fingerprint)
 }
 
 fn update_key(id: &str, action: &str, reference: &str) -> Result<()> {
+    update_key_for(id, action, reference, true)
+}
+
+fn update_key_for(id: &str, action: &str, reference: &str, announce: bool) -> Result<()> {
     let mut file = load()?;
     let provider = find_provider_mut(&mut file, id)?;
+    let provider_name = provider.name.clone();
+    apply_key_action(provider, action, reference)?;
+    store(file)?;
+    if announce {
+        println!("✓ {provider_name} key {reference} {action}");
+    }
+    Ok(())
+}
+
+fn apply_key_action(provider: &mut Provider, action: &str, reference: &str) -> Result<()> {
     let index = locate_key(provider, reference)
         .with_context(|| format!("{} has no key {reference:?}", provider.name))?;
-    let provider_name = provider.name.clone();
-    let label = reference.to_owned();
 
     match action {
         "use" if index > 0 => {
@@ -1913,9 +2031,6 @@ fn update_key(id: &str, action: &str, reference: &str) -> Result<()> {
         }
         _ => bail!("unsupported key action {action:?}"),
     }
-
-    store(file)?;
-    println!("✓ {provider_name} key {label} {action}");
     Ok(())
 }
 

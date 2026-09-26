@@ -79,8 +79,35 @@ enum Action {
         id: String,
         key: String,
     },
+    AddProviderKey {
+        id: String,
+        key: String,
+        name: String,
+        protocol: String,
+    },
+    UpdateProviderKey {
+        id: String,
+        action: String,
+        key_id: String,
+    },
+    SetProviderRouting {
+        id: String,
+        routing: String,
+    },
+    SetProviderAffinity {
+        id: String,
+        affinity: String,
+    },
     ConfirmProviderRemoval(String),
     RemoveProvider(String),
+    ConfirmKeyRemoval {
+        provider_id: String,
+        key_id: String,
+    },
+    RemoveProviderKey {
+        provider_id: String,
+        key_id: String,
+    },
     RefreshProvider(String),
     SelectProfile(usize),
     OpenProfileForm,
@@ -144,7 +171,10 @@ struct App {
     provider_form_open: bool,
     provider_key_for: String,
     provider_key_draft: String,
+    provider_key_name_draft: String,
+    provider_key_protocol_draft: String,
     confirm_remove: Option<String>,
+    confirm_key_removal: Option<(String, String)>,
     provider_refreshing: bool,
     provider_receiver: Option<Receiver<(String, std::result::Result<usize, String>)>>,
     profiles: Vec<(String, String)>,
@@ -278,7 +308,10 @@ impl App {
             provider_form_open: false,
             provider_key_for: String::new(),
             provider_key_draft: String::new(),
+            provider_key_name_draft: String::new(),
+            provider_key_protocol_draft: "any".to_owned(),
             confirm_remove: None,
+            confirm_key_removal: None,
             provider_refreshing: false,
             provider_receiver: None,
             profiles,
@@ -562,6 +595,8 @@ impl App {
         if self.provider_key_for != provider.id {
             self.provider_key_for.clone_from(&provider.id);
             self.provider_key_draft.clear();
+            self.provider_key_name_draft.clear();
+            self.provider_key_protocol_draft = "any".to_owned();
         }
 
         ui.horizontal(|ui| {
@@ -620,6 +655,187 @@ impl App {
             ui.label(RichText::new(text).small());
         }
 
+        if !provider.account {
+            ui.add_space(18.0);
+            ui.separator();
+            ui.heading("Key routing");
+            let mut routing = provider.routing.clone();
+            egui::ComboBox::from_id_salt(("provider-routing", provider.id.as_str()))
+                .selected_text(&routing)
+                .show_ui(ui, |ui| {
+                    for (value, label) in [
+                        ("smart", "Smart"),
+                        ("order", "Order"),
+                        ("rotate", "Rotate"),
+                        ("usage", "Least used"),
+                    ] {
+                        ui.selectable_value(&mut routing, value.to_owned(), label);
+                    }
+                });
+            if routing != provider.routing {
+                actions.push(Action::SetProviderRouting {
+                    id: provider.id.clone(),
+                    routing,
+                });
+            }
+
+            ui.horizontal(|ui| {
+                ui.label("Conversation affinity");
+                let mut affinity = provider.affinity.clone();
+                egui::ComboBox::from_id_salt(("provider-affinity", provider.id.as_str()))
+                    .selected_text(&affinity)
+                    .show_ui(ui, |ui| {
+                        for value in ["auto", "session", "turn", "off"] {
+                            ui.selectable_value(&mut affinity, value.to_owned(), value);
+                        }
+                    });
+                if affinity != provider.affinity {
+                    actions.push(Action::SetProviderAffinity {
+                        id: provider.id.clone(),
+                        affinity,
+                    });
+                }
+            });
+
+            ui.add_space(12.0);
+            ui.heading("API keys");
+            if provider.keys.is_empty() {
+                ui.label(if provider.key_required {
+                    "No key configured yet."
+                } else {
+                    "This provider can run without a key; you may add one if needed."
+                });
+            }
+            let active_secondary = provider.keys.iter().any(|key| !key.primary && key.active);
+            for key in &provider.keys {
+                egui::Frame::group(ui.style())
+                    .show(ui, |ui| {
+                        ui.horizontal_wrapped(|ui| {
+                            let name = if key.name.trim().is_empty() {
+                                if key.primary {
+                                    "Primary key"
+                                } else {
+                                    "Unnamed key"
+                                }
+                            } else {
+                                &key.name
+                            };
+                            ui.label(RichText::new(name).strong());
+                            if key.primary {
+                                ui.label("Primary");
+                            }
+                            ui.label(if key.active { "Active" } else { "Off" });
+                            ui.label(format!("{} · {}", key.protocol, key.id));
+                        });
+                        ui.horizontal_wrapped(|ui| {
+                            if !key.primary {
+                                if ui.button("Make primary").clicked() {
+                                    actions.push(Action::UpdateProviderKey {
+                                        id: provider.id.clone(),
+                                        action: "use".to_owned(),
+                                        key_id: key.id.clone(),
+                                    });
+                                }
+                                if ui
+                                    .button(if key.active { "Turn off" } else { "Turn on" })
+                                    .clicked()
+                                {
+                                    actions.push(Action::UpdateProviderKey {
+                                        id: provider.id.clone(),
+                                        action: if key.active {
+                                            "off".to_owned()
+                                        } else {
+                                            "on".to_owned()
+                                        },
+                                        key_id: key.id.clone(),
+                                    });
+                                }
+                            }
+                            let can_remove = !key.primary || active_secondary;
+                            if ui
+                                .add_enabled(can_remove, egui::Button::new("Remove key"))
+                                .on_hover_text(if can_remove {
+                                    "Remove this saved key"
+                                } else {
+                                    "Turn on another key before removing the primary"
+                                })
+                                .clicked()
+                            {
+                                actions.push(Action::ConfirmKeyRemoval {
+                                    provider_id: provider.id.clone(),
+                                    key_id: key.id.clone(),
+                                });
+                            }
+                        });
+                    })
+                    .response
+                    .on_hover_text("Key secrets are never displayed after saving.");
+            }
+
+            ui.add_space(8.0);
+            ui.label("Add or replace an API key");
+            ui.horizontal_wrapped(|ui| {
+                let width = ui.available_width().min(340.0);
+                ui.add_sized(
+                    [width, 30.0],
+                    egui::TextEdit::singleline(&mut self.provider_key_draft)
+                        .password(true)
+                        .hint_text("Paste API key"),
+                );
+                ui.add_sized(
+                    [160.0, 30.0],
+                    egui::TextEdit::singleline(&mut self.provider_key_name_draft)
+                        .hint_text("Optional key name"),
+                );
+                egui::ComboBox::from_id_salt(("new-provider-key-protocol", provider.id.as_str()))
+                    .selected_text(&self.provider_key_protocol_draft)
+                    .show_ui(ui, |ui| {
+                        for value in ["any", "chat", "responses", "anthropic"] {
+                            ui.selectable_value(
+                                &mut self.provider_key_protocol_draft,
+                                value.to_owned(),
+                                value,
+                            );
+                        }
+                    });
+            });
+            ui.horizontal(|ui| {
+                let enabled = !self.provider_key_draft.trim().is_empty();
+                if ui
+                    .add_enabled(
+                        enabled,
+                        egui::Button::new(if provider.has_key {
+                            "Replace primary"
+                        } else {
+                            "Set primary"
+                        }),
+                    )
+                    .clicked()
+                {
+                    actions.push(Action::SetProviderKey {
+                        id: provider.id.clone(),
+                        key: self.provider_key_draft.clone(),
+                    });
+                }
+                if ui
+                    .add_enabled(enabled, egui::Button::new("Add key"))
+                    .clicked()
+                {
+                    actions.push(Action::AddProviderKey {
+                        id: provider.id.clone(),
+                        key: self.provider_key_draft.clone(),
+                        name: self.provider_key_name_draft.clone(),
+                        protocol: self.provider_key_protocol_draft.clone(),
+                    });
+                }
+            });
+            ui.label(
+                RichText::new("Key secrets are stored locally and never shown again.")
+                    .small()
+                    .color(ui.visuals().weak_text_color()),
+            );
+        }
+
         ui.add_space(18.0);
         ui.horizontal(|ui| {
             if ui
@@ -632,46 +848,6 @@ impl App {
                 actions.push(Action::ConfirmProviderRemoval(provider.id.clone()));
             }
         });
-
-        if provider.key_required && !provider.account {
-            ui.add_space(18.0);
-            ui.separator();
-            ui.heading("API key");
-            ui.horizontal(|ui| {
-                let width = ui.available_width().min(360.0);
-                ui.add_sized(
-                    [width, 30.0],
-                    egui::TextEdit::singleline(&mut self.provider_key_draft)
-                        .password(true)
-                        .hint_text(if provider.has_key {
-                            "Enter a replacement key"
-                        } else {
-                            "Enter the API key"
-                        }),
-                );
-                if ui
-                    .add_enabled(
-                        !self.provider_key_draft.trim().is_empty(),
-                        egui::Button::new("Save key"),
-                    )
-                    .clicked()
-                {
-                    actions.push(Action::SetProviderKey {
-                        id: provider.id.clone(),
-                        key: self.provider_key_draft.clone(),
-                    });
-                }
-            });
-            ui.label(
-                RichText::new(if provider.has_key {
-                    "The current key remains private and is never shown again."
-                } else {
-                    "The key is stored in your local Magpie provider settings."
-                })
-                .small()
-                .color(ui.visuals().weak_text_color()),
-            );
-        }
     }
 
     fn render_profile_details(&self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
@@ -1010,6 +1186,43 @@ impl App {
             });
         if !open {
             self.confirm_remove = None;
+        }
+    }
+
+    fn render_key_removal_confirmation(&mut self, ctx: &egui::Context, actions: &mut Vec<Action>) {
+        let Some((provider_id, key_id)) = self.confirm_key_removal.clone() else {
+            return;
+        };
+        let provider_name = self
+            .providers
+            .iter()
+            .find(|provider| provider.id == provider_id)
+            .map_or(provider_id.as_str(), |provider| provider.name.as_str())
+            .to_owned();
+        let mut open = true;
+        let mut should_close = false;
+        egui::Window::new("Remove API key?")
+            .collapsible(false)
+            .resizable(false)
+            .open(&mut open)
+            .show(ctx, |ui| {
+                ui.label(format!("Remove key {key_id} from {provider_name}?"));
+                ui.label("The saved key cannot be recovered after removal.");
+                ui.add_space(12.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Remove key").clicked() {
+                        actions.push(Action::RemoveProviderKey {
+                            provider_id: provider_id.clone(),
+                            key_id: key_id.clone(),
+                        });
+                    }
+                    if ui.button("Cancel").clicked() {
+                        should_close = true;
+                    }
+                });
+            });
+        if should_close || !open {
+            self.confirm_key_removal = None;
         }
     }
 
@@ -1457,6 +1670,8 @@ impl App {
             Action::SelectProvider(index) => {
                 self.selected_provider = index.min(self.providers.len().saturating_sub(1));
                 self.provider_key_draft.clear();
+                self.provider_key_name_draft.clear();
+                self.provider_key_protocol_draft = "any".to_owned();
             }
             Action::AddProvider(draft) => {
                 let added = if draft.source == ProviderSource::Custom {
@@ -1489,6 +1704,8 @@ impl App {
             Action::SetProviderKey { id, key } => match provider::set_desktop_key(&id, &key) {
                 Ok(()) => {
                     self.provider_key_draft.clear();
+                    self.provider_key_name_draft.clear();
+                    self.provider_key_protocol_draft = "any".to_owned();
                     match self.reload_provider_data() {
                         Ok(()) => self.set_status(&format!("Updated API key for {id}"), true),
                         Err(error) => self.set_status(
@@ -1501,6 +1718,73 @@ impl App {
                 }
                 Err(error) => self.set_status(&format!("Could not save API key: {error:#}"), false),
             },
+            Action::AddProviderKey {
+                id,
+                key,
+                name,
+                protocol,
+            } => match provider::add_desktop_key(&id, &key, &name, &protocol) {
+                Ok(()) => {
+                    self.provider_key_draft.clear();
+                    self.provider_key_name_draft.clear();
+                    match self.reload_provider_data() {
+                        Ok(()) => self.set_status(&format!("Added API key to {id}"), true),
+                        Err(error) => self.set_status(
+                            &format!("Key added, but provider data could not reload: {error:#}"),
+                            false,
+                        ),
+                    }
+                }
+                Err(error) => self.set_status(&format!("Could not add API key: {error:#}"), false),
+            },
+            Action::UpdateProviderKey { id, action, key_id } => {
+                match provider::update_desktop_key(&id, &action, &key_id) {
+                    Ok(()) => match self.reload_provider_data() {
+                        Ok(()) => self.set_status(&format!("Updated API key for {id}"), true),
+                        Err(error) => self.set_status(
+                            &format!(
+                                "API key updated, but provider data could not reload: {error:#}"
+                            ),
+                            false,
+                        ),
+                    },
+                    Err(error) => {
+                        self.set_status(&format!("Could not update API key: {error:#}"), false)
+                    }
+                }
+            }
+            Action::SetProviderRouting { id, routing } => {
+                match provider::set_desktop_routing(&id, &routing) {
+                    Ok(()) => match self.reload_provider_data() {
+                        Ok(()) => self.set_status(&format!("Updated key routing for {id}"), true),
+                        Err(error) => self.set_status(
+                            &format!(
+                                "Routing updated, but provider data could not reload: {error:#}"
+                            ),
+                            false,
+                        ),
+                    },
+                    Err(error) => {
+                        self.set_status(&format!("Could not update key routing: {error:#}"), false)
+                    }
+                }
+            }
+            Action::SetProviderAffinity { id, affinity } => {
+                match provider::set_desktop_affinity(&id, &affinity) {
+                    Ok(()) => match self.reload_provider_data() {
+                        Ok(()) => self.set_status(&format!("Updated affinity for {id}"), true),
+                        Err(error) => self.set_status(
+                            &format!(
+                                "Affinity updated, but provider data could not reload: {error:#}"
+                            ),
+                            false,
+                        ),
+                    },
+                    Err(error) => {
+                        self.set_status(&format!("Could not update affinity: {error:#}"), false)
+                    }
+                }
+            }
             Action::ConfirmProviderRemoval(id) => self.confirm_remove = Some(id),
             Action::RemoveProvider(id) => match provider::remove_desktop_provider(&id) {
                 Ok(()) => {
@@ -1517,6 +1801,30 @@ impl App {
                     self.set_status(&format!("Could not remove provider: {error:#}"), false)
                 }
             },
+            Action::ConfirmKeyRemoval {
+                provider_id,
+                key_id,
+            } => self.confirm_key_removal = Some((provider_id, key_id)),
+            Action::RemoveProviderKey {
+                provider_id,
+                key_id,
+            } => {
+                self.confirm_key_removal = None;
+                match provider::update_desktop_key(&provider_id, "rm", &key_id) {
+                    Ok(()) => match self.reload_provider_data() {
+                        Ok(()) => {
+                            self.set_status(&format!("Removed API key from {provider_id}"), true)
+                        }
+                        Err(error) => self.set_status(
+                            &format!("Key removed, but provider data could not reload: {error:#}"),
+                            false,
+                        ),
+                    },
+                    Err(error) => {
+                        self.set_status(&format!("Could not remove API key: {error:#}"), false)
+                    }
+                }
+            }
             Action::RefreshProvider(id) => self.start_provider_refresh(id),
             Action::SelectProfile(index) => {
                 self.selected_profile = index.min(self.profiles.len().saturating_sub(1));
@@ -1936,6 +2244,7 @@ impl eframe::App for App {
             });
         self.render_provider_form(ui.ctx(), &mut actions);
         self.render_remove_confirmation(ui.ctx(), &mut actions);
+        self.render_key_removal_confirmation(ui.ctx(), &mut actions);
         self.render_profile_dialogs(ui.ctx(), &mut actions);
         self.render_group_form(ui.ctx(), &mut actions);
         self.render_group_removal_confirmation(ui.ctx(), &mut actions);
