@@ -516,6 +516,7 @@ impl App {
             return;
         }
         let mut open = self.provider_form_open;
+        let mut should_close = false;
         egui::Window::new("Add provider")
             .open(&mut open)
             .collapsible(false)
@@ -595,10 +596,13 @@ impl App {
                         actions.push(Action::AddProvider(self.provider_draft.clone()));
                     }
                     if ui.button("Cancel").clicked() {
-                        open = false;
+                        should_close = true;
                     }
                 });
             });
+        if should_close {
+            open = false;
+        }
         self.provider_form_open = open;
         if !open {
             self.provider_draft.key.clear();
