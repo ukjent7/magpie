@@ -365,8 +365,9 @@ fn list() -> Result<()> {
     let mut keys = preferences
         .names
         .keys()
-        .chain(preferences.efforts.keys())
-        .collect::<Vec<_>>();
+        .map(String::as_str)
+        .chain(preferences.efforts.keys().map(String::as_str))
+        .collect::<Vec<&str>>();
     keys.sort();
     keys.dedup();
     if keys.is_empty() {
@@ -376,12 +377,12 @@ fn list() -> Result<()> {
     let width = keys.iter().map(|key| key.len()).max().unwrap_or_default();
     for key in keys {
         let mut line = format!("  {key:<width$}");
-        if let Some(name) = preferences.names.get(*key).filter(|name| !name.is_empty()) {
+        if let Some(name) = preferences.names.get(key).filter(|name| !name.is_empty()) {
             line.push_str(&format!("  {name}"));
         }
         if let Some(levels) = preferences
             .efforts
-            .get(*key)
+            .get(key)
             .filter(|levels| !levels.is_empty())
         {
             line.push_str(&format!("  {}", levels.join("/")));

@@ -343,7 +343,6 @@ pub(crate) fn untar(data: &[u8], dst: &std::path::Path, max_total: u64) -> Resul
         let size = usize::try_from(octal(&header[124..136])?)
             .context("a tar entry too large for this machine")?;
         let typeflag = header[156];
-        let mode = octal(&header[100..108]).unwrap_or(0o644);
         let data_start = pos + 512;
         let data_end = data_start
             .checked_add(size)
@@ -383,6 +382,9 @@ pub(crate) fn untar(data: &[u8], dst: &std::path::Path, max_total: u64) -> Resul
                     #[cfg(unix)]
                     {
                         use std::os::unix::fs::PermissionsExt;
+                        // what the archive says the file's mode is, since a
+                        // script unpacked without its bit wouldn't run
+                        let mode = octal(&header[100..108]).unwrap_or(0o644);
                         let executable = mode & 0o111 != 0;
                         let _ = std::fs::set_permissions(
                             &p,

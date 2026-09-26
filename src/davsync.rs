@@ -332,7 +332,7 @@ struct Dav {
 impl Dav {
     fn new(config: &Config) -> Result<Dav> {
         let address = config.url.trim();
-        let base = match Url::parse(address) {
+        let mut base = match Url::parse(address) {
             Ok(url) if matches!(url.scheme(), "https" | "http") && url.host_str().is_some() => url,
             _ => bail!("{address:?} is not a WebDAV address (https://…)"),
         };
@@ -727,12 +727,10 @@ async fn sync_once(config: &Config, state: &mut State) -> Result<()> {
 
     // the server's file is in; what was brought in is this computer's own
     // now, and counts as changed here until the push is done
-    let (local, now) = if bring_in.is_empty() {
-        (local, here)
+    let now = if bring_in.is_empty() {
+        here
     } else {
-        let local = collect(config)?;
-        let now = hashes(&local)?;
-        (local, now)
+        hashes(&collect(config)?)?
     };
     let merged_hashes = hashes(&merged)?;
     let mut pending = BTreeMap::new();

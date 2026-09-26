@@ -346,8 +346,13 @@ mod tests {
     use base64::Engine;
     use std::sync::{Arc, Mutex};
 
-    use crate::library::testing::{Sandbox, write};
-    use crate::library::{Homes, Store};
+    use crate::library::testing::Sandbox;
+    use crate::library::Homes;
+    // reading CC Switch's skills means linking them, which unix does
+    #[cfg(unix)]
+    use crate::library::Store;
+    #[cfg(unix)]
+    use crate::library::testing::write;
 
     // A database CC Switch might have written: the skills table with one
     // skill of a known repository and one without.
