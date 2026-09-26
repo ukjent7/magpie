@@ -428,6 +428,8 @@ pub struct Group {
     pub affinity: String,
     #[serde(skip_serializing_if = "is_false")]
     pub auto: bool,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub family: String,
     #[serde(skip_serializing_if = "is_false")]
     pub hidden: bool,
     #[serde(flatten)]
@@ -441,6 +443,7 @@ pub struct ModelEntry {
     pub provider_id: String,
     pub provider_name: String,
     pub icon: String,
+    pub family: String,
 }
 
 #[derive(Clone, Debug)]
@@ -536,6 +539,14 @@ pub(crate) struct Provider {
     website: String,
     #[serde(skip_serializing_if = "String::is_empty")]
     keys_url: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    models_url: String,
+    #[serde(skip_serializing_if = "is_false")]
+    unlisted: bool,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    contexts: BTreeMap<String, u64>,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    family: String,
     #[serde(skip_serializing_if = "is_false")]
     hidden: bool,
     #[serde(skip)]
@@ -553,6 +564,7 @@ pub(crate) enum ProviderAccount {
 pub(crate) struct GatewayProvider {
     pub(crate) id: String,
     pub(crate) name: String,
+    pub(crate) catalog_id: String,
     pub(crate) chat: String,
     pub(crate) responses: String,
     pub(crate) anthropic: String,
@@ -567,6 +579,9 @@ pub(crate) struct GatewayProvider {
     pub(crate) model_apis: HashMap<String, HashSet<String>>,
     pub(crate) account: Option<ProviderAccount>,
     pub(crate) hidden: bool,
+    pub(crate) unlisted: bool,
+    pub(crate) contexts: BTreeMap<String, u64>,
+    pub(crate) family: String,
 }
 
 pub(crate) struct GatewayKey {
@@ -685,6 +700,7 @@ pub(crate) struct GatewayGroup {
     pub(crate) members: Vec<String>,
     pub(crate) routing: String,
     pub(crate) affinity: String,
+    pub(crate) family: String,
 }
 
 pub(crate) struct GatewayCatalog {
@@ -711,6 +727,7 @@ pub(crate) fn gateway_catalog() -> Result<GatewayCatalog> {
             members: group.members,
             routing: group.routing,
             affinity: group.affinity,
+            family: group.family,
         })
         .collect();
     let providers = file
@@ -755,9 +772,11 @@ pub(crate) fn gateway_catalog() -> Result<GatewayCatalog> {
             .collect();
             let has_configured_keys =
                 !provider.key.is_empty() || provider.keys.iter().any(|key| !key.key.is_empty());
+            let catalog_id = provider.catalog_id().to_owned();
             GatewayProvider {
                 id: provider.id,
                 name: provider.name,
+                catalog_id,
                 chat: provider.chat,
                 responses: provider.responses,
                 anthropic: provider.anthropic,
@@ -772,6 +791,9 @@ pub(crate) fn gateway_catalog() -> Result<GatewayCatalog> {
                 model_apis,
                 account: provider.account.clone(),
                 hidden: provider.hidden,
+                unlisted: provider.unlisted,
+                contexts: provider.contexts,
+                family: provider.family,
             }
         })
         .collect();
@@ -1306,16 +1328,41 @@ pub fn presets() -> Result<()> {
     Ok(())
 }
 
-pub async fn models() -> Result<()> {
+pub async fn models(args: &[String]) -> Result<()> {
     if let Err(error) = crate::catalog::sync_if_stale().await {
         eprintln!("magpie: could not refresh models.dev; using cached catalog: {error:#}");
     }
+    let agent_id = match args {
+        [] => String::new(),
+        [value] => {
+            let name = value.trim().trim_start_matches("--agent=");
+            let id = crate::usage::agent_of(name);
+            if !crate::agent::all().iter().any(|agent| agent.spec.id == id) {
+                bail!("no agent {id:?}");
+            }
+            id
+        }
+        _ => bail!("magpie models [<agent>]"),
+    };
+    let visibility = if agent_id.is_empty() {
+        None
+    } else {
+        visible_to(&agent_id)
+    };
     let providers = providers_with_local_accounts(load()?.providers);
     let mut found = false;
     for provider in providers
         .iter()
         .filter(|provider| !provider.hidden && has_provider_credential(provider))
     {
+        if provider.unlisted {
+            continue;
+        }
+        if let Some(names) = &visibility
+            && !shows(names, &provider.family, &provider.id, None)
+        {
+            continue;
+        }
         let models =
             crate::catalog::exposed_models(&provider.id, provider.catalog_id(), &provider.models);
         if models.is_empty() {
@@ -1339,6 +1386,11 @@ pub async fn models() -> Result<()> {
     }
     let available = available_model_entries()?;
     for group in groups()?.into_iter().filter(|group| !group.hidden) {
+        if let Some(names) = &visibility
+            && !shows(names, &group.family, &group.id, Some(&group.id))
+        {
+            continue;
+        }
         let members = group
             .members
             .iter()
@@ -1352,13 +1404,170 @@ pub async fn models() -> Result<()> {
         println!("  group/{}  ({} ready members)", group.id, members);
     }
     if !found {
-        if providers.is_empty() {
-            println!("no providers yet · magpie provider add <preset> starts with a vendor");
+        if agent_id.is_empty() {
+            if providers.is_empty() {
+                println!("no providers yet · magpie provider add <preset> starts with a vendor");
+            } else {
+                println!(
+                    "no models available yet · run magpie sync or magpie provider models <id>"
+                );
+            }
         } else {
-            println!("no models available yet · run magpie sync or magpie provider models <id>");
+            let families = families();
+            println!(
+                "! {agent_id} is shown none of them: nothing is in {} · magpie visible {agent_id} all shows it every model",
+                if families.is_empty() {
+                    "none yet".to_owned()
+                } else {
+                    families.join(", ")
+                }
+            );
         }
     }
     Ok(())
+}
+
+// visible: which models each agent is shown, from the terminal.
+const VISIBLE_USAGE: &str = "usage:
+  magpie visible                          which models each agent is shown
+  magpie visible <agent> <name>[,<name>…] show the agent only these: families (a tag set with
+                                          magpie provider set <id> family=relay, or magpie group set),
+                                          provider ids and group ids
+  magpie visible <agent> all              show the agent every model again
+
+  An agent not narrowed is shown every model. The gateway's model list and the model lists
+  magpie writes into the agents' files are narrowed alike; a model kept from an agent still
+  answers when the agent asks for it by name. magpie models <agent> shows what it is shown.
+
+  e.g. magpie provider set opencode-go family=ocgo
+       magpie group set gpt-plus-auto family=relay
+       magpie visible zcode relay,ocgo";
+
+pub async fn visible_command(args: &[String]) -> Result<()> {
+    if args
+        .first()
+        .is_some_and(|arg| matches!(arg.as_str(), "help" | "-h" | "--help"))
+    {
+        println!("{VISIBLE_USAGE}");
+        return Ok(());
+    }
+    let mut saved = crate::settings::load();
+    if args.is_empty() {
+        if saved.visible.is_empty() {
+            println!(
+                "  every agent is shown every model · magpie visible <agent> <family>,… narrows one"
+            );
+        }
+        for (id, names) in &saved.visible {
+            let shown = count_shown(id, names);
+            println!("  {id:<12}  {}  {shown}", names.join(", "));
+        }
+        let fs = families();
+        if !fs.is_empty() {
+            println!("  families: {}", fs.join(", "));
+        }
+        return Ok(());
+    }
+    let id = crate::usage::agent_of(&args[0]);
+    if !crate::agent::all().iter().any(|agent| agent.spec.id == id) {
+        let ids = crate::agent::all()
+            .into_iter()
+            .map(|agent| agent.spec.id.to_owned())
+            .collect::<Vec<_>>()
+            .join(", ");
+        bail!("no agent {:?} ({id_ids})", args[0], id_ids = ids);
+    }
+    if args.len() == 1 {
+        return models(&[id.clone()]).await;
+    }
+    let list = args[1..]
+        .join(",")
+        .split(',')
+        .map(|name| name.trim().trim_start_matches("group/").to_owned())
+        .filter(|name| !name.is_empty())
+        .collect::<Vec<_>>();
+    if list.len() == 1 && list[0].eq_ignore_ascii_case("all") {
+        saved.visible.remove(&id);
+    } else {
+        let known = known_visible_names();
+        for name in &list {
+            if !known
+                .iter()
+                .any(|candidate| candidate.eq_ignore_ascii_case(name))
+            {
+                let fs = families();
+                bail!(
+                    "{name} is no family, provider or group (families: {}; magpie provider set <id> family={name} makes one)",
+                    if fs.is_empty() {
+                        "none yet".to_owned()
+                    } else {
+                        fs.join(", ")
+                    }
+                );
+            }
+        }
+        saved.visible.insert(id.clone(), list);
+    }
+    crate::settings::save(&saved)?;
+    println!("✓ saved");
+    models(&[id]).await
+}
+
+fn count_shown(agent: &str, names: &[String]) -> String {
+    let providers = providers_with_local_accounts(match load() {
+        Ok(file) => file.providers,
+        Err(_) => Vec::new(),
+    });
+    let entries = model_entries(&providers);
+    let shown = entries
+        .iter()
+        .filter(|entry| shows(names, &entry.family, &entry.provider_id, None))
+        .count();
+    format!("{shown} shown, {} not", entries.len() - shown)
+}
+
+// known_visible_names is every name a visibility can hold: the families,
+// and the providers' and groups' ids.
+fn known_visible_names() -> Vec<String> {
+    let mut names = families();
+    if let Ok(file) = load() {
+        let providers = providers_with_local_accounts(file.providers);
+        for provider in &providers {
+            names.push(provider.id.clone());
+        }
+        let entries = model_entries(&providers);
+        for group in groups_in(&file.groups, &entries) {
+            names.push(group.id);
+        }
+    }
+    names
+}
+
+// key_balances asks every ready provider that names a balance endpoint
+// what is left on its keys, at once. Each result is (provider id, name,
+// the balance or the error).
+pub(crate) async fn key_balances() -> Vec<(String, String, Result<String>)> {
+    let providers = match load() {
+        Ok(file) => providers_with_local_accounts(file.providers),
+        Err(_) => return Vec::new(),
+    };
+    let providers = providers
+        .into_iter()
+        .filter(|provider| {
+            !provider.hidden
+                && has_provider_credential(provider)
+                && !provider.balance_url.is_empty()
+        })
+        .collect::<Vec<_>>();
+    let fetched = futures_util::future::join_all(providers.iter().map(|provider| async move {
+        let result = match balance::fetch(provider).await {
+            Some(result) => result,
+            None => return None,
+        };
+        Some((provider.id.clone(), provider.name.clone(), result))
+    }))
+    .await;
+    fetched.into_iter().flatten().collect()
 }
 
 pub(crate) async fn sync_live_models() -> Result<Vec<(String, usize)>> {
@@ -1387,6 +1596,8 @@ pub async fn command(args: &[String]) -> Result<()> {
         [] => bail!("{USAGE}"),
         [verb] if verb == "presets" => presets(),
         [verb, rest @ ..] if verb == "add" => add(rest),
+        [verb, id, rest @ ..] if verb == "set" => set_provider(id, rest),
+        [verb, id, value] if verb == "listed" => set_listed(id, value),
         [verb, id, key] if verb == "key" => change_key(id, key),
         [verb, rest @ ..] if verb == "keys" => keys_command(rest),
         [verb, id, selected @ ..] if verb == "routing" => set_routing(id, selected),
@@ -1401,6 +1612,54 @@ pub async fn command(args: &[String]) -> Result<()> {
         [id] => show(id).await,
         _ => bail!("{USAGE}"),
     }
+}
+
+// set_provider changes a provider's settings, with the same k=v pairs as add.
+fn set_provider(id: &str, assignments: &[String]) -> Result<()> {
+    if assignments.is_empty() {
+        bail!("magpie provider set <id> k=v…");
+    }
+    for assignment in assignments {
+        if let Some((key, _)) = assignment.split_once('=')
+            && key.eq_ignore_ascii_case("id")
+        {
+            bail!("a provider's id can't change; groups and agents name it by it");
+        }
+    }
+    let mut file = load()?;
+    let provider = find_provider_mut(&mut file, id)?;
+    for assignment in assignments {
+        let (key, value) = assignment
+            .split_once('=')
+            .with_context(|| format!("expected key=value, got {assignment:?}"))?;
+        apply_assignment(provider, key, value.trim())?;
+    }
+    let name = provider.name.clone();
+    let provider_id = provider.id.clone();
+    store(file)?;
+    println!("✓ saved {name} ({provider_id})");
+    Ok(())
+}
+
+// set_listed: no, the provider's models leave the list agents see and
+// serve only through the routing groups they are in.
+fn set_listed(id: &str, value: &str) -> Result<()> {
+    let unlisted = match value {
+        "yes" => false,
+        "no" => true,
+        _ => bail!("magpie provider listed <id> yes|no"),
+    };
+    let mut file = load()?;
+    let provider = find_provider_mut(&mut file, id)?;
+    provider.unlisted = unlisted;
+    let name = provider.name.clone();
+    store(file)?;
+    if unlisted {
+        println!("✓ {name} serves only through routing groups");
+    } else {
+        println!("✓ {name} its models are listed");
+    }
+    Ok(())
 }
 
 fn set_icon(id: &str, value: &str) -> Result<()> {
@@ -1650,32 +1909,7 @@ fn add(args: &[String]) -> Result<()> {
         let (key, value) = assignment
             .split_once('=')
             .with_context(|| format!("expected key=value, got {assignment:?}"))?;
-        let value = value.trim();
-        match key.to_ascii_lowercase().as_str() {
-            "id" => provider.id = value.to_owned(),
-            "name" => provider.name = value.to_owned(),
-            "url" | "chat" => provider.chat = value.to_owned(),
-            "responses" => provider.responses = value.to_owned(),
-            "anthropic" => provider.anthropic = value.to_owned(),
-            "key" => provider.key = value.to_owned(),
-            "icon" => provider.icon = icon::from_value(value)?,
-            "catalog" => provider.catalog = value.to_owned(),
-            "website" => provider.website = value.to_owned(),
-            "keysurl" => provider.keys_url = value.to_owned(),
-            "balance" => provider.balance_url = value.to_owned(),
-            "balance.path" => provider.balance_path = value.to_owned(),
-            "models" => provider.models = clean_list(value),
-            "fallback" => provider.fallback = clean_list(value),
-            "routing" => provider.routing = normalize_routing(value)?,
-            "affinity" | "stays" => provider.affinity = normalize_affinity(value)?,
-            header if header.starts_with("header.") && header.len() > "header.".len() => {
-                let (_, name) = key.split_once('.').context("invalid header assignment")?;
-                let name = name.trim();
-                ensure!(!name.is_empty(), "header name is empty");
-                provider.headers.insert(name.to_owned(), value.to_owned());
-            }
-            _ => bail!("unsupported provider field {key:?}"),
-        }
+        apply_assignment(&mut provider, key, value.trim())?;
     }
 
     let provider = store_new_provider(provider)?;
@@ -1686,6 +1920,80 @@ fn add(args: &[String]) -> Result<()> {
     };
     println!("✓ added {} ({}) · {key}", provider.name, provider.id);
     Ok(())
+}
+
+// apply_assignment handles one k=v pair of `magpie provider add` and
+// `magpie provider set`.
+fn apply_assignment(provider: &mut Provider, key: &str, value: &str) -> Result<()> {
+    match key.to_ascii_lowercase().as_str() {
+        "id" => provider.id = value.to_owned(),
+        "name" => provider.name = value.to_owned(),
+        "url" | "chat" => provider.chat = value.to_owned(),
+        "responses" => provider.responses = value.to_owned(),
+        "anthropic" => provider.anthropic = value.to_owned(),
+        "key" => provider.key = value.to_owned(),
+        "icon" => provider.icon = icon::from_value(value)?,
+        "catalog" => provider.catalog = value.to_owned(),
+        "website" => provider.website = value.to_owned(),
+        "keysurl" => provider.keys_url = value.to_owned(),
+        "balance" => provider.balance_url = value.to_owned(),
+        "balance.path" => provider.balance_path = value.to_owned(),
+        "models" => provider.models = clean_list(value),
+        "models.url" => provider.models_url = value.to_owned(),
+        "family" | "tag" => provider.family = value.to_owned(),
+        "context" => set_context(provider, "*", value)?,
+        "fallback" => provider.fallback = clean_list(value),
+        "routing" => provider.routing = normalize_routing(value)?,
+        "affinity" | "stays" => provider.affinity = normalize_affinity(value)?,
+        header if header.starts_with("header.") && header.len() > "header.".len() => {
+            let (_, name) = key.split_once('.').context("invalid header assignment")?;
+            let name = name.trim();
+            ensure!(!name.is_empty(), "header name is empty");
+            provider.headers.insert(name.to_owned(), value.to_owned());
+        }
+        context if context.starts_with("context.") && context.len() > "context.".len() => {
+            let (_, model) = key.split_once('.').context("invalid context assignment")?;
+            set_context(provider, model.trim(), value)?;
+        }
+        _ => bail!("unsupported provider field {key:?}"),
+    }
+    Ok(())
+}
+
+// set_context sets the context agents are told a model takes ("*" for all
+// the provider's); empty or 0 leaves it to the vendor and models.dev again.
+fn set_context(provider: &mut Provider, model: &str, value: &str) -> Result<()> {
+    let tokens = if value.trim().is_empty() {
+        0
+    } else {
+        parse_tokens(value).context("context")?
+    };
+    if tokens == 0 {
+        provider.contexts.remove(model);
+        return Ok(());
+    }
+    provider.contexts.insert(model.to_owned(), tokens);
+    Ok(())
+}
+
+// parse_tokens reads 200000, 200k, 1.5m.
+pub(crate) fn parse_tokens(value: &str) -> Result<u64> {
+    let value = value.to_ascii_lowercase().replace('_', "");
+    let value = value.trim();
+    let (multiplier, value) = match value.strip_suffix('k') {
+        Some(rest) => (1_000.0, rest),
+        None => match value.strip_suffix('m') {
+            Some(rest) => (1_000_000.0, rest),
+            None => (1.0, value),
+        },
+    };
+    let parsed: f64 = value
+        .parse()
+        .map_err(|_| anyhow!("tokens {value:?} is not a length (200000, 200k, 1m)"))?;
+    if parsed < 0.0 {
+        bail!("tokens {value:?} is not a length (200000, 200k, 1m)");
+    }
+    Ok((parsed * multiplier) as u64)
 }
 
 fn store_new_provider(mut provider: Provider) -> Result<Provider> {
@@ -2448,11 +2756,16 @@ fn is_provider_assignment(value: &str) -> bool {
             | "balance"
             | "balance.path"
             | "models"
+            | "models.url"
+            | "family"
+            | "tag"
+            | "context"
             | "fallback"
             | "routing"
             | "affinity"
             | "stays"
     ) || normalized.starts_with("header.")
+        || normalized.starts_with("context.")
 }
 
 fn normalize_url(value: &str) -> Result<String> {
@@ -2549,6 +2862,70 @@ impl Provider {
     }
 }
 
+// ---- visible ----------------------------------------------------------------
+
+// Which of the catalog an agent is shown. Settings' Visible names, for an
+// agent, the families its lists hold: a family is the tag providers and
+// groups are given (magpie provider set <id> family=relay), and a
+// provider's or group's id names it alone.
+
+// visible_to is what agent's lists are narrowed to, and whether they are.
+pub(crate) fn visible_to(agent: &str) -> Option<Vec<String>> {
+    crate::settings::load()
+        .visible
+        .get(&agent.to_ascii_lowercase())
+        .cloned()
+}
+
+// shows reports whether a visibility shows an entry that answers to
+// family and provider_id (or group, when it is a group's entry).
+pub(crate) fn shows(
+    names: &[String],
+    family: &str,
+    provider_id: &str,
+    group: Option<&str>,
+) -> bool {
+    let mut candidates = Vec::new();
+    if !family.is_empty() {
+        candidates.push(family.to_owned());
+    }
+    match group {
+        Some(group) => {
+            candidates.push(group.to_owned());
+            candidates.push(format!("group/{group}"));
+        }
+        None => candidates.push(provider_id.to_owned()),
+    }
+    candidates.iter().any(|candidate| {
+        names
+            .iter()
+            .any(|name| name.eq_ignore_ascii_case(candidate))
+    })
+}
+
+// families are the families providers and groups are tagged with, sorted.
+pub(crate) fn families() -> Vec<String> {
+    let mut out = Vec::<String>::new();
+    let mut add = |family: &str| {
+        if !family.is_empty() && !out.iter().any(|known| known == family) {
+            out.push(family.to_owned());
+        }
+    };
+    let Ok(file) = load() else {
+        return out;
+    };
+    let providers = providers_with_local_accounts(file.providers);
+    for provider in &providers {
+        add(&provider.family);
+    }
+    let entries = model_entries(&providers);
+    for group in groups_in(&file.groups, &entries) {
+        add(&group.family);
+    }
+    out.sort();
+    out
+}
+
 fn model_entries(providers: &[Provider]) -> Vec<ModelEntry> {
     let mut entries = Vec::new();
     for provider in providers.iter().filter(|provider| {
@@ -2567,6 +2944,7 @@ fn model_entries(providers: &[Provider]) -> Vec<ModelEntry> {
                 provider_id: provider.id.clone(),
                 provider_name: provider.name.clone(),
                 icon: provider.icon.clone(),
+                family: provider.family.clone(),
             });
         }
     }
@@ -2708,6 +3086,7 @@ mod tests {
             provider_id: provider_id.to_owned(),
             provider_name: provider_id.to_owned(),
             icon: String::new(),
+            family: String::new(),
         }
     }
 

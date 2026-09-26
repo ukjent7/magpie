@@ -1,4 +1,4 @@
-use std::{env, fs, path::PathBuf};
+use std::{collections::BTreeMap, env, fs, path::PathBuf};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -17,6 +17,11 @@ pub struct Settings {
     pub agents_hidden: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub agents_shown: Vec<String>,
+    // Visible narrows the models an agent is shown, by agent id: the
+    // families (the tag a provider or group is given), provider ids and
+    // group ids its lists hold. An agent it doesn't name is shown them all.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub visible: BTreeMap<String, Vec<String>>,
 }
 
 impl Default for Settings {
@@ -29,6 +34,7 @@ impl Default for Settings {
             agent_order: Vec::new(),
             agents_hidden: Vec::new(),
             agents_shown: Vec::new(),
+            visible: BTreeMap::new(),
         }
     }
 }
@@ -73,6 +79,10 @@ pub fn load() -> Settings {
         return Settings::default();
     };
     serde_json::from_str(&contents).unwrap_or_default()
+}
+
+pub fn save(settings: &Settings) -> Result<()> {
+    write_json(&path(), settings)
 }
 
 pub fn write_json(path: &std::path::Path, value: &impl Serialize) -> Result<()> {

@@ -415,6 +415,7 @@ mod tests {
             provider_id: provider.to_owned(),
             provider_name: provider.to_owned(),
             icon: String::new(),
+            family: String::new(),
         }
     }
 

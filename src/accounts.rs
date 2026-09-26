@@ -135,6 +135,17 @@ pub(crate) async fn command(args: &[String]) -> Result<()> {
         agent_filter = Some(agent);
     }
 
+    let mut rows = collected_rows(agent_filter.as_deref()).await?;
+
+    if as_json {
+        println!("{}", serde_json::to_string_pretty(&rows)?);
+    } else {
+        print_rows(&rows);
+    }
+    Ok(())
+}
+
+async fn collected_rows(agent_filter: Option<&str>) -> Result<Vec<AccountRow>> {
     let mut rows = read_saved_logins()?
         .into_iter()
         .map(account_row)
@@ -176,13 +187,36 @@ pub(crate) async fn command(args: &[String]) -> Result<()> {
     codex_usage::refresh(&mut rows).await;
     copilot_usage::refresh(&mut rows).await;
     rows.sort_by_cached_key(|row| (row.agent.clone(), row.user.to_lowercase()));
+    Ok(rows)
+}
 
-    if as_json {
-        println!("{}", serde_json::to_string_pretty(&rows)?);
-    } else {
-        print_rows(&rows);
-    }
-    Ok(())
+pub(crate) async fn quota_subscriptions() -> Vec<crate::quota::Quota> {
+    let Ok(rows) = collected_rows(None).await else {
+        return Vec::new();
+    };
+    rows.into_iter()
+        .map(|row| {
+            crate::quota::Quota::subscription(
+                row.agent,
+                row.user.clone(),
+                row.plan.clone().unwrap_or_default(),
+                row.user,
+                row.windows
+                    .into_iter()
+                    .map(|window| {
+                        crate::quota::QuotaSpan::new(
+                            window.name,
+                            window.used,
+                            window.remaining,
+                            window.resets_at,
+                            window.display,
+                        )
+                    })
+                    .collect(),
+                row.error.unwrap_or_default(),
+            )
+        })
+        .collect()
 }
 
 fn merge_copilot_account(rows: &mut Vec<AccountRow>, account: copilot::Account) {

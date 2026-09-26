@@ -109,7 +109,11 @@ async fn run(cli: Cli) -> Result<()> {
         }
         [command] if command == "ls" || command == "list" => list_agents(true),
         [command] if command == "providers" => crate::provider::list(),
-        [command] if command == "models" => crate::provider::models().await,
+        [command, rest @ ..] if command == "models" => crate::provider::models(rest).await,
+        [command, rest @ ..] if command == "visible" => {
+            crate::provider::visible_command(rest).await
+        }
+        [command, rest @ ..] if command == "quota" => crate::quota::command(rest).await,
         [command] if command == "groups" => crate::groups::command(&[]),
         [command, rest @ ..] if command == "group" => crate::groups::command(rest),
         [command, rest @ ..] if command == "provider" => crate::provider::command(rest).await,

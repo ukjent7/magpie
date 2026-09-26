@@ -41,6 +41,8 @@ pub struct Model {
     pub image_input: Option<bool>,
     #[serde(alias = "Context")]
     pub context: usize,
+    #[serde(alias = "Output")]
+    pub output: usize,
     #[serde(alias = "Keys", skip_serializing_if = "Vec::is_empty")]
     pub keys: Vec<String>,
 }
@@ -132,6 +134,7 @@ struct ReasoningOption {
 struct ModelLimit {
     context: usize,
     input: usize,
+    output: usize,
 }
 
 static CATALOG: OnceLock<RwLock<HashMap<String, CatalogProvider>>> = OnceLock::new();
@@ -453,6 +456,7 @@ fn catalog_models(provider_id: &str) -> Vec<Model> {
                     } else {
                         raw.limit.context
                     },
+                    output: raw.limit.output,
                     keys: Vec::new(),
                 }
             })

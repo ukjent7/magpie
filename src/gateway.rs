@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{BTreeMap, HashMap, HashSet, VecDeque},
     convert::Infallible,
     env,
     future::Future,
@@ -203,6 +203,7 @@ fn router() -> Result<Router> {
         .route(MESSAGES_PATH, post(messages))
         .route("/messages", post(messages))
         .route(MESSAGE_COUNT_PATH, post(count_tokens))
+        .route("/v1/magpie/quotas", get(quotas))
         .fallback(not_found)
         .with_state(state))
 }
@@ -212,10 +213,13 @@ async fn serve_listener(
     app: Router,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> Result<()> {
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown)
-        .await
-        .context("serve gateway")
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown)
+    .await
+    .context("serve gateway")
 }
 
 async fn shutdown_signal() {
@@ -256,23 +260,72 @@ async fn info() -> std::result::Result<Json<Value>, ApiError> {
     })))
 }
 
-async fn models() -> std::result::Result<Json<Value>, ApiError> {
+// quotas is what is left of every subscription and key balance, for an
+// agent choosing where to send its work. It names the accounts, so it
+// answers only on this machine, when the gateway listens beyond it too.
+async fn quotas(request: Request<Body>) -> Response {
+    let loopback = request
+        .extensions()
+        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+        .is_some_and(|info| info.0.ip().is_loopback());
+    if !loopback {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({"error": {
+                "message": "magpie's quotas are only told to this machine",
+                "type": "forbidden",
+            }})),
+        )
+            .into_response();
+    }
+    let data = crate::quota::report().await;
+    Json(json!({"object": "list", "data": data})).into_response()
+}
+
+async fn models(request: Request<Body>) -> std::result::Result<Json<Value>, ApiError> {
     let catalog = configured_catalog().await?;
-    let mut data = exposed_models(&catalog.providers)
-        .map(|(provider, model)| {
-            json!({
-                "id": format!("{}/{}", provider.id, model),
-                "object": "model",
-                "type": "model",
-                "created": 0,
-                "created_at": "2025-01-01T00:00:00Z",
-                "owned_by": provider.id,
-                "display_name": model
-            })
-        })
-        .collect::<Vec<_>>();
-    data.extend(catalog.groups.iter().map(|group| {
-        json!({
+    // catalogFor is the catalog as the agent asking is shown it
+    let agent_id = crate::usage::agent_of(
+        request
+            .headers()
+            .get(header::USER_AGENT)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default(),
+    );
+    let visibility = crate::provider::visible_to(&agent_id);
+    let mut data = Vec::new();
+    for provider in catalog
+        .providers
+        .iter()
+        .filter(|provider| !provider.hidden && !provider.unlisted && has_endpoint(provider))
+    {
+        if let Some(names) = &visibility
+            && !crate::provider::shows(names, &provider.family, &provider.id, None)
+        {
+            continue;
+        }
+        let metadata = crate::catalog::available_models(&provider.id, &provider.catalog_id)
+            .into_iter()
+            .map(|model| (model.id.clone(), model))
+            .collect::<HashMap<_, _>>();
+        for model in &provider.models {
+            let known = metadata.get(model.as_str());
+            data.push(model_object(
+                format!("{}/{}", provider.id, model),
+                model,
+                &provider.id,
+                known,
+                &provider.contexts,
+            ));
+        }
+    }
+    for group in catalog.groups.iter() {
+        if let Some(names) = &visibility
+            && !crate::provider::shows(names, &group.family, &group.id, Some(&group.id))
+        {
+            continue;
+        }
+        data.push(json!({
             "id": format!("group/{}", group.id),
             "object": "model",
             "type": "model",
@@ -280,8 +333,8 @@ async fn models() -> std::result::Result<Json<Value>, ApiError> {
             "created_at": "2025-01-01T00:00:00Z",
             "owned_by": "magpie",
             "display_name": group.name
-        })
-    }));
+        }));
+    }
     let first_id = data
         .first()
         .and_then(|model| model["id"].as_str())
@@ -298,6 +351,47 @@ async fn models() -> std::result::Result<Json<Value>, ApiError> {
         result["last_id"] = json!(id);
     }
     Ok(Json(result))
+}
+
+// model_object says whether a model reasons and at which levels, and how
+// long a request and a reply it takes, as the names clients read it by.
+fn model_object(
+    id: String,
+    model: &str,
+    owned_by: &str,
+    known: Option<&crate::catalog::Model>,
+    contexts: &BTreeMap<String, u64>,
+) -> Value {
+    let efforts = known.map_or(Vec::new(), |model| model.efforts.clone());
+    let levels = efforts
+        .iter()
+        .map(|effort| json!({"effort": effort}))
+        .collect::<Vec<_>>();
+    let mut context = known.map_or(0, |model| model.context);
+    if let Some(set) = contexts.get(model).or_else(|| contexts.get("*")) {
+        context = *set as usize;
+    }
+    let output = known.map_or(0, |model| model.output);
+    let mut object = json!({
+        "id": id,
+        "object": "model",
+        "type": "model",
+        "created": 0,
+        "created_at": "2025-01-01T00:00:00Z",
+        "owned_by": owned_by,
+        "display_name": known.map_or(model.to_owned(), |model| model.name.clone()),
+        "reasoning": !levels.is_empty(),
+        "supported_reasoning_levels": levels,
+    });
+    if context > 0 {
+        object["context_window"] = json!(context);
+        object["context_length"] = json!(context);
+        object["max_input_tokens"] = json!(context);
+    }
+    if output > 0 {
+        object["max_output_tokens"] = json!(output);
+    }
+    object
 }
 
 async fn gemini_models() -> Response {
@@ -822,8 +916,21 @@ async fn forward(
         return codex_non_stream_response(response, affinity_record, usage_request).await;
     }
     let translated = upstream_protocol != protocol;
-    if !translated || !response.status().is_success() {
-        return relay(response, upstream_protocol, affinity_record, usage_request);
+    if response.status().is_success() {
+        if !translated {
+            return relay(response, upstream_protocol, affinity_record, usage_request);
+        }
+    } else {
+        let provider_name = provider.name.clone();
+        return upstream_error_response(
+            response,
+            upstream_protocol,
+            protocol,
+            &provider_name,
+            affinity_record,
+            usage_request,
+        )
+        .await;
     }
     let upstream_sse = response
         .headers()
@@ -1970,6 +2077,101 @@ fn copy_translated_headers(response: &mut Response, upstream_headers: &HeaderMap
 
 async fn not_found() -> Response {
     api_error(StatusCode::NOT_FOUND, "unknown gateway endpoint")
+}
+
+// upstream_error_response passes a vendor's failure on to the agent, but a
+// vendor saying the conversation is too long is said the client's way, so
+// the agent compacts and retries rather than stopping.
+async fn upstream_error_response(
+    mut upstream: reqwest::Response,
+    upstream_protocol: ApiProtocol,
+    client_protocol: ApiProtocol,
+    provider_name: &str,
+    affinity_record: Option<(AffinityContext, String)>,
+    usage_request: Option<crate::usage::Request>,
+) -> Response {
+    let status = upstream.status();
+    let record_status = status.as_u16();
+    let mut bytes = Vec::new();
+    while let Ok(Some(chunk)) = upstream.chunk().await {
+        if bytes.len().saturating_add(chunk.len()) > 1_048_576 {
+            break;
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    let body: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+    if let Some(request) = usage_request {
+        crate::usage::record(
+            request,
+            record_status,
+            affinity::usage_from_value(upstream_protocol, &body),
+        );
+    }
+    if let Some((context, route)) = affinity_record {
+        affinity::record(
+            &context,
+            route,
+            affinity::cache_read_from_value(upstream_protocol, &body),
+        );
+    }
+    let message = format!("{provider_name}: {}", upstream_error_message(&body, &bytes));
+    if too_long(status, &message) {
+        let mut message = message;
+        if client_protocol == ApiProtocol::Anthropic
+            && !message.to_ascii_lowercase().contains("prompt is too long")
+        {
+            message = format!("prompt is too long: {message}");
+        }
+        return api_error_for(client_protocol, StatusCode::BAD_REQUEST, &message);
+    }
+    let mut response = Response::new(Body::from(bytes));
+    *response.status_mut() = status;
+    if let Some(content_type) = upstream.headers().get(header::CONTENT_TYPE) {
+        response
+            .headers_mut()
+            .insert(header::CONTENT_TYPE, content_type.clone());
+    }
+    response
+}
+
+fn upstream_error_message(body: &Value, raw: &[u8]) -> String {
+    if let Some(message) = body.pointer("/error/message").and_then(Value::as_str) {
+        return message.to_owned();
+    }
+    if let Some(message) = body.pointer("/error").and_then(Value::as_str) {
+        return message.to_owned();
+    }
+    String::from_utf8_lossy(raw).chars().take(300).collect()
+}
+
+// too_long is whether a vendor's error says the conversation no longer
+// fits: OpenAI's context_length_exceeded, Anthropic's "prompt is too
+// long", Volcengine's "Input exceeds the context limit", "maximum context
+// length", "context window"… One about max_tokens is left alone: the
+// reply's allowance, not the conversation, is what is too big there, and
+// compacting won't help.
+fn too_long(status: StatusCode, message: &str) -> bool {
+    let code = status.as_u16();
+    if !(400..500).contains(&code) {
+        return false;
+    }
+    let message = message.to_ascii_lowercase();
+    if ["max_tokens", "max_output_tokens", "max_completion_tokens"]
+        .iter()
+        .any(|token| message.contains(token))
+    {
+        return false;
+    }
+    message.contains("context_length_exceeded")
+        || message.contains("prompt is too long")
+        || message.contains("input is too long")
+        || (message.contains("exceed") && message.contains("context"))
+        || (message.contains("beyond") && message.contains("context"))
+        || message.contains("maximum context")
+        || message.contains("too many input tokens")
+        || message.contains("too many prompt tokens")
+        || message.contains("too many tokens")
+        || (message.contains("上下文") && (message.contains("超") || message.contains("过长")))
 }
 
 fn api_error(status: StatusCode, message: &str) -> Response {
