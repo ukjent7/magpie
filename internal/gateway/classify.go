@@ -127,9 +127,11 @@ func userText(req *Request) string {
 	return text
 }
 
-const classifyPrompt = "You route a user's message to a coding assistant by what it asks for. " +
-	"Given numbered kinds of request and the user's message, answer with the number of the kind the message is, " +
-	"or 0 if it is none of them. Answer with the number only."
+const classifyPrompt = "You route a user's message to a coding assistant. " +
+	"Given numbered kinds and the user's message, answer with the number of the kind that fits the message best. " +
+	"The kinds may be topics, or levels such as how hard or how big a request is; " +
+	"when they are levels, every message has one, a greeting or a question about the assistant included. " +
+	"Answer 0 only when the message is plainly none of the kinds. Answer with the number only."
 
 // classifyBody is the Chat request asking model which of intents text is,
 // at effort when it isn't "". A model that reasons does so before it
@@ -142,7 +144,7 @@ func classifyBody(model, effort string, intents []string, text string) []byte {
 	}
 	b.WriteString("\nThe user's message:\n<message>\n")
 	b.WriteString(text)
-	b.WriteString("\n</message>\n\nThe number of its kind (0 for none):")
+	b.WriteString("\n</message>\n\nThe number of the kind that fits it best (0 only if none does):")
 	req := map[string]any{
 		"model": model,
 		"messages": []map[string]string{
