@@ -28,9 +28,10 @@ const (
 	pageProviders
 	pageGroups
 	pageUsage
+	pageLibrary
 )
 
-var pageNames = []string{"agents", "providers", "groups", "usage"}
+var pageNames = []string{"agents", "providers", "groups", "usage", "library"}
 
 // ask is a line to type: a key, a family, a group's name.
 type ask struct {

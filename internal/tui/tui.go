@@ -1,6 +1,7 @@
 // Package tui is magpie in the terminal: one row per agent, arrow keys to pick
 // a field, enter to change it; and pages for providers, routing groups and
-// usage beside it (pages.go), 1–4 to go between them.
+// usage beside it (pages.go), the library (library.go), 1–5 to go between
+// them.
 package tui
 
 import (
@@ -18,6 +19,7 @@ import (
 
 	"github.com/yetone/magpie/internal/agent"
 	"github.com/yetone/magpie/internal/catalog"
+	"github.com/yetone/magpie/internal/library"
 	"github.com/yetone/magpie/internal/profile"
 	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/settings"
@@ -94,20 +96,25 @@ type model struct {
 	w, h    int
 	syncing bool
 
-	page    page
-	back    mode // where esc goes from a picker or a line to type
-	ask     ask
-	confirm string // what a second d removes
-	provs   []provider.Provider
-	prow    int
-	bal     map[string]string
-	asked   bool // balances were asked for
-	groups  []provider.Group
-	grow    int
-	gid     string // the group open
-	gsel    int    // its member picked
-	period  usage.Period
-	sum     usage.Summary
+	page      page
+	back      mode // where esc goes from a picker or a line to type
+	ask       ask
+	confirm   string // what a second d removes
+	provs     []provider.Provider
+	prow      int
+	bal       map[string]string
+	asked     bool // balances were asked for
+	groups    []provider.Group
+	grow      int
+	gid       string // the group open
+	gsel      int    // its member picked
+	period    usage.Period
+	sum       usage.Summary
+	lib       []libRow
+	lrow      int
+	libView   *library.View
+	libAgents []library.AgentView
+	libErr    string
 }
 
 type flashMsg struct {
@@ -153,6 +160,8 @@ func (m *model) reload() {
 		}
 	case pageUsage:
 		m.sum = usage.Summarize(m.period)
+	case pageLibrary:
+		m.reloadLibrary()
 	}
 }
 
@@ -204,6 +213,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case pickMsg:
 		m.openMemberPicker(msg)
 		return m, nil
+	case editedMsg:
+		if msg.err != nil {
+			m.flash, m.flashOK = msg.err.Error(), false
+			return m, nil
+		}
+		return m, saveInstructions(msg.text)
 	case syncedMsg:
 		m.syncing = false
 		if msg.err != nil {
@@ -223,7 +238,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, m.goTo(p)
 			}
 			switch m.page {
-			case pageProviders, pageGroups, pageUsage:
+			case pageProviders, pageGroups, pageUsage, pageLibrary:
 				if s := msg.String(); s == "q" || s == "esc" {
 					return m, tea.Quit
 				}
@@ -242,6 +257,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m.updateGroups(msg)
 			case pageUsage:
 				return m.updateUsage(msg)
+			case pageLibrary:
+				m.flash = ""
+				return m.updateLibrary(msg)
 			}
 			return m.updateList(msg)
 		case modeAsk:
@@ -258,12 +276,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// pageKey is the page a key goes to: 1–4, or ] and [ for the next and
+// pageKey is the page a key goes to: 1–5, or ] and [ for the next and
 // the one before.
 func (m model) pageKey(k string) (page, bool) {
 	n := page(len(pageNames))
 	switch k {
-	case "1", "2", "3", "4":
+	case "1", "2", "3", "4", "5":
 		return page(k[0] - '1'), true
 	case "]":
 		return (m.page + 1) % n, true
@@ -386,6 +404,7 @@ func (m model) updatePicker(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc":
 		m.mode = m.back
+		m.reload()
 		return m, nil
 	case "down", "ctrl+n":
 		if len(m.pk.match) > 0 {
@@ -588,16 +607,19 @@ func (m model) View() string {
 		switch m.page {
 		case pageProviders:
 			body = m.viewProviders()
-			footer = hints("↑↓", "provider", "↵", "models", "e", "key", "a", "add", "f", "family", "u", "list/groups only", "t", "test", "b", "balances", "d", "remove", "1–4", "pages")
+			footer = hints("↑↓", "provider", "↵", "models", "e", "key", "a", "add", "f", "family", "u", "list/groups only", "t", "test", "b", "balances", "d", "remove", "1–5", "pages")
 		case pageGroups:
 			body = m.viewGroups()
-			footer = hints("↑↓", "group", "↵", "open", "n", "new", "o", "routing", "d", "remove", "1–4", "pages", "q", "quit")
+			footer = hints("↑↓", "group", "↵", "open", "n", "new", "o", "routing", "d", "remove", "1–5", "pages", "q", "quit")
+		case pageLibrary:
+			body = m.viewLibrary()
+			footer = hints("↑↓", "item", "↵", "agents", "e", "edit instructions", "i", "bring in", "d", "remove", "r", "reload", "1–5", "pages", "q", "quit")
 		case pageUsage:
 			body = m.viewUsage()
-			footer = hints("←→", "period", "t w m A", "today · 7 days · 30 days · all", "r", "reload", "1–4", "pages", "q", "quit")
+			footer = hints("←→", "period", "t w m A", "today · 7 days · 30 days · all", "r", "reload", "1–5", "pages", "q", "quit")
 		default:
 			body = m.viewList()
-			footer = hints("↑↓", "agent", "←→", "field", "↵", "change", "s", "save profile", "p", "profiles", "1–4", "pages", "q", "quit")
+			footer = hints("↑↓", "agent", "←→", "field", "↵", "change", "s", "save profile", "p", "profiles", "1–5", "pages", "q", "quit")
 		}
 	case modePick, modeProfiles:
 		body = m.viewPicker()
