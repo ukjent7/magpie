@@ -115,6 +115,9 @@ async fn run(cli: Cli) -> Result<()> {
         [command] if command == "ls" || command == "list" => list_agents(true),
         [command] if command == "providers" => crate::provider::list(),
         [command, rest @ ..] if command == "models" => crate::provider::models(rest).await,
+        [command, rest @ ..] if command == "model" => {
+            crate::provider::modelprefs::command(rest)
+        }
         [command, rest @ ..] if command == "visible" => {
             crate::provider::visible_command(rest).await
         }
@@ -303,6 +306,10 @@ fn usage() -> String {
         "",
         "  magpie providers                list API providers",
         "  magpie models                   list exposed provider models",
+        "  magpie model name <provider/model> [name|--reset]",
+        "                                the name a model goes by: in magpie, the gateway's list and the agents'",
+        "  magpie model efforts <provider/model> [low,high|--reset]",
+        "                                the reasoning levels a model offers",
         "  magpie groups                   list routing groups",
         "  magpie group add <name> models=<m1>,<m2>",
         "  magpie group set <id> k=v…     change a routing group",

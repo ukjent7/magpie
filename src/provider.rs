@@ -18,6 +18,7 @@ mod balance;
 mod icon;
 mod import;
 mod import_apps;
+pub mod modelprefs;
 pub(crate) mod planquota;
 mod test;
 pub(crate) mod zcode;
@@ -442,6 +443,10 @@ pub struct Group {
 pub struct ModelEntry {
     pub id: String,
     pub model: crate::catalog::Model,
+    // own_name is the model's name as its vendor lists it, when the user
+    // gave the model a name of their own: a routing group found across
+    // providers keeps that, since a name is one provider's business alone.
+    pub own_name: String,
     pub provider_id: String,
     pub provider_name: String,
     pub icon: String,
@@ -2885,6 +2890,31 @@ pub(crate) fn mirror_backup(providers: &[Provider], groups: &[Group]) -> Result<
     store(file)
 }
 
+// with_saved_keys is a provider list that came without keys — sync sends
+// one when the user chose not to carry them — over the list this computer
+// has: each keeps its own key, name and protocol.
+pub(crate) fn with_saved_keys(incoming: &[Provider], saved: &[Provider]) -> Vec<Provider> {
+    let here = saved
+        .iter()
+        .map(|saved| (saved.id.clone(), saved))
+        .collect::<HashMap<_, _>>();
+    incoming
+        .iter()
+        .cloned()
+        .map(|mut provider| {
+            if provider.key.is_empty() && provider.keys.is_empty()
+                && let Some(kept) = here.get(&provider.id)
+            {
+                provider.key.clone_from(&kept.key);
+                provider.key_name.clone_from(&kept.key_name);
+                provider.keys.clone_from(&kept.keys);
+                provider.key_protocol.clone_from(&kept.key_protocol);
+            }
+            provider
+        })
+        .collect()
+}
+
 pub(crate) fn restore_backup_icons(icons: &BTreeMap<String, Vec<u8>>) -> Result<()> {
     for (name, data) in icons {
         if data.len() > MAX_ICON_BYTES {
@@ -3195,11 +3225,17 @@ fn model_entries(providers: &[Provider]) -> Vec<ModelEntry> {
                 || !provider.responses.is_empty()
                 || !provider.anthropic.is_empty())
     }) {
+        let own = crate::catalog::listed_names(&provider.id, provider.catalog_id());
         for model in
             crate::catalog::exposed_models(&provider.id, provider.catalog_id(), &provider.models)
         {
+            let own_name = match own.get(&model.id) {
+                Some(name) if !name.is_empty() => name.clone(),
+                _ => model.name.clone(),
+            };
             entries.push(ModelEntry {
                 id: format!("{}/{}", provider.id, model.id),
+                own_name,
                 model,
                 provider_id: provider.id.clone(),
                 provider_name: provider.name.clone(),
@@ -3265,11 +3301,7 @@ fn auto_groups(entries: &[ModelEntry]) -> Vec<Group> {
         let position = *positions.entry(key.clone()).or_insert_with(|| {
             groups.push(Group {
                 id: format!("auto-{}", slug(&key)),
-                name: if entry.model.name.is_empty() {
-                    entry.model.id.clone()
-                } else {
-                    entry.model.name.clone()
-                },
+                name: entry.own_name.clone(),
                 auto: true,
                 ..Group::default()
             });
@@ -3280,11 +3312,9 @@ fn auto_groups(entries: &[ModelEntry]) -> Vec<Group> {
         let group = &mut groups[position];
         if providers[position].insert(entry.provider_id.clone()) {
             group.members.push(entry.id.clone());
-            if group.name == first_model_ids[position]
-                && !entry.model.name.is_empty()
-                && entry.model.name != entry.model.id
-            {
-                group.name.clone_from(&entry.model.name);
+            if group.name == first_model_ids[position] && entry.own_name != entry.model.id {
+                // a vendor that names it, over one that only lists its id
+                group.name.clone_from(&entry.own_name);
             }
         }
     }
@@ -3337,6 +3367,7 @@ mod tests {
 
     fn model_entry(provider_id: &str, model_id: &str, model_name: &str) -> ModelEntry {
         ModelEntry {
+            own_name: model_name.to_owned(),
             id: format!("{provider_id}/{model_id}"),
             model: crate::catalog::Model {
                 id: model_id.to_owned(),

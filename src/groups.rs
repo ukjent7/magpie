@@ -431,6 +431,7 @@ mod tests {
 
     fn entry(provider: &str, model: &str) -> ModelEntry {
         ModelEntry {
+            own_name: model.to_owned(),
             id: format!("{provider}/{model}"),
             model: crate::catalog::Model {
                 id: model.to_owned(),

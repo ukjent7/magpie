@@ -151,7 +151,44 @@ pub fn live_models(provider_id: &str) -> Vec<Model> {
         .unwrap_or_default()
 }
 
+// available_models is what a provider's models are, as magpie hands them
+// out: named as the user named them, offering only the levels they kept.
 pub fn available_models(provider_id: &str, catalog_id: &str) -> Vec<Model> {
+    crate::provider::modelprefs::shown(provider_id, listed_models(provider_id, catalog_id))
+}
+
+// listed_name is a model's own name, before the user gave it another: what
+// "give it back its own name" gives it back to.
+pub fn listed_name(provider_id: &str, catalog_id: &str, model_id: &str) -> String {
+    listed_models(provider_id, catalog_id)
+        .into_iter()
+        .find(|model| model.id == model_id)
+        .filter(|model| !model.name.is_empty())
+        .map(|model| model.name)
+        .unwrap_or_else(|| model_id.to_owned())
+}
+
+// listed_names maps a model's id to the name its vendor's own list gives
+// it: what a routing found across providers is called, whichever provider
+// the user renamed.
+pub fn listed_names(provider_id: &str, catalog_id: &str) -> BTreeMap<String, String> {
+    listed_models(provider_id, catalog_id)
+        .into_iter()
+        .map(|model| (model.id, model.name))
+        .collect()
+}
+
+// model_levels is the reasoning levels one of a provider's models has,
+// before the user left any out: a request for one they hid still reaches
+// the vendor at that level.
+pub fn model_levels(provider_id: &str, catalog_id: &str, model_id: &str) -> Vec<String> {
+    listed_models(provider_id, catalog_id)
+        .into_iter()
+        .find(|model| model.id == model_id)
+        .map_or_else(Vec::new, |model| model.efforts)
+}
+
+fn listed_models(provider_id: &str, catalog_id: &str) -> Vec<Model> {
     let known = catalog_models(catalog_id);
     let live = live_models(provider_id);
     if live.is_empty() {
@@ -214,28 +251,31 @@ pub fn available_models(provider_id: &str, catalog_id: &str) -> Vec<Model> {
 }
 
 pub fn exposed_models(provider_id: &str, catalog_id: &str, selected: &[String]) -> Vec<Model> {
-    let available = available_models(provider_id, catalog_id);
+    let available = listed_models(provider_id, catalog_id);
+    let shown = |models| crate::provider::modelprefs::shown(provider_id, models);
     if !selected.is_empty() {
         let by_id = available
             .iter()
             .map(|model| (model.id.as_str(), model))
             .collect::<std::collections::HashMap<_, _>>();
-        return selected
-            .iter()
-            .map(|id| {
-                by_id.get(id.as_str()).map_or_else(
-                    || Model {
-                        id: id.clone(),
-                        name: id.clone(),
-                        ..Model::default()
-                    },
-                    |model| (*model).clone(),
-                )
-            })
-            .collect();
+        return shown(
+            selected
+                .iter()
+                .map(|id| {
+                    by_id.get(id.as_str()).map_or_else(
+                        || Model {
+                            id: id.clone(),
+                            name: id.clone(),
+                            ..Model::default()
+                        },
+                        |model| (*model).clone(),
+                    )
+                })
+                .collect(),
+        );
     }
 
-    available.into_iter().take(MAX_EXPOSED_MODELS).collect()
+    shown(available.into_iter().take(MAX_EXPOSED_MODELS).collect())
 }
 
 pub fn price_of(provider_id: &str, model_id: &str) -> Option<Price> {

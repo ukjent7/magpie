@@ -11,7 +11,7 @@
 // is mirrored: a provider removed on one computer goes from the others.
 
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::BTreeMap,
     fmt, fs, io,
     path::{Path, PathBuf},
     sync::LazyLock,
@@ -336,8 +336,9 @@ impl Dav {
             Ok(url) if matches!(url.scheme(), "https" | "http") && url.host_str().is_some() => url,
             _ => bail!("{address:?} is not a WebDAV address (https://…)"),
         };
-        let mut base = base;
-        base.set_path(base.path().trim_end_matches('/'));
+        // the folder and file are put under the path as it was given
+        let trimmed = base.path().trim_end_matches('/').to_owned();
+        base.set_path(&trimmed);
         Ok(Dav {
             base,
             user: config.user.clone(),
@@ -356,8 +357,7 @@ impl Dav {
             self.base.path().trim_end_matches('/'),
             parts.join("/")
         );
-        url.set_path(&path)
-            .map_err(|_| anyhow!("the WebDAV address has nothing to put the file in"))?;
+        url.set_path(&path);
         Ok(url)
     }
 
@@ -529,27 +529,12 @@ fn hashes(bundle: &backup::Bundle) -> Result<BTreeMap<String, String>> {
 fn take(merged: &mut backup::Bundle, local: &backup::Bundle, part: &str) {
     match part {
         "providers" => {
-            let mut providers = local.providers.clone();
-            if !local.keys && merged.keys {
-                // sent without keys: keep the ones the server has
-                let server = merged
-                    .providers
-                    .iter()
-                    .map(|saved| (saved.id.clone(), saved))
-                    .collect::<HashMap<_, _>>();
-                for given in &mut providers {
-                    if given.key.is_empty()
-                        && given.keys.is_empty()
-                        && let Some(saved) = server.get(&given.id)
-                    {
-                        given.key.clone_from(&saved.key);
-                        given.key_name.clone_from(&saved.key_name);
-                        given.keys.clone_from(&saved.keys);
-                        given.key_protocol.clone_from(&saved.key_protocol);
-                    }
-                }
-            }
-            merged.providers = providers;
+            // a setup sent without keys keeps the ones the server has
+            merged.providers = if local.keys || !merged.keys {
+                local.providers.clone()
+            } else {
+                provider::with_saved_keys(&local.providers, &merged.providers)
+            };
             merged.icons.clone_from(&local.icons);
             merged.groups.clone_from(&local.groups);
             merged.keys |= local.keys;
@@ -742,12 +727,15 @@ async fn sync_once(config: &Config, state: &mut State) -> Result<()> {
 
     // the server's file is in; what is pushed next counts as changed here
     // until the push is done
-    let mut local = local;
-    let mut now = here;
-    if !bring_in.is_empty() {
-        local = collect(config)?;
-        now = hashes(&local)?;
-    }
+    // what was brought in is now this computer's own, and counts as the
+    // start for the next round
+    let (local, now) = if bring_in.is_empty() {
+        (local, here)
+    } else {
+        let local = collect(config)?;
+        let now = hashes(&local)?;
+        (local, now)
+    };
     let merged_hashes = hashes(&merged)?;
     let mut pending = BTreeMap::new();
     for part in PARTS {

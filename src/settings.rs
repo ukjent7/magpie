@@ -37,6 +37,16 @@ pub struct Settings {
     // group ids its lists hold. An agent it doesn't name is shown them all.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub visible: BTreeMap<String, Vec<String>>,
+    // model_names are the names the user gave models, by "<provider
+    // id>/<model id>": agents, the gateway's model list and magpie itself
+    // show them for the vendor's.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub model_names: BTreeMap<String, String>,
+    // model_efforts are the reasoning levels the user keeps of a model's,
+    // by "<provider id>/<model id>": the lists magpie hands out offer only
+    // those.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub model_efforts: BTreeMap<String, Vec<String>>,
     // The main window's size when it was last resized, width and height, so
     // it opens at it again after a restart.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -54,6 +64,8 @@ impl Default for Settings {
             agents_hidden: Vec::new(),
             agents_shown: Vec::new(),
             visible: BTreeMap::new(),
+            model_names: BTreeMap::new(),
+            model_efforts: BTreeMap::new(),
             dock: false,
             window: Vec::new(),
             redact: false,

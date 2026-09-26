@@ -330,9 +330,10 @@ fn codes(
 // untar unpacks a tar archive, whose one top folder is dropped. Regular
 // files and folders only; nothing outside dst.
 pub(crate) fn untar(data: &[u8], dst: &std::path::Path, max_total: u64) -> Result<()> {
+    let max_total = usize::try_from(max_total).unwrap_or(usize::MAX);
     let mut pos = 0usize;
     let mut long_name: Option<String> = None;
-    let mut total = 0u64;
+    let mut total = 0usize;
     while pos + 512 <= data.len() {
         let header = &data[pos..pos + 512];
         if header.iter().all(|&b| b == 0) {
