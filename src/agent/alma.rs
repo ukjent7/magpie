@@ -727,7 +727,12 @@ mod tests {
             vec![("model", "magpie/deepseek/pro".to_owned())]
         );
         // the user's own provider is as it was
-        assert!(server.provider("My OpenAI").is_none());
+        let own = server
+            .provider("My OpenAI")
+            .expect("the user's own provider");
+        assert_eq!(own["name"], json!("My OpenAI"));
+        assert_eq!(own["baseURL"], json!("https://api.openai.com/v1"));
+        assert_eq!(own["models"].as_array().unwrap().len(), 1);
         assert!(alma.drift().is_none());
         server.take_writes();
 
