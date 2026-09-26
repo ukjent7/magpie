@@ -302,6 +302,100 @@ pub fn text_of(parts: &[Part]) -> String {
         .collect()
 }
 
+// now is the wall clock in seconds, which is what a reply's stamp is.
+pub fn now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs() as i64)
+}
+
+// new_id is a name for a reply or a call that arrived without one.
+pub fn new_id() -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_nanos() as u64);
+    format!("{nanos:x}")
+}
+
+impl Usage {
+    // chat is the OpenAI Chat Completions shape of a count, whose prompt
+    // includes what was read from and written to the cache.
+    pub fn chat(&self) -> Value {
+        let prompt = self.prompt();
+        json!({
+            "prompt_tokens": prompt,
+            "completion_tokens": self.output,
+            "total_tokens": prompt + self.output,
+            "prompt_tokens_details": { "cached_tokens": self.cache_read },
+            "completion_tokens_details": { "reasoning_tokens": self.reasoning },
+        })
+    }
+
+    // responses is the OpenAI Responses shape of the same count.
+    pub fn responses(&self) -> Value {
+        let prompt = self.prompt();
+        json!({
+            "input_tokens": prompt,
+            "output_tokens": self.output,
+            "total_tokens": prompt + self.output,
+            "input_tokens_details": { "cached_tokens": self.cache_read },
+            "output_tokens_details": { "reasoning_tokens": self.reasoning },
+        })
+    }
+
+    // anthropic is the Anthropic shape, which counts the cache apart from
+    // the prompt it is read what was said before.
+    pub fn anthropic(&self) -> Value {
+        json!({
+            "input_tokens": self.input,
+            "output_tokens": self.output,
+            "cache_read_input_tokens": self.cache_read,
+            "cache_creation_input_tokens": self.cache_write,
+        })
+    }
+}
+
+// stop_from_chat is why a Chat reply ended.
+pub fn stop_from_chat(stop: &str) -> &'static str {
+    match stop {
+        "length" => "length",
+        "tool_calls" | "function_call" => "tool",
+        "content_filter" => "filter",
+        _ => "stop",
+    }
+}
+
+// stop_to_chat is why a Chat reply ended, as Chat says it.
+pub fn stop_to_chat(stop: &str) -> &'static str {
+    match stop {
+        "length" => "length",
+        "tool" => "tool_calls",
+        "filter" => "content_filter",
+        _ => "stop",
+    }
+}
+
+// stop_from_anthropic is why a Messages reply ended. Claude 4.5+ runs into
+// its context window before max_tokens sometimes: cut short all the same.
+pub fn stop_from_anthropic(stop: &str) -> &'static str {
+    match stop {
+        "max_tokens" | "model_context_window_exceeded" => "length",
+        "tool_use" => "tool",
+        "refusal" => "filter",
+        _ => "stop",
+    }
+}
+
+// stop_to_anthropic is why a Messages reply ended, as Messages says it.
+pub fn stop_to_anthropic(stop: &str) -> &'static str {
+    match stop {
+        "length" => "max_tokens",
+        "tool" => "tool_use",
+        "filter" => "refusal",
+        _ => "end_turn",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
