@@ -27,6 +27,8 @@ use crate::{
     provider::{self, GatewayCatalog, GatewayProvider},
 };
 
+pub mod ir;
+
 const DEFAULT_ADDR: &str = "127.0.0.1:3425";
 pub const TOKEN: &str = "magpie";
 const CHAT_COMPLETIONS_PATH: &str = "/v1/chat/completions";
