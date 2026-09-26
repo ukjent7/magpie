@@ -66,7 +66,7 @@ async fn run(cli: Cli) -> Result<()> {
     }
 
     match args.as_slice() {
-        [] => crate::tui::command(&[]).await,
+        [] => crate::desktop::command(false).await,
         [command] if command == "help" => {
             println!("{}", usage());
             Ok(())
@@ -75,9 +75,10 @@ async fn run(cli: Cli) -> Result<()> {
             println!("magpie {VERSION}");
             Ok(())
         }
-        [command] if matches!(command.as_str(), "app" | "gui" | "tray") => {
-            bail!("the Rust build does not include the desktop interface yet")
+        [command] if matches!(command.as_str(), "app" | "gui") => {
+            crate::desktop::command(false).await
         }
+        [command] if command == "tray" => crate::desktop::command(true).await,
         [command, rest @ ..] if command == "tui" => crate::tui::command(rest).await,
         [command] if command == "agents" => list_agents(false),
         [command] if command == "presets" => crate::provider::presets(),
@@ -245,9 +246,11 @@ fn usage() -> String {
     [
         "magpie — one place to pick every agent's model",
         "",
-        "  magpie                          open the terminal interface",
+        "  magpie                          open the desktop app",
         "  magpie agents                   list every supported agent",
         "  magpie ls                       list agents detected on this machine",
+        "  magpie app                      open the desktop app",
+        "  magpie tray                     start hidden in the system tray",
         "  magpie tui                      open the terminal interface",
         "  magpie <agent>                  show its current settings",
         "  magpie <agent> <model>          set its model",

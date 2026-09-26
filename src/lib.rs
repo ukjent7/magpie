@@ -13,6 +13,7 @@ pub mod cli;
 mod codex;
 pub mod config;
 mod copilot;
+pub mod desktop;
 pub mod gateway;
 pub mod groups;
 mod netproxy;
