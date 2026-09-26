@@ -219,7 +219,10 @@ mod tests {
         assert_eq!(got["choices"][0]["finish_reason"], json!("stop"));
         assert_eq!(got["usage"]["prompt_tokens"], json!(8));
         assert_eq!(got["usage"]["total_tokens"], json!(10));
-        assert_eq!(got["usage"]["prompt_tokens_details"]["cached_tokens"], json!(3));
+        assert_eq!(
+            got["usage"]["prompt_tokens_details"]["cached_tokens"],
+            json!(3)
+        );
     }
 
     #[test]
@@ -267,7 +270,10 @@ mod tests {
         assert_eq!(got["id"], json!("resp_x"));
         assert_eq!(got["model"], json!("answered"));
         assert_eq!(got["status"], json!("incomplete"));
-        assert_eq!(got["incomplete_details"]["reason"], json!("max_output_tokens"));
+        assert_eq!(
+            got["incomplete_details"]["reason"],
+            json!("max_output_tokens")
+        );
         let output = got["output"].as_array().unwrap();
         assert_eq!(output.len(), 3);
         assert_eq!(output[0]["type"], json!("reasoning"));
@@ -329,7 +335,10 @@ mod tests {
     fn an_end_of_its_own_words() {
         assert_eq!(ir::stop_to_anthropic("stop"), "end_turn");
         assert_eq!(ir::stop_to_anthropic("length"), "max_tokens");
-        assert_eq!(ir::stop_from_anthropic("model_context_window_exceeded"), "length");
+        assert_eq!(
+            ir::stop_from_anthropic("model_context_window_exceeded"),
+            "length"
+        );
         assert_eq!(ir::stop_from_chat("function_call"), "tool");
     }
 }

@@ -289,10 +289,7 @@ impl Run {
     // tell sends the agent its next turn.
     pub async fn tell(&self, line: Value) -> std::io::Result<()> {
         let mut inner = self.inner.lock().await;
-        let stdin = inner
-            .stdin
-            .as_mut()
-            .ok_or_else(|| no_pipe("input"))?;
+        let stdin = inner.stdin.as_mut().ok_or_else(|| no_pipe("input"))?;
         let mut bytes = line.to_string().into_bytes();
         bytes.push(b'\n');
         stdin.write_all(&bytes).await?;
@@ -393,7 +390,11 @@ pub async fn open(run: &Arc<Run>, command: &mut Command) -> std::io::Result<Chil
     let stdout = child.stdout.take().ok_or_else(|| no_pipe("output"))?;
     let stderr = child.stderr.take().ok_or_else(|| no_pipe("error"))?;
     run.inner.lock().await.stdin = Some(stdin);
-    BRIDGE.lock().await.by_token.insert(run.token.clone(), run.clone());
+    BRIDGE
+        .lock()
+        .await
+        .by_token
+        .insert(run.token.clone(), run.clone());
 
     let minding = run.clone();
     tokio::spawn(async move {
@@ -442,7 +443,9 @@ async fn remove_run(run: &Run) {
     {
         bridge.idle.remove(&key);
     }
-    bridge.by_call.retain(|_, waiting| waiting.token != run.token);
+    bridge
+        .by_call
+        .retain(|_, waiting| waiting.token != run.token);
     drop(bridge);
     let _ = std::fs::remove_dir_all(&run.tmp);
 }
@@ -554,11 +557,9 @@ pub fn resume_turn(req: &Request) -> Option<(&[Message], &[Message])> {
     let so_far = req.messages.iter().rposition(|m| m.role == "assistant")? + 1;
     let since = &req.messages[so_far..];
     if since.is_empty()
-        || since.iter().any(|m| {
-            m.parts
-                .iter()
-                .any(|part| part.kind == Kind::ToolResult)
-        })
+        || since
+            .iter()
+            .any(|m| m.parts.iter().any(|part| part.kind == Kind::ToolResult))
     {
         return None;
     }
@@ -592,7 +593,12 @@ pub async fn resume(key: &str, line: Value) -> Option<(Arc<Run>, mpsc::Unbounded
 // every call of them it knows is that run's; the rest it has not made yet.
 pub async fn find_run(req: &Request) -> Option<(Arc<Run>, Vec<Part>)> {
     let mut fresh: Vec<Part> = Vec::new();
-    for message in req.messages.iter().rev().take_while(|m| m.role != "assistant") {
+    for message in req
+        .messages
+        .iter()
+        .rev()
+        .take_while(|m| m.role != "assistant")
+    {
         let mut results = message
             .parts
             .iter()
@@ -712,7 +718,11 @@ pub async fn mcp_call(token: &str, body: Value) -> Response {
     if let Some(outcome) = given {
         return answer(&outcome);
     }
-    BRIDGE.lock().await.by_call.insert(id.to_owned(), run.clone());
+    BRIDGE
+        .lock()
+        .await
+        .by_call
+        .insert(id.to_owned(), run.clone());
     run.hooks.called(id, &called, &arguments);
 
     let waited = match run.patience {
@@ -866,7 +876,11 @@ mod tests {
     #[test]
     fn a_turn_key_reads_the_same_words_in_any_wrapping() {
         let req = asked();
-        let one = turn_key("owner", &req, &[message("user", vec![said("what  a   day")])]);
+        let one = turn_key(
+            "owner",
+            &req,
+            &[message("user", vec![said("what  a   day")])],
+        );
         let other = turn_key(
             "owner",
             &req,
@@ -876,7 +890,11 @@ mod tests {
             ],
         );
         assert_eq!(one, other, "one turn is one turn however it came");
-        let asked_by = turn_key("someone", &req, &[message("user", vec![said("what a day")])]);
+        let asked_by = turn_key(
+            "someone",
+            &req,
+            &[message("user", vec![said("what a day")])],
+        );
         assert_ne!(one, asked_by, "whose turn it is belongs to it");
     }
 
@@ -959,7 +977,10 @@ mod tests {
                 message("assistant", vec![said("y")]),
             ],
         );
-        assert_ne!(asked_then_said, twice, "a repeated turn is still another one");
+        assert_ne!(
+            asked_then_said, twice,
+            "a repeated turn is still another one"
+        );
     }
 
     #[test]

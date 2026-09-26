@@ -62,11 +62,7 @@ async fn start(
     // while the folder it would be written into is still nothing's to clean up
     let tools =
         serde_json::to_vec(&bridge::bridge_tools(req)).context("read the caller's tools")?;
-    let dir = env::temp_dir().join(format!(
-        "magpie-{NAME}-{}-{}",
-        std::process::id(),
-        new_id()
-    ));
+    let dir = env::temp_dir().join(format!("magpie-{NAME}-{}-{}", std::process::id(), new_id()));
     std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
     let tools_path = dir.join(TOOLS);
     if let Err(error) = std::fs::write(&tools_path, tools) {
@@ -453,14 +449,23 @@ mod tests {
     fn the_answer_is_asked_as_a_turn_with_nothing_of_its_own() {
         let args = cli_args("claude-sonnet-4-5", "{}", "");
         let joined = args.join(" ");
-        assert!(joined.contains("-p --output-format stream-json --input-format stream-json"), "{joined}");
+        assert!(
+            joined.contains("-p --output-format stream-json --input-format stream-json"),
+            "{joined}"
+        );
         assert!(joined.contains("--model claude-sonnet-4-5"), "{joined}");
         assert!(joined.contains("--tools  --strict-mcp-config"), "{joined}");
-        assert!(joined.contains("--setting-sources  --dangerously-skip-permissions"), "{joined}");
+        assert!(
+            joined.contains("--setting-sources  --dangerously-skip-permissions"),
+            "{joined}"
+        );
         assert!(!joined.contains("--effort"), "{joined}");
         let thinking = cli_args("m", "{}", "xhigh");
         let at = thinking.iter().position(|a| a == "--effort").unwrap();
-        assert_eq!(&thinking[at..at + 4], ["--effort", "max", "--thinking-display", "summarized"]);
+        assert_eq!(
+            &thinking[at..at + 4],
+            ["--effort", "max", "--thinking-display", "summarized"]
+        );
         let less = cli_args("m", "{}", "low");
         let at = less.iter().position(|a| a == "--effort").unwrap();
         assert_eq!(less[at + 1], "low");
@@ -561,7 +566,9 @@ mod tests {
                 "{}",
             ),
         ] {
-            let (events, _) = event(stream(json!({"type": "content_block_delta", "delta": delta})));
+            let (events, _) = event(stream(
+                json!({"type": "content_block_delta", "delta": delta}),
+            ));
             assert_eq!(events.len(), 1, "{delta}");
             assert_eq!(events[0].kind, kind);
             assert_eq!(events[0].text, text);
@@ -592,7 +599,8 @@ mod tests {
 
     #[test]
     fn a_result_that_failed_is_the_error_the_caller_hears() {
-        let (events, _) = event(json!({"type": "result", "is_error": true, "result": "out of quota"}));
+        let (events, _) =
+            event(json!({"type": "result", "is_error": true, "result": "out of quota"}));
         assert_eq!(events[0].kind, EventKind::Error);
         assert_eq!(events[0].text, "out of quota");
         let (whole, _) = event(json!({"type": "result", "result": "all right"}));
@@ -618,11 +626,6 @@ mod tests {
         let blocks = line["message"]["content"].as_array().unwrap();
         assert!(!blocks.is_empty());
         assert_eq!(blocks[0]["type"], "text");
-        assert!(
-            blocks[0]["text"]
-                .as_str()
-                .unwrap()
-                .contains("be brief")
-        );
+        assert!(blocks[0]["text"].as_str().unwrap().contains("be brief"));
     }
 }

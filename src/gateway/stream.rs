@@ -108,11 +108,9 @@ impl Chat {
             EventKind::Text if !ev.text.is_empty() => {
                 out.extend(self.chunk(Some(json!({ "content": &ev.text })), None, None));
             }
-            EventKind::Think if !ev.text.is_empty() => out.extend(self.chunk(
-                Some(json!({ "reasoning_content": &ev.text })),
-                None,
-                None,
-            )),
+            EventKind::Think if !ev.text.is_empty() => {
+                out.extend(self.chunk(Some(json!({ "reasoning_content": &ev.text })), None, None))
+            }
             EventKind::ToolStart => {
                 self.tool += 1;
                 let id = if ev.id.is_empty() {
@@ -131,16 +129,14 @@ impl Chat {
                     None,
                 ));
             }
-            EventKind::ToolArgs if self.tool >= 0 && !ev.text.is_empty() => out.extend(
-                self.chunk(
-                    Some(json!({ "tool_calls": [{
+            EventKind::ToolArgs if self.tool >= 0 && !ev.text.is_empty() => out.extend(self.chunk(
+                Some(json!({ "tool_calls": [{
                         "index": self.tool,
                         "function": { "arguments": &ev.text },
                     }] })),
-                    None,
-                    None,
-                ),
-            ),
+                None,
+                None,
+            )),
             EventKind::Error => out.extend(frame(
                 "",
                 json!({ "error": { "message": &ev.text, "type": "api_error" } }),
@@ -183,7 +179,11 @@ impl Chat {
         if !ev.model.is_empty() {
             self.model.clone_from(&ev.model);
         }
-        self.chunk(Some(json!({ "role": "assistant", "content": "" })), None, None)
+        self.chunk(
+            Some(json!({ "role": "assistant", "content": "" })),
+            None,
+            None,
+        )
     }
 
     fn chunk(&self, delta: Option<Value>, finish: Option<&str>, usage: Option<Value>) -> Vec<u8> {
@@ -353,7 +353,11 @@ impl Responses {
         out.extend(self.close_item());
         let reply = self.col.finish();
         let (status, typ, reason) = match reply.stop.as_str() {
-            "length" => ("incomplete", "response.incomplete", Some("max_output_tokens")),
+            "length" => (
+                "incomplete",
+                "response.incomplete",
+                Some("max_output_tokens"),
+            ),
             "filter" => ("incomplete", "response.incomplete", Some("content_filter")),
             _ => ("completed", "response.completed", None),
         };
@@ -532,9 +536,10 @@ impl Responses {
             "tool_choice": "auto",
             "tools": [],
         });
-        if let (Some(object), Some(more)) =
-            (out.as_object_mut(), extra.as_ref().and_then(Value::as_object))
-        {
+        if let (Some(object), Some(more)) = (
+            out.as_object_mut(),
+            extra.as_ref().and_then(Value::as_object),
+        ) {
             for (key, value) in more {
                 object.insert(key.clone(), value.clone());
             }
@@ -594,9 +599,9 @@ impl Anthropic {
             }
             EventKind::ToolArgs if self.open == Some(Kind::ToolCall) && !ev.text.is_empty() => {
                 self.args = true;
-                out.extend(self.delta(
-                    json!({ "type": "input_json_delta", "partial_json": &ev.text }),
-                ));
+                out.extend(
+                    self.delta(json!({ "type": "input_json_delta", "partial_json": &ev.text })),
+                );
             }
             EventKind::Error => {
                 out.extend(self.close());
@@ -746,7 +751,12 @@ mod tests {
     fn one(got: &[(String, Value)], what: &str) -> Value {
         got.iter()
             .find(|(_, data)| data["type"] == what)
-            .unwrap_or_else(|| panic!("no {what} in {:?}", got.iter().map(|f| &f.0).collect::<Vec<_>>()))
+            .unwrap_or_else(|| {
+                panic!(
+                    "no {what} in {:?}",
+                    got.iter().map(|f| &f.0).collect::<Vec<_>>()
+                )
+            })
             .1
             .clone()
     }
@@ -872,14 +882,15 @@ mod tests {
             .collect();
         assert_eq!(items.len(), 2, "thought then called");
         assert_eq!(items[0]["type"], json!("reasoning"));
-        assert!(
-            items[1]["call_id"]
-                .as_str()
-                .unwrap()
-                .starts_with("call_")
-        );
+        assert!(items[1]["call_id"].as_str().unwrap().starts_with("call_"));
         assert_eq!(items[1]["arguments"], json!(r#"{"a":1}"#));
-        assert_eq!(one(&got, "response.completed")["output"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            one(&got, "response.completed")["output"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
     }
 
     #[test]
@@ -915,7 +926,10 @@ mod tests {
         bytes.extend(e.event(told(EventKind::Error, "out of quota")));
         let got = events_of(&bytes);
         assert_eq!(got.last().unwrap().0, "error");
-        assert_eq!(got.last().unwrap().1["error"]["message"], json!("out of quota"));
+        assert_eq!(
+            got.last().unwrap().1["error"]["message"],
+            json!("out of quota")
+        );
     }
 
     #[test]

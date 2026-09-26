@@ -219,41 +219,41 @@ pub fn anthropic(body: &Value) -> Request {
             }
             Some(Value::Array(blocks)) => {
                 for block in blocks {
-                match word(block, "type").as_str() {
-                    "text" => parts.push(text_part(word(block, "text"))),
-                    "image" => {
-                        if let Some(source) = block.get("source") {
-                            parts.push(Part {
-                                kind: Kind::Image,
-                                media_type: word(source, "media_type"),
-                                data: word(source, "data"),
-                                url: word(source, "url"),
-                                ..Part::default()
-                            });
+                    match word(block, "type").as_str() {
+                        "text" => parts.push(text_part(word(block, "text"))),
+                        "image" => {
+                            if let Some(source) = block.get("source") {
+                                parts.push(Part {
+                                    kind: Kind::Image,
+                                    media_type: word(source, "media_type"),
+                                    data: word(source, "data"),
+                                    url: word(source, "url"),
+                                    ..Part::default()
+                                });
+                            }
                         }
+                        "tool_use" => parts.push(Part {
+                            kind: Kind::ToolCall,
+                            id: word(block, "id"),
+                            name: word(block, "name"),
+                            args: block.get("input").cloned(),
+                            ..Part::default()
+                        }),
+                        "tool_result" => parts.push(Part {
+                            kind: Kind::ToolResult,
+                            call_id: word(block, "tool_use_id"),
+                            text: string_or_text(block.get("content")),
+                            is_error: said(block, "is_error"),
+                            ..Part::default()
+                        }),
+                        "thinking" => parts.push(Part {
+                            kind: Kind::Thinking,
+                            text: word(block, "thinking"),
+                            signature: word(block, "signature"),
+                            ..Part::default()
+                        }),
+                        _ => {}
                     }
-                    "tool_use" => parts.push(Part {
-                        kind: Kind::ToolCall,
-                        id: word(block, "id"),
-                        name: word(block, "name"),
-                        args: block.get("input").cloned(),
-                        ..Part::default()
-                    }),
-                    "tool_result" => parts.push(Part {
-                        kind: Kind::ToolResult,
-                        call_id: word(block, "tool_use_id"),
-                        text: string_or_text(block.get("content")),
-                        is_error: said(block, "is_error"),
-                        ..Part::default()
-                    }),
-                    "thinking" => parts.push(Part {
-                        kind: Kind::Thinking,
-                        text: word(block, "thinking"),
-                        signature: word(block, "signature"),
-                        ..Part::default()
-                    }),
-                    _ => {}
-                }
                 }
             }
             _ => {}
@@ -565,7 +565,10 @@ mod tests {
 
     #[test]
     fn a_plain_string_input_is_one_user_turn() {
-        assert_eq!(said(&responses(&json!({"input": "just this"}))), ["just this"]);
+        assert_eq!(
+            said(&responses(&json!({"input": "just this"}))),
+            ["just this"]
+        );
     }
 
     #[test]
@@ -618,13 +621,19 @@ mod tests {
         let part = image_part("data:nonsense".to_owned());
         assert_eq!(part.url, "data:nonsense");
         assert!(part.data.is_empty());
-        assert_eq!(image_part("https://x/y.png".to_owned()).url, "https://x/y.png");
+        assert_eq!(
+            image_part("https://x/y.png".to_owned()).url,
+            "https://x/y.png"
+        );
     }
 
     #[test]
     fn a_tool_choice_is_a_word_or_the_tool_it_names() {
         assert_eq!(choice(Some(&json!("auto")), &["function", "name"]), "auto");
-        assert_eq!(choice(Some(&json!({"type": "none"})), &["function", "name"]), "");
+        assert_eq!(
+            choice(Some(&json!({"type": "none"})), &["function", "name"]),
+            ""
+        );
         assert_eq!(
             choice(
                 Some(&json!({"type": "function", "function": {"name": "x"}})),
@@ -632,7 +641,10 @@ mod tests {
             ),
             "name:x"
         );
-        assert_eq!(choice(Some(&json!({"type": "function", "name": "y"})), &["name"]), "name:y");
+        assert_eq!(
+            choice(Some(&json!({"type": "function", "name": "y"})), &["name"]),
+            "name:y"
+        );
         assert_eq!(choice(Some(&json!(null)), &["function", "name"]), "");
         assert_eq!(choice(None, &["function", "name"]), "");
     }
