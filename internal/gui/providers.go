@@ -336,6 +336,8 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 			// ClearBalanceToken drops the saved balance token, which a
 			// blank one in the form otherwise keeps
 			ClearBalanceToken bool `json:"clearBalanceToken"`
+			// From is the id the provider had: another is a rename
+			From string `json:"from"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			fail(rw, err)
@@ -373,6 +375,16 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 				}
 				in.ID = id
 			} else {
+				// a rename saves the rest under the id it had, then moves it
+				to := strings.ToLower(strings.TrimSpace(in.ID))
+				rename := req.From != "" && req.From != to
+				if rename {
+					if to == "" || to != provider.Slug(to) {
+						fail(rw, fmt.Errorf("a provider's id must be lowercase letters, digits and dashes, not %q", in.ID))
+						return
+					}
+					in.ID = req.From
+				}
 				old, _ = provider.Find(in.ID)
 				if in.Key == "" && old != nil {
 					in.Key = old.Key
@@ -397,6 +409,13 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 				if err := provider.Save(in); err != nil {
 					fail(rw, err)
 					return
+				}
+				if rename {
+					if _, err := agent.RenameProvider(in.ID, to); err != nil {
+						fail(rw, err)
+						return
+					}
+					in.ID = to
 				}
 			}
 			provider.ForgetBalances()

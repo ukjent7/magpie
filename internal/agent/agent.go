@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/yetone/magpie/internal/proc"
+	"github.com/yetone/magpie/internal/provider"
 )
 
 // Option is one value the picker offers for a field.
@@ -198,9 +199,16 @@ func (a *Agent) Spell(key, v string) (string, error) {
 		}
 	}
 	ref, prefixed := strings.CutPrefix(v, magpieID+"/")
-	for _, o := range opts {
-		if o.Ref != "" && o.Ref == ref {
-			return o.Value, nil
+	// a provider renamed since (a profile saved before) is the same one
+	refs := []string{ref}
+	if r := provider.RenamedRef(ref); r != ref {
+		refs = append(refs, r)
+	}
+	for _, r := range refs {
+		for _, o := range opts {
+			if o.Ref != "" && o.Ref == r {
+				return o.Value, nil
+			}
 		}
 	}
 	if prefixed {

@@ -602,6 +602,8 @@ const I18N = {
     "e.g. Opus anywhere": "例如：Opus 多家备份",
     "Agents pick it as {id}": "Agent 里选 {id}",
     "an agent set to {id} needs setting again": "已经选了 {id} 的 agent 要重新选一次",
+    "Agents pick its models as {id}": "Agent 里按 {id} 选它的模型",
+    "agents and routing groups on {id} move to it": "用着 {id} 的 agent 和路由分组会一起换过去",
     "The first answers for what the model can do. In order, they are tried top first.": "排第一的模型决定这个组对外的能力；按顺序模式下从上往下依次尝试。",
     "Stays": "会话保持",
     "Session": "整个会话",

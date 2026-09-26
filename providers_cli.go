@@ -49,6 +49,7 @@ const providerUsage = `usage:
                                    (context: how long a request agents are told the models take, over what the
                                     vendor or models.dev says; context.<model> for one of them; empty clears)
        magpie provider set opencode-go family=ocgo
+       magpie provider set my-relay id=relay   (renames it: groups and agents on my-relay/… move to relay/…)
                                    (family: a tag for which agents are shown its models, see magpie visible)`
 
 // providers: `magpie providers`
@@ -234,16 +235,26 @@ func providerCmd(args []string) error {
 		if err != nil {
 			return err
 		}
-		for _, kv := range rest[1:] {
-			if k, _, _ := strings.Cut(kv, "="); strings.EqualFold(k, "id") {
-				return fmt.Errorf("a provider's id can't change; groups and agents name it by it")
-			}
-		}
+		// id= renames it: the rest is saved under the id it has, then the
+		// groups and agents on its models move to the new one
+		from := p.ID
 		if err := applyPairs(p, rest[1:]); err != nil {
 			return err
 		}
+		to := strings.ToLower(strings.TrimSpace(p.ID))
+		p.ID = from
 		if err := provider.Save(*p); err != nil {
 			return err
+		}
+		if to != from {
+			moved, err := agent.RenameProvider(from, to)
+			if err != nil {
+				return err
+			}
+			p.ID = to
+			if len(moved) > 0 {
+				fmt.Println(green.Render("✓"), strings.Join(moved, ", "), "moved to", to+"/…")
+			}
 		}
 		fmt.Println(green.Render("✓"), "saved", p.Name, muted.Render("("+p.ID+")"))
 		return nil

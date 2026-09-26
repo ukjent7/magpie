@@ -216,6 +216,15 @@ func Summarize(p Period) Summary {
 }
 
 func summarize(p Period, now time.Time, recs []Record) Summary {
+	// a provider renamed since is counted under the id it has now
+	if renamed := provider.Renamed(); len(renamed) > 0 {
+		recs = slices.Clone(recs)
+		for i, r := range recs {
+			if id, ok := renamed[r.Provider]; ok {
+				recs[i].Provider = id
+			}
+		}
+	}
 	day := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
 	s := Summary{Period: p, Bucket: "day", Agents: []Group{}, Models: []Group{}, Series: []Point{}}
 	var n int

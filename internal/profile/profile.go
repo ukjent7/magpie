@@ -14,6 +14,7 @@ import (
 	"github.com/yetone/magpie/internal/agent"
 	"github.com/yetone/magpie/internal/edit"
 	"github.com/yetone/magpie/internal/library"
+	"github.com/yetone/magpie/internal/provider"
 )
 
 // Profile is every agent's fields, and the library's setup.
@@ -228,10 +229,21 @@ func ApplyFields(p map[string]string) (int, error) {
 			continue
 		}
 		f := a.Field(field)
-		if f == nil || f.Get() == p[k] {
+		if f == nil {
 			continue
 		}
-		if err := a.Apply(f.Key, p[k]); err != nil {
+		v := p[k]
+		// a model of a provider renamed since the profile was saved is
+		// the same model by its new id
+		if r := provider.RenamedRef(v); r != v {
+			if s, err := a.Spell(f.Key, r); err == nil {
+				v = s
+			}
+		}
+		if f.Get() == v {
+			continue
+		}
+		if err := a.Apply(f.Key, v); err != nil {
 			return changed, fmt.Errorf("%s: %w", k, err)
 		}
 		changed++

@@ -2152,11 +2152,30 @@ function renderEditor(p, presetID) {
     wrap.append(name, hint);
     ed.append(el("label", "", t("Name")), wrap);
   }
+  // an added provider's id can change: its models are picked by it, and
+  // the agents and routing groups on them move to the new one
+  const idField = () => {
+    const idIn = input(draft.id, p.id);
+    const hint = el("div", "hint");
+    const idOf = () => slug(draft.id) || p.id;
+    const show = () => {
+      hint.textContent = t("Agents pick its models as {id}", { id: idOf() + "/…" }) +
+        (idOf() !== p.id ? " · " + t("agents and routing groups on {id} move to it", { id: p.id + "/…" }) : "");
+    };
+    idIn.oninput = () => { draft.id = idIn.value; show(); };
+    idIn.onblur = () => { draft.id = idIn.value = idOf(); show(); };
+    show();
+    const w = el("div");
+    w.append(idIn, hint);
+    ed.append(el("label", "", t("ID")), w);
+  };
+  if (p && !p.account && !custom) idField();
   let fillEndpoints = () => {};
   if (custom) {
     name = input(draft.name, t("e.g. My Relay"));
     name.oninput = () => { draft.name = name.value; if (isNew) draft.id = slug(name.value); };
     ed.append(...field(t("Name"), name));
+    if (p) idField();
 
     // the base URL is the one the chosen protocol is asked at; a vendor
     // that serves only the Responses API is added (and tested) with that
@@ -2374,7 +2393,7 @@ function renderEditor(p, presetID) {
   const saveBtn = el("button", "text primary", t(isNew ? "Add" : "Save"));
   const save = () => {
     // new: an Add never replaces a provider that has the id already
-    const body = { id: draft.id, name: draft.name, preset: draft.preset, key: draft.key || "", chat: draft.chat, responses: draft.responses, anthropic: draft.anthropic, catalog: draft.catalog, models: p ? draft.chosen : draft.extra, headers: headersOf(draft.headers), new: isNew };
+    const body = { id: p ? slug(draft.id) || p.id : draft.id, from: p?.id, name: draft.name, preset: draft.preset, key: draft.key || "", chat: draft.chat, responses: draft.responses, anthropic: draft.anthropic, catalog: draft.catalog, models: p ? draft.chosen : draft.extra, headers: headersOf(draft.headers), new: isNew };
     if (custom) { body.icon = draft.icon || "generic"; body.balanceURL = (draft.balanceURL || "").trim(); body.balancePath = (draft.balancePath || "").trim(); body.modelsURL = (draft.modelsURL || "").trim(); }
     if (p) { body.fallback = draft.fallback; body.unlisted = draft.unlisted; }
     const cx = parseContexts(draft.contexts || "");
