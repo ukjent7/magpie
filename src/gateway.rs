@@ -60,6 +60,7 @@ struct GatewayState {
 pub(crate) struct BackgroundGateway {
     shutdown: Option<oneshot::Sender<()>>,
     task: Option<JoinHandle<Result<()>>>,
+    syncing: Option<JoinHandle<()>>,
 }
 
 impl BackgroundGateway {
@@ -70,6 +71,7 @@ impl BackgroundGateway {
         if let Some(task) = self.task.take() {
             task.await.context("join background gateway task")??;
         }
+        stop_syncing(&mut self.syncing);
         Ok(())
     }
 }
@@ -79,6 +81,19 @@ impl Drop for BackgroundGateway {
         if let Some(task) = self.task.take() {
             task.abort();
         }
+        stop_syncing(&mut self.syncing);
+    }
+}
+
+// while_serving is the work only the magpie serving the gateway does,
+// besides answering: keeping this computer's setup the same as the others'.
+fn while_serving() -> JoinHandle<()> {
+    tokio::spawn(crate::davsync::run())
+}
+
+fn stop_syncing(syncing: &mut Option<JoinHandle<()>>) {
+    if let Some(task) = syncing.take() {
+        task.abort();
     }
 }
 
@@ -144,6 +159,7 @@ pub(crate) async fn start_background() -> Result<Option<BackgroundGateway>> {
     Ok(Some(BackgroundGateway {
         shutdown: Some(shutdown),
         task: Some(task),
+        syncing: Some(while_serving()),
     }))
 }
 
@@ -177,7 +193,10 @@ async fn serve(addr: &str) -> Result<()> {
     let address = listener.local_addr().context("read gateway address")?;
     println!("magpie gateway listening on http://{address}");
 
-    serve_listener(listener, router()?, shutdown_signal()).await
+    let syncing = while_serving();
+    let result = serve_listener(listener, router()?, shutdown_signal()).await;
+    syncing.abort();
+    result
 }
 
 fn router() -> Result<Router> {

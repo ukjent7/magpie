@@ -2791,12 +2791,14 @@ const MAX_ICON_BYTES: usize = 1 << 20;
 pub(crate) struct BackupSnapshot {
     pub(crate) providers: Vec<Provider>,
     pub(crate) icons: BTreeMap<String, Vec<u8>>,
+    // groups are the user's own, and the found ones the user removed.
+    pub(crate) groups: Vec<Group>,
 }
 
 pub(crate) fn backup_snapshot(include_keys: bool) -> Result<BackupSnapshot> {
-    let mut providers = Vec::new();
+    let mut file = load()?;
     let mut icons = BTreeMap::new();
-    for mut provider in load()?.providers {
+    for provider in &mut file.providers {
         if let Some(name) = provider.icon.strip_prefix("file:")
             && let Some(path) = backup_icon_path(name)
             && let Ok(data) = fs::read(path)
@@ -2815,9 +2817,71 @@ pub(crate) fn backup_snapshot(include_keys: bool) -> Result<BackupSnapshot> {
                 redact_secret_properties(value);
             }
         }
-        providers.push(provider);
     }
-    Ok(BackupSnapshot { providers, icons })
+    Ok(BackupSnapshot {
+        providers: file.providers,
+        icons,
+        groups: file.groups,
+    })
+}
+
+// restore_backup_groups puts the groups from a backup in, each replacing
+// the one here with its id. An auto group is not carried across: it is
+// made from the providers this machine has.
+pub(crate) fn restore_backup_groups(groups: &[Group]) -> Result<()> {
+    if groups.is_empty() {
+        return Ok(());
+    }
+    let mut file = load()?;
+    for group in groups {
+        if group.id.is_empty() || group.id != slug(&group.id) {
+            continue;
+        }
+        let mut group = group.clone();
+        group.auto = false;
+        match file.groups.iter_mut().find(|here| here.id == group.id) {
+            Some(here) => *here = group,
+            None => file.groups.push(group),
+        }
+    }
+    store(file)
+}
+
+// mirror_backup makes the providers and groups exactly these, as sync
+// brings them from another computer: one not among them goes, one that came
+// without keys keeps the keys it has here.
+pub(crate) fn mirror_backup(providers: &[Provider], groups: &[Group]) -> Result<()> {
+    let mut file = load()?;
+    let here = file
+        .providers
+        .iter()
+        .map(|provider| (provider.id.clone(), provider.clone()))
+        .collect::<HashMap<_, _>>();
+    file.providers = providers
+        .iter()
+        .filter(|provider| {
+            !provider.id.is_empty() && provider.id == slug(&provider.id) && provider.id != "magpie"
+        })
+        .cloned()
+        .map(|mut provider| {
+            provider.icon_url.clear();
+            if provider.key.is_empty() && provider.keys.is_empty()
+                && let Some(existing) = here.get(&provider.id)
+            {
+                provider.key.clone_from(&existing.key);
+                provider.key_name.clone_from(&existing.key_name);
+                provider.keys.clone_from(&existing.keys);
+                provider.key_protocol.clone_from(&existing.key_protocol);
+            }
+            provider
+        })
+        .collect();
+    file.groups = groups
+        .iter()
+        .filter(|group| !group.id.is_empty() && group.id == slug(&group.id))
+        .cloned()
+        .collect();
+    store(file)
 }
 
 pub(crate) fn restore_backup_icons(icons: &BTreeMap<String, Vec<u8>>) -> Result<()> {

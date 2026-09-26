@@ -9,6 +9,10 @@ pub struct Settings {
     pub theme: String,
     pub lang: String,
     pub tray: String,
+    // dock keeps magpie in the Mac's Dock as well as the menu bar, for a
+    // menu bar too full to show its icon.
+    #[serde(skip_serializing_if = "is_false")]
+    pub dock: bool,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub proxy: String,
     // Redact keeps secrets in what agents send (API keys, private keys,
@@ -33,6 +37,10 @@ pub struct Settings {
     // group ids its lists hold. An agent it doesn't name is shown them all.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub visible: BTreeMap<String, Vec<String>>,
+    // The main window's size when it was last resized, width and height, so
+    // it opens at it again after a restart.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub window: Vec<i64>,
 }
 
 impl Default for Settings {
@@ -46,6 +54,8 @@ impl Default for Settings {
             agents_hidden: Vec::new(),
             agents_shown: Vec::new(),
             visible: BTreeMap::new(),
+            dock: false,
+            window: Vec::new(),
             redact: false,
             redact_personal: false,
             redact_words: Vec::new(),
@@ -54,15 +64,21 @@ impl Default for Settings {
 }
 
 pub fn path() -> PathBuf {
-    config_dir().join("magpie/settings.json")
+    dir().join("settings.json")
+}
+
+// dir is where magpie keeps its own files: the settings, the providers, the
+// profiles, and what sync and the backups sit beside them.
+pub fn dir() -> PathBuf {
+    config_dir().join("magpie")
 }
 
 pub fn profiles_path() -> PathBuf {
-    config_dir().join("magpie/profiles.json")
+    dir().join("profiles.json")
 }
 
 pub fn providers_path() -> PathBuf {
-    config_dir().join("magpie/providers.json")
+    dir().join("providers.json")
 }
 
 pub fn cache_dir() -> PathBuf {

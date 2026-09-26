@@ -16,6 +16,7 @@ mod codex;
 mod codexcat;
 pub mod config;
 mod copilot;
+pub mod davsync;
 pub mod desktop;
 mod dsh;
 pub mod gateway;

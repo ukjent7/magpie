@@ -28,23 +28,41 @@ const MIN_ITERATIONS: u32 = 100_000;
 const MAX_ITERATIONS: u32 = 10_000_000;
 const WRONG_PASSPHRASE: &str = "wrong passphrase, or the file was changed";
 
-#[derive(Default, Deserialize, Serialize)]
+// WrongPassphrase marks the one failure that is not a broken file: a
+// passphrase that doesn't open it. Sync tells the user that in its own
+// words, since the file on the server is fine and only this computer has
+// the wrong passphrase for it.
+#[derive(Debug)]
+pub struct WrongPassphrase;
+
+impl std::fmt::Display for WrongPassphrase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(WRONG_PASSPHRASE)
+    }
+}
+
+impl std::error::Error for WrongPassphrase {}
+
+#[derive(Clone, Default, Deserialize, Serialize)]
 #[serde(default)]
-struct Bundle {
-    version: u32,
-    created: String,
+pub(crate) struct Bundle {
+    pub(crate) version: u32,
+    pub(crate) created: String,
     #[serde(skip_serializing_if = "String::is_empty")]
-    app: String,
-    keys: bool,
-    providers: Vec<provider::Provider>,
+    pub(crate) app: String,
+    pub(crate) keys: bool,
+    pub(crate) providers: Vec<provider::Provider>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty", with = "base64_map")]
-    icons: BTreeMap<String, Vec<u8>>,
+    pub(crate) icons: BTreeMap<String, Vec<u8>>,
+    // groups are the user's model groups, the routing groups they made.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(crate) groups: Vec<provider::Group>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    settings: Option<settings::Settings>,
+    pub(crate) settings: Option<settings::Settings>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
-    profiles: profile::Profiles,
+    pub(crate) profiles: profile::Profiles,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
-    agents: BTreeMap<String, String>,
+    pub(crate) agents: BTreeMap<String, String>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -61,19 +79,35 @@ struct Envelope {
     data: Vec<u8>,
 }
 
-#[derive(Default)]
-struct Parts {
-    agents: bool,
+// Parts picks what a restore puts back.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct Parts {
+    pub(crate) providers: bool,
+    pub(crate) settings: bool,
+    pub(crate) profiles: bool,
+    pub(crate) agents: bool,
 }
 
-struct RestoreResult {
-    added: usize,
-    replaced: usize,
-    need_key: Vec<String>,
-    settings: bool,
-    profiles: usize,
-    agents: usize,
-    skipped: Vec<String>,
+// ALL is every part.
+pub(crate) const ALL: Parts = Parts {
+    providers: true,
+    settings: true,
+    profiles: true,
+    agents: true,
+};
+
+// RestoreResult says what a restore did.
+pub(crate) struct RestoreResult {
+    pub(crate) added: usize,
+    pub(crate) replaced: usize,
+    // need_key lists the providers that came without a key and have none here.
+    pub(crate) need_key: Vec<String>,
+    pub(crate) settings: bool,
+    pub(crate) profiles: usize,
+    pub(crate) agents: usize,
+    // skipped are the agent fields left alone: the agent is not on this
+    // machine, or the value could not be written.
+    pub(crate) skipped: Vec<String>,
 }
 
 pub fn backup_command(args: &[String]) -> Result<()> {
@@ -91,7 +125,7 @@ pub fn backup_command(args: &[String]) -> Result<()> {
     }
 
     let destination = destination.unwrap_or("magpie.magpie-backup");
-    let bundle = collect(include_keys)?;
+    let bundle = collect(include_keys, crate::VERSION)?;
     let passphrase = read_passphrase("Passphrase for the backup: ", true)?;
     let data = seal(&bundle, &passphrase)?;
     crate::config::atomic_write_secret_for_settings(Path::new(destination), &data)
@@ -137,6 +171,7 @@ pub fn restore_command(args: &[String]) -> Result<()> {
         &bundle,
         Parts {
             agents: include_agents,
+            ..ALL
         },
     )?;
 
@@ -163,8 +198,14 @@ pub fn restore_command(args: &[String]) -> Result<()> {
     Ok(())
 }
 
-fn collect(include_keys: bool) -> Result<Bundle> {
-    let provider::BackupSnapshot { providers, icons } = provider::backup_snapshot(include_keys)?;
+// collect gathers the bundle; without keys the providers carry none, nor
+// any header that looks like one. app names the magpie that made it.
+pub(crate) fn collect(include_keys: bool, app: &str) -> Result<Bundle> {
+    let provider::BackupSnapshot {
+        providers,
+        icons,
+        groups,
+    } = provider::backup_snapshot(include_keys)?;
     let profiles = profile::backup_entries()?;
     let agents = profile::snapshot_entries()?
         .into_iter()
@@ -177,17 +218,18 @@ fn collect(include_keys: bool) -> Result<Bundle> {
     Ok(Bundle {
         version: 1,
         created,
-        app: env!("CARGO_PKG_VERSION").to_owned(),
+        app: app.to_owned(),
         keys: include_keys,
         providers,
         icons,
+        groups,
         settings,
         profiles,
         agents,
     })
 }
 
-fn seal(bundle: &Bundle, passphrase: &str) -> Result<Vec<u8>> {
+pub(crate) fn seal(bundle: &Bundle, passphrase: &str) -> Result<Vec<u8>> {
     ensure!(!passphrase.is_empty(), "a backup needs a passphrase");
     let plaintext = serde_json::to_vec(bundle).context("serialize backup contents")?;
     let mut envelope = Envelope {
@@ -217,7 +259,7 @@ fn seal(bundle: &Bundle, passphrase: &str) -> Result<Vec<u8>> {
     serde_json::to_vec_pretty(&envelope).context("serialize encrypted backup")
 }
 
-fn open(data: &[u8], passphrase: &str) -> Result<Bundle> {
+pub(crate) fn open(data: &[u8], passphrase: &str) -> Result<Bundle> {
     let envelope: Envelope =
         serde_json::from_slice(data).map_err(|_| anyhow::anyhow!("not a magpie backup"))?;
     ensure!(envelope.format == FORMAT, "not a magpie backup");
@@ -244,7 +286,7 @@ fn open(data: &[u8], passphrase: &str) -> Result<Bundle> {
                 aad: &authenticated_header(&envelope),
             },
         )
-        .map_err(|_| anyhow::anyhow!(WRONG_PASSPHRASE))?;
+        .map_err(|_| anyhow::Error::new(WrongPassphrase))?;
     serde_json::from_slice(&plaintext).context("parse backup contents")
 }
 
@@ -273,16 +315,41 @@ fn authenticated_header(envelope: &Envelope) -> Vec<u8> {
     .into_bytes()
 }
 
-fn restore(bundle: &Bundle, parts: Parts) -> Result<RestoreResult> {
-    provider::restore_backup_icons(&bundle.icons)?;
-    let (added, replaced, need_key) = provider::restore_backup_providers(&bundle.providers)?;
-    let settings_restored = if let Some(saved) = bundle.settings.as_ref() {
-        settings::write_json(&settings::path(), saved)?;
-        true
+// restore puts the chosen parts of the bundle in. Providers come first, so
+// the agents' models that go through them resolve. Only agents on this
+// machine are set.
+pub(crate) fn restore(bundle: &Bundle, parts: Parts) -> Result<RestoreResult> {
+    let mut added = 0;
+    let mut replaced = 0;
+    let mut need_key = Vec::new();
+    if parts.providers {
+        provider::restore_backup_icons(&bundle.icons)?;
+        let result = provider::restore_backup_providers(&bundle.providers)?;
+        added = result.0;
+        replaced = result.1;
+        need_key = result.2;
+        provider::restore_backup_groups(&bundle.groups)?;
+    }
+
+    let mut settings_restored = false;
+    if parts.settings {
+        if let Some(saved) = bundle.settings.as_ref() {
+            // the proxy and the window are this computer's own
+            let here = settings::load();
+            let mut saved = saved.clone();
+            saved.proxy.clone_from(&here.proxy);
+            saved.window.clone_from(&here.window);
+            saved.dock = here.dock;
+            settings::write_json(&settings::path(), &saved)?;
+            settings_restored = true;
+        }
+    }
+
+    let profiles = if parts.profiles {
+        profile::restore_entries(&bundle.profiles)?
     } else {
-        false
+        0
     };
-    let profiles = profile::restore_entries(&bundle.profiles)?;
 
     let mut agents_changed = 0;
     let mut skipped = Vec::new();
