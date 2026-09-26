@@ -15,6 +15,7 @@ pub mod config;
 mod copilot;
 pub mod desktop;
 pub mod gateway;
+mod gemini;
 pub mod groups;
 mod netproxy;
 pub mod profile;

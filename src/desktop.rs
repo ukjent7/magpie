@@ -1041,10 +1041,14 @@ impl App {
         ui.monospace(crate::gateway::url());
         ui.add_space(12.0);
         ui.label(format!("{} model IDs", self.model_choices.len()));
-        ui.label("OpenAI and Anthropic APIs");
+        ui.label("OpenAI, Anthropic and Gemini APIs");
     }
 
     fn render_gateway_details(&mut self, ui: &mut egui::Ui) {
+        egui::ScrollArea::vertical().show(ui, |ui| self.render_gateway_content(ui));
+    }
+
+    fn render_gateway_content(&mut self, ui: &mut egui::Ui) {
         ui.heading("Gateway");
         ui.label("The local API runs while the desktop app is open.");
         ui.add_space(12.0);
@@ -1082,6 +1086,20 @@ impl App {
             ui.monospace(anthropic_settings.as_str());
             if ui.button("Copy Anthropic settings").clicked() {
                 self.copy_to_clipboard(ui.ctx(), anthropic_settings.clone(), "Anthropic settings");
+            }
+        });
+        ui.add_space(12.0);
+
+        ui.label("Gemini CLI and google-genai clients");
+        let gemini_settings = format!(
+            "GOOGLE_GEMINI_BASE_URL={}\nGEMINI_API_KEY={}",
+            crate::gateway::url(),
+            crate::gateway::TOKEN
+        );
+        ui.horizontal(|ui| {
+            ui.monospace(gemini_settings.as_str());
+            if ui.button("Copy Gemini settings").clicked() {
+                self.copy_to_clipboard(ui.ctx(), gemini_settings.clone(), "Gemini settings");
             }
         });
         ui.add_space(12.0);

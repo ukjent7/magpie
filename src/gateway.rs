@@ -1,5 +1,6 @@
 use std::{
     collections::{HashMap, HashSet, VecDeque},
+    convert::Infallible,
     env,
     future::Future,
     sync::{LazyLock, Mutex},
@@ -11,7 +12,7 @@ use axum::{
     Json, Router,
     body::{Body, to_bytes},
     extract::{Request, State},
-    http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header},
+    http::{HeaderMap, HeaderName, HeaderValue, StatusCode, Uri, header},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
@@ -33,12 +34,18 @@ const RESPONSES_PATH: &str = "/v1/responses";
 const MESSAGES_PATH: &str = "/v1/messages";
 const MESSAGE_COUNT_PATH: &str = "/v1/messages/count_tokens";
 const MODELS_PATH: &str = "/v1/models";
-pub(crate) const API_ROUTES: [(&str, &str, &str); 5] = [
+pub(crate) const API_ROUTES: [(&str, &str, &str); 7] = [
     ("OpenAI Chat Completions", "POST", CHAT_COMPLETIONS_PATH),
     ("OpenAI Responses", "POST", RESPONSES_PATH),
     ("Anthropic Messages", "POST", MESSAGES_PATH),
     ("Anthropic token count", "POST", MESSAGE_COUNT_PATH),
     ("Model catalog", "GET", MODELS_PATH),
+    (
+        "Gemini generateContent",
+        "POST",
+        "/v1beta/models/{model}:{method}",
+    ),
+    ("Gemini model catalog", "GET", "/v1beta/models"),
 ];
 const MAX_REQUEST_BYTES: usize = 64 * 1024 * 1024;
 const MAX_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
@@ -187,6 +194,8 @@ fn router() -> Result<Router> {
         .route("/", get(info))
         .route(MODELS_PATH, get(models))
         .route("/models", get(models))
+        .route("/v1beta/models", get(gemini_models))
+        .route("/v1beta/models/{*call}", post(gemini))
         .route(CHAT_COMPLETIONS_PATH, post(chat_completions))
         .route("/chat/completions", post(chat_completions))
         .route(RESPONSES_PATH, post(responses))
@@ -241,7 +250,8 @@ async fn info() -> std::result::Result<Json<Value>, ApiError> {
             "/v1/chat/completions",
             "/v1/responses",
             "/v1/messages",
-            "/v1/models"
+            "/v1/models",
+            "/v1beta/models/{model}:{method}"
         ]
     })))
 }
@@ -290,6 +300,33 @@ async fn models() -> std::result::Result<Json<Value>, ApiError> {
     Ok(Json(result))
 }
 
+async fn gemini_models() -> Response {
+    let catalog = match configured_catalog().await {
+        Ok(catalog) => catalog,
+        Err(error) => return gemini_error(error.status, error.message),
+    };
+    let models = exposed_models(&catalog.providers)
+        .map(|(provider, model)| gemini_model(&format!("{}/{}", provider.id, model), model))
+        .chain(
+            catalog
+                .groups
+                .iter()
+                .filter(|group| !group.hidden)
+                .map(|group| gemini_model(&format!("group/{}", group.id), &group.name)),
+        )
+        .collect::<Vec<_>>();
+    Json(json!({"models":models})).into_response()
+}
+
+fn gemini_model(id: &str, name: &str) -> Value {
+    json!({
+        "name":format!("models/{id}"),
+        "displayName":name,
+        "description":format!("{name} via magpie"),
+        "supportedGenerationMethods":["generateContent","streamGenerateContent","countTokens"]
+    })
+}
+
 fn exposed_models(providers: &[GatewayProvider]) -> impl Iterator<Item = (&GatewayProvider, &str)> {
     providers
         .iter()
@@ -322,6 +359,195 @@ async fn count_tokens(State(state): State<GatewayState>, request: Request<Body>)
         Some(MESSAGE_COUNT_PATH),
     )
     .await
+}
+
+async fn gemini(State(state): State<GatewayState>, request: Request<Body>) -> Response {
+    let (mut parts, body) = request.into_parts();
+    let Some(call) = parts.uri.path().strip_prefix("/v1beta/models/") else {
+        return gemini_error(StatusCode::NOT_FOUND, "unknown Gemini API route");
+    };
+    let Some((model, method)) = call.rsplit_once(':') else {
+        return gemini_error(
+            StatusCode::NOT_FOUND,
+            "expected /v1beta/models/{model}:generateContent",
+        );
+    };
+    let model = model.strip_prefix("models/").unwrap_or(model);
+    if model.is_empty() {
+        return gemini_error(StatusCode::BAD_REQUEST, "model name cannot be empty");
+    }
+
+    let bytes = match to_bytes(body, MAX_REQUEST_BYTES).await {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            let status = if error.to_string().contains("length limit") {
+                StatusCode::PAYLOAD_TOO_LARGE
+            } else {
+                StatusCode::BAD_REQUEST
+            };
+            return gemini_error(status, "could not read request body");
+        }
+    };
+    let body = match serde_json::from_slice::<Value>(&bytes) {
+        Ok(body) => body,
+        Err(_) => return gemini_error(StatusCode::BAD_REQUEST, "request body must be valid JSON"),
+    };
+
+    if method == "countTokens" {
+        let request = body.get("generateContentRequest").unwrap_or(&body);
+        return Json(json!({"totalTokens":crate::gemini::estimate_tokens(request)}))
+            .into_response();
+    }
+    let streaming = match method {
+        "generateContent" => false,
+        "streamGenerateContent" => true,
+        _ => return gemini_error(StatusCode::NOT_FOUND, &format!("unknown method {method}")),
+    };
+
+    let chat_request = crate::gemini::to_chat_request(&body, model, streaming);
+    let chat_body = match serde_json::to_vec(&chat_request) {
+        Ok(body) => body,
+        Err(error) => {
+            eprintln!("magpie: encode Gemini request: {error}");
+            return gemini_error(StatusCode::BAD_REQUEST, "could not translate request");
+        }
+    };
+    parts.uri = Uri::from_static("/v1/chat/completions");
+    let response = forward(
+        state,
+        Request::from_parts(parts, Body::from(chat_body)),
+        ApiProtocol::Chat,
+        None,
+    )
+    .await;
+    gemini_response(response, model, streaming).await
+}
+
+async fn gemini_response(response: Response, model: &str, streaming: bool) -> Response {
+    let status = response.status();
+    let is_sse = response
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| {
+            value
+                .split(';')
+                .next()
+                .is_some_and(|mime| mime.trim() == "text/event-stream")
+        });
+    if status.is_success() && streaming && is_sse {
+        return gemini_stream_response(response, model.to_owned());
+    }
+
+    let bytes = match to_bytes(response.into_body(), MAX_RESPONSE_BYTES).await {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            eprintln!("magpie: read Gemini gateway response: {error}");
+            return gemini_error(StatusCode::BAD_GATEWAY, "provider response failed");
+        }
+    };
+    let body = match serde_json::from_slice::<Value>(&bytes) {
+        Ok(body) => body,
+        Err(error) => {
+            eprintln!("magpie: parse Gemini gateway response: {error}");
+            return gemini_error(StatusCode::BAD_GATEWAY, "provider returned invalid JSON");
+        }
+    };
+    if !status.is_success() {
+        let message = body
+            .pointer("/error/message")
+            .or_else(|| body.pointer("/message"))
+            .and_then(Value::as_str)
+            .unwrap_or("provider request failed");
+        return gemini_error(status, message);
+    }
+
+    let body = crate::gemini::from_chat_response(&body, model);
+    if streaming {
+        let mut response = Response::new(Body::from(crate::gemini::single_event(&body)));
+        *response.status_mut() = status;
+        response.headers_mut().insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("text/event-stream; charset=utf-8"),
+        );
+        response.headers_mut().insert(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static("no-cache, no-transform"),
+        );
+        response
+    } else {
+        (status, Json(body)).into_response()
+    }
+}
+
+fn gemini_stream_response(response: Response, model: String) -> Response {
+    let status = response.status();
+    let headers = response.headers().clone();
+    let stream = stream::unfold(
+        (
+            response.into_body().into_data_stream(),
+            crate::gemini::StreamTranslator::new(model),
+            VecDeque::<Vec<u8>>::new(),
+            false,
+        ),
+        |(mut input, mut translator, mut pending, mut ended)| async move {
+            loop {
+                if let Some(event) = pending.pop_front() {
+                    return Some((
+                        Ok::<_, Infallible>(event),
+                        (input, translator, pending, ended),
+                    ));
+                }
+                if ended {
+                    return None;
+                }
+                match input.next().await {
+                    Some(Ok(chunk)) => {
+                        pending.extend(translator.push(&chunk));
+                        ended = translator.is_ended();
+                    }
+                    Some(Err(error)) => {
+                        pending.push_back(translator.fail(&error.to_string()));
+                        ended = true;
+                    }
+                    None => {
+                        pending.extend(translator.finish());
+                        ended = true;
+                    }
+                }
+            }
+        },
+    );
+    let mut response = Response::new(Body::from_stream(stream));
+    *response.status_mut() = status;
+    copy_translated_headers(&mut response, &headers);
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/event-stream; charset=utf-8"),
+    );
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("no-cache, no-transform"),
+    );
+    response
+}
+
+fn gemini_error(status: StatusCode, message: &str) -> Response {
+    let state = match status {
+        StatusCode::BAD_REQUEST => "INVALID_ARGUMENT",
+        StatusCode::UNAUTHORIZED => "UNAUTHENTICATED",
+        StatusCode::FORBIDDEN => "PERMISSION_DENIED",
+        StatusCode::NOT_FOUND => "NOT_FOUND",
+        StatusCode::TOO_MANY_REQUESTS => "RESOURCE_EXHAUSTED",
+        StatusCode::PAYLOAD_TOO_LARGE => "RESOURCE_EXHAUSTED",
+        StatusCode::BAD_GATEWAY | StatusCode::SERVICE_UNAVAILABLE => "UNAVAILABLE",
+        _ => "INTERNAL",
+    };
+    (
+        status,
+        Json(json!({"error":{"code":status.as_u16(),"message":message,"status":state}})),
+    )
+        .into_response()
 }
 
 async fn forward(
