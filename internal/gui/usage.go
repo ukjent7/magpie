@@ -51,6 +51,9 @@ func usageState(p usage.Period) usageJSON {
 				ug.Icon = p.Icon
 			}
 		}
+		if g.Host != "" {
+			ug.Sub += " · " + g.Host
+		}
 		out.Models = append(out.Models, ug)
 	}
 	return out

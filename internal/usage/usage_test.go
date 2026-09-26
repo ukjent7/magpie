@@ -1,8 +1,11 @@
 package usage
 
 import (
+	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/yetone/magpie/internal/provider"
 )
 
 func TestSummarize(t *testing.T) {
@@ -38,5 +41,44 @@ func TestSummarize(t *testing.T) {
 	}
 	if s.Unpriced != 4 || s.Cost != 0 {
 		t.Fatalf("pricing: unpriced=%d cost=%v", s.Unpriced, s.Cost)
+	}
+}
+
+// A provider id given to another place later doesn't take the earlier
+// place's calls: they are told apart by where they went.
+func TestSummarizeTellsPlacesApart(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	if err := provider.Save(provider.Provider{ID: "relay", Name: "Relay", Key: "k", Chat: "https://new.example/v1"}); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	recs := []Record{
+		{Time: now.Add(-3 * time.Hour), Provider: "relay", Model: "m", Input: 5},                        // kept before hosts were
+		{Time: now.Add(-2 * time.Hour), Provider: "relay", Host: "old.example", Model: "m", Input: 100}, // the id's earlier place
+		{Time: now.Add(-1 * time.Hour), Provider: "relay", Host: "new.example", Model: "m", Input: 10},  // where it goes now
+		{Time: now.Add(-1 * time.Hour), Provider: "relay", Host: "new.example", Model: "m", Input: 1},
+	}
+	got := map[string]int{}
+	for _, g := range summarize(Today, now, recs).Models {
+		got[g.ID] = g.Input
+	}
+	want := map[string]int{"relay/m": 5, "relay/m @ old.example": 100, "relay/m @ new.example": 11}
+	if len(got) != len(want) {
+		t.Fatalf("%v", got)
+	}
+	for k, v := range want {
+		if got[k] != v {
+			t.Fatalf("%v", got)
+		}
+	}
+	// one place, the one it goes now: no host on it
+	got = map[string]int{}
+	for _, g := range summarize(Today, now, recs[2:]).Models {
+		got[g.ID] = g.Input
+	}
+	if got["relay/m"] != 11 || len(got) != 1 {
+		t.Fatalf("%v", got)
 	}
 }

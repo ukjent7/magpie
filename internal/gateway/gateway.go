@@ -560,6 +560,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 	}
 	tr := s.trace.begin(Route{Time: start, Agent: call.Agent, Model: call.Model, Provider: p.ID, Group: group, Rule: hit, Nested: nested, Affinity: shown, Order: pl.order, Left: pl.left})
 	var skipped []string
+	where := ""       // the last try's provider.Where, for the usage
 	again := 0        // times the last one left has been tried again
 	resealed := false // the conversation's reasoning sealed by another account taken out
 	floored := false  // the reply's length raised to what the provider takes
@@ -568,6 +569,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 		last := i == len(cands)-1
 		hw := newHoldWriter(w, !last || again < lastRetries)
 		call.Provider, call.To, call.Usage = c.p.ID, "", Usage{}
+		where = c.p.Where()
 		began := time.Now()
 		s.trace.update(tr, func(t *Route) { t.Tries = append(t.Tries, Try{ID: c.rest, Model: c.model, Start: began}) })
 		attemptBody := body
@@ -659,7 +661,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 	})
 	s.record(call)
 	if call.To != "" {
-		usage.Append(usage.Record{Time: start, Agent: call.Agent, Provider: call.Provider, Model: model,
+		usage.Append(usage.Record{Time: start, Agent: call.Agent, Provider: call.Provider, Host: where, Model: model,
 			Input: call.Usage.Input, Output: call.Usage.Output, CacheRead: call.Usage.CacheRead,
 			CacheWrite: call.Usage.CacheWrite, Reasoning: call.Usage.Reasoning, Millis: call.Millis, Status: call.Status})
 	}

@@ -526,6 +526,20 @@ func (p Provider) Host() string {
 	return ""
 }
 
+// Where is what the provider's calls go to, as usage keeps it: the API's
+// host, and for a subscription who is signed in there too. The id alone
+// can't tell: it can be given to another vendor or account later.
+func (p Provider) Where() string {
+	h := p.Host()
+	if p.Account != nil && p.Account.User != "" {
+		if h == "" {
+			return p.Account.User
+		}
+		return h + " as " + p.Account.User
+	}
+	return h
+}
+
 // IsOpenCode reports whether the provider is OpenCode's gateway (Zen or Go),
 // which routes and caches by conversation and turns away requests that do
 // not name one in x-opencode-session.

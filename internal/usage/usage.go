@@ -25,7 +25,8 @@ type Record struct {
 	Time       time.Time `json:"t"`
 	Agent      string    `json:"agent"` // magpie agent id, or the client's product name
 	Provider   string    `json:"provider"`
-	Model      string    `json:"model"` // the provider's model id
+	Host       string    `json:"host,omitempty"` // where the call went: provider.Where then
+	Model      string    `json:"model"`          // the provider's model id
 	Input      int       `json:"in"`
 	Output     int       `json:"out"`
 	CacheRead  int       `json:"cache_read,omitempty"`
@@ -184,6 +185,10 @@ type Group struct {
 	ID       string `json:"id"`
 	Provider string `json:"provider,omitempty"` // models only
 	Model    string `json:"model,omitempty"`
+	// Host is where the calls went, when the provider's id has gone to
+	// more than one place, or elsewhere than the provider goes now: its
+	// calls are then told apart by it, not summed under the id.
+	Host string `json:"host,omitempty"`
 	Totals
 }
 
@@ -277,6 +282,20 @@ func summarize(p Period, now time.Time, recs []Record) Summary {
 		prices[k] = pr
 		return pr
 	}
+	// the places each provider id went in the period, and goes now
+	hosts := map[string]map[string]bool{}
+	for _, r := range recs {
+		if r.Host != "" && !r.Time.Before(s.Since) {
+			if hosts[r.Provider] == nil {
+				hosts[r.Provider] = map[string]bool{}
+			}
+			hosts[r.Provider][r.Host] = true
+		}
+	}
+	goesNow := map[string]string{}
+	for _, p := range provider.All() {
+		goesNow[p.ID] = p.Where()
+	}
 	agents := map[string]*Group{}
 	models := map[string]*Group{}
 	for _, r := range recs {
@@ -305,10 +324,13 @@ func summarize(p Period, now time.Time, recs []Record) Summary {
 			agents[id] = a
 		}
 		a.add(r, pr)
-		k := r.Provider + "/" + r.Model
+		k, host := r.Provider+"/"+r.Model, ""
+		if r.Host != "" && (len(hosts[r.Provider]) > 1 || r.Host != goesNow[r.Provider]) {
+			k, host = k+" @ "+r.Host, r.Host
+		}
 		m := models[k]
 		if m == nil {
-			m = &Group{ID: k, Provider: r.Provider, Model: r.Model}
+			m = &Group{ID: k, Provider: r.Provider, Model: r.Model, Host: host}
 			models[k] = m
 		}
 		m.add(r, pr)
