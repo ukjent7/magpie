@@ -110,6 +110,9 @@ type model struct {
 	gsel      int    // its member picked
 	period    usage.Period
 	sum       usage.Summary
+	quotas    []provider.SubscriptionQuota // nil while the vendors are asked
+	qasked    bool                         // quotas were asked for
+	qleft     bool                         // windows read as what is left, not what is used
 	lib       []libRow
 	lrow      int
 	libView   *library.View
@@ -173,6 +176,10 @@ func (m *model) goTo(p page) tea.Cmd {
 		m.asked = true
 		return balancesCmd(m.provs)
 	}
+	if p == pageUsage && !m.qasked {
+		m.qasked = true
+		return quotasCmd
+	}
 	return nil
 }
 
@@ -206,6 +213,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.flash == "asking the vendors for balances…" {
 			m.flash = ""
 		}
+		return m, nil
+	case quotaMsg:
+		m.quotas = msg
 		return m, nil
 	case askMsg:
 		m.openAsk(msg.a)
@@ -245,6 +255,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if msg.String() == "r" {
 					m.reload()
 					m.flash, m.flashOK = "reloaded", true
+					if m.page == pageUsage {
+						m.quotas, m.qasked = nil, true
+						return m, quotasCmd
+					}
 					return m, nil
 				}
 			}
@@ -616,7 +630,7 @@ func (m model) View() string {
 			footer = hints("↑↓", "item", "↵", "agents", "e", "edit instructions", "i", "bring in", "d", "remove", "r", "reload", "1–5", "pages", "q", "quit")
 		case pageUsage:
 			body = m.viewUsage()
-			footer = hints("←→", "period", "t w m A", "today · 7 days · 30 days · all", "r", "reload", "1–5", "pages", "q", "quit")
+			footer = hints("←→", "period", "t w m A", "today · 7 days · 30 days · all", "u", "used / left", "r", "reload", "1–5", "pages", "q", "quit")
 		default:
 			body = m.viewList()
 			footer = hints("↑↓", "agent", "←→", "field", "↵", "change", "s", "save profile", "p", "profiles", "1–5", "pages", "q", "quit")

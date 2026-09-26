@@ -7,6 +7,7 @@ package tui
 import (
 	"context"
 	"fmt"
+	"math"
 	"slices"
 	"strings"
 	"sync"
@@ -743,9 +744,22 @@ var periods = []usage.Period{usage.Today, usage.Week, usage.Month, usage.All}
 
 var periodNames = map[usage.Period]string{usage.Today: "today", usage.Week: "7 days", usage.Month: "30 days", usage.All: "all time"}
 
+// quotaMsg is what is left of every subscription, plan bought with a key
+// and key balance, as the app's Usage page shows them.
+type quotaMsg []provider.SubscriptionQuota
+
+func quotasCmd() tea.Msg {
+	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
+	defer cancel()
+	return quotaMsg(provider.Quotas(ctx))
+}
+
 func (m model) updateUsage(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	i := slices.Index(periods, m.period)
 	switch msg.String() {
+	case "u":
+		m.qleft = !m.qleft
+		return m, nil
 	case "l", "right":
 		m.period = periods[(i+1)%len(periods)]
 	case "h", "left":
@@ -816,6 +830,13 @@ func (m model) viewUsage() string {
 		}
 	}
 	b.WriteString(pad + "  " + strings.Join(tabs, " ") + "\n\n")
+	ql := quotaLines(m.quotas, m.qasked, m.qleft, m.w-len(pad)-2, time.Now())
+	for _, l := range ql {
+		b.WriteString(pad + "  " + l + "\n")
+	}
+	if len(ql) > 0 {
+		b.WriteString("\n")
+	}
 	if s.Calls == 0 {
 		b.WriteString(pad + "  " + sMuted.Render("no calls in this time · route an agent through magpie and its usage shows up here"))
 		return b.String()
@@ -849,7 +870,7 @@ func (m model) viewUsage() string {
 	for _, a := range agent.All() {
 		names[a.ID] = a.Name
 	}
-	room := max(2, (m.h-16)/2)
+	room := max(2, (m.h-16-len(ql))/2)
 	table := func(head string, gs []usage.Group, name func(usage.Group) string) {
 		b.WriteString(pad + "  " + sFaint.Render(head) + "\n")
 		w := 0
@@ -874,6 +895,126 @@ func (m model) viewUsage() string {
 	})
 	table("models", s.Models, func(g usage.Group) string { return g.ID })
 	return strings.TrimRight(b.String(), "\n")
+}
+
+// quotaLines is the accounts' allowances, a line each as the app's cards
+// are: the subscriptions' and plans' windows as small meters — how much is
+// used, or left, with the vendor's own count before it where it gives one
+// — and the keys' balances; nil when there is nothing to tell.
+func quotaLines(qs []provider.SubscriptionQuota, asked, left bool, width int, now time.Time) []string {
+	if qs == nil {
+		if !asked {
+			return nil
+		}
+		return []string{sFaint.Render("accounts"), sMuted.Render("asking the vendors what is left…")}
+	}
+	if len(qs) == 0 {
+		return nil
+	}
+	title := func(q provider.SubscriptionQuota) (plain, styled string) {
+		plain, styled = q.Name, sName.Render(q.Name)
+		if q.Plan != "" {
+			plain += " · " + q.Plan
+			styled += sMuted.Render(" · " + q.Plan)
+		}
+		if q.User != "" {
+			plain += " · " + q.User
+			styled += sFaint.Render(" · " + q.User)
+		}
+		return
+	}
+	tw := 0
+	for _, q := range qs {
+		p, _ := title(q)
+		tw = max(tw, lipgloss.Width(p))
+	}
+	tw = min(tw, 44)
+	head := "accounts · % is how much is used"
+	if left {
+		head = "accounts · % is how much is left"
+	}
+	out := []string{sFaint.Render(head)}
+	for _, q := range qs {
+		p, t := title(q)
+		if lipgloss.Width(p) > tw {
+			t = sName.Render(trunc(p, tw))
+		}
+		line := padRight(t, tw)
+		switch {
+		case q.Balance != "":
+			out = append(out, line+"  "+sText.Render(q.Balance)+sMuted.Render(" left"))
+			continue
+		case q.Error != "":
+			out = append(out, line+"  "+sMuted.Render(trunc(q.Error, max(20, width-tw-2))))
+			continue
+		case len(q.Windows) == 0:
+			out = append(out, line+"  "+sMuted.Render("no usage reported"))
+			continue
+		}
+		// the windows follow the name, those that don't fit on lines below it
+		at := tw
+		for _, w := range q.Windows {
+			c := quotaCell(w, left, now)
+			cw := lipgloss.Width(c)
+			if at > tw && width > 0 && at+3+cw > width {
+				out = append(out, line)
+				line, at = strings.Repeat(" ", tw), tw
+			}
+			line += "   " + c
+			at += 3 + cw
+		}
+		out = append(out, line)
+	}
+	return out
+}
+
+// quotaCell is one window: its name, a meter, how much is used or left,
+// and when it starts again once it is nearly used up.
+func quotaCell(w provider.QuotaWindow, left bool, now time.Time) string {
+	used := int(math.Round(math.Max(0, math.Min(100, w.Used))))
+	n, word := used, "used"
+	if left {
+		n, word = 100-used, "left"
+	}
+	const cells = 8
+	on := (n*cells + 50) / 100
+	if n > 0 {
+		on = max(1, on)
+	}
+	fill := sCursor
+	if used >= 90 {
+		fill = sBad
+	}
+	pct := fmt.Sprintf("%d%% %s", n, word)
+	if w.Display != "" {
+		pct = w.Display + " · " + pct
+	}
+	c := sMuted.Render(w.Name) + " " + fill.Render(strings.Repeat("█", on)) + sFaint.Render(strings.Repeat("░", cells-on)) + " " + sText.Render(pct)
+	if used >= 80 {
+		var at time.Time
+		if w.ResetsAt != nil {
+			at = *w.ResetsAt
+		} else if w.ResetSecs > 0 {
+			at = now.Add(time.Duration(w.ResetSecs) * time.Second)
+		}
+		if !at.IsZero() {
+			c += sFaint.Render(" ↻ " + until(at.Sub(now)))
+		}
+	}
+	return c
+}
+
+// until is how long until then, roughly: 40m, 5h, 3d.
+func until(d time.Duration) string {
+	mins := max(1, int(math.Round(d.Minutes())))
+	h := int(math.Round(float64(mins) / 60))
+	switch {
+	case mins < 60:
+		return fmt.Sprintf("%dm", mins)
+	case h < 48:
+		return fmt.Sprintf("%dh", h)
+	}
+	return fmt.Sprintf("%dd", int(math.Round(float64(h)/24)))
 }
 
 // ---- a line to type ---------------------------------------------------------

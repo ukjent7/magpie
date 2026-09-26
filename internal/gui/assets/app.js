@@ -3165,15 +3165,15 @@ function accountQuota(data, user) {
     return line;
   }
   // the two rolling windows fit a line; the per-model ones go in its tooltip
-  line.title = q.windows.slice(2).map((w) => t(w.name) + " " + (w.display || t("{n} used", { n: Math.round(w.used) + "%" }))).join(" · ");
+  line.title = q.windows.slice(2).map((w) => t(w.name) + " " + quotaText(w)).join(" · ");
   for (const w of q.windows.slice(0, 2)) {
     const used = Math.max(0, Math.min(100, w.used));
     const m = el("span", "aq-w" + (used >= 90 ? " full" : ""));
     const track = el("span", "aq-track");
     const fill = el("i");
-    fill.style.width = used + "%";
+    fill.style.width = quotaFill(w) + "%";
     track.append(fill);
-    m.append(el("span", "aq-n", t(w.name)), track, el("b", "", w.display || t("{n} used", { n: Math.round(w.used) + "%" })));
+    m.append(el("span", "aq-n", t(w.name)), track, el("b", "", quotaText(w)));
     if (w.resetsAt) {
       const at = new Date(w.resetsAt);
       m.title = t("Resets {when}", { when: at.toLocaleString() });
@@ -3182,6 +3182,26 @@ function accountQuota(data, user) {
     line.append(m);
   }
   return line;
+}
+
+// A window reads as how much of it is used, or — as the vendors' own apps
+// show it — how much is left, the bar filling with that; one choice for
+// every meter, kept for next time. The vendor's own count, where it gives
+// one, stands before the percentage.
+let quotaLeft = false;
+try { quotaLeft = localStorage.getItem("magpie.quotaLeft") === "1"; } catch {}
+function quotaFill(w) {
+  const used = Math.round(Math.max(0, Math.min(100, w.used)));
+  return quotaLeft ? 100 - used : used;
+}
+function quotaText(w) {
+  const pct = t(quotaLeft ? "{n} left" : "{n} used", { n: quotaFill(w) + "%" });
+  return w.display ? w.display + " · " + pct : pct;
+}
+function setQuotaLeft(on) {
+  quotaLeft = on;
+  try { localStorage.setItem("magpie.quotaLeft", on ? "1" : "0"); } catch {}
+  renderQuotas();
 }
 
 function untilText(at) {
@@ -3520,6 +3540,19 @@ const tokensOf = (t) => t.input + t.output;
 function renderQuotas() {
   const subscriptions = $("#subscriptionUsage");
   subscriptions.replaceChildren();
+  // used or left: only there when some card has a window to read
+  const mode = $("#quotaMode");
+  mode.hidden = !quotas?.some((q) => !q.balance && !q.error && q.windows?.length);
+  if (!mode.hidden) {
+    mode.replaceChildren();
+    for (const [left, name] of [[false, "Used"], [true, "Left"]]) {
+      const b = el("button", "opt" + (left === quotaLeft ? " on" : ""), t(name));
+      b.title = t(left ? "Show how much of each window is left" : "Show how much of each window is used");
+      b.onclick = () => { if (left !== quotaLeft) setQuotaLeft(left); };
+      mode.append(b);
+    }
+    slide(mode, "quotaMode");
+  }
   if (!quotas) {
     subscriptions.hidden = false;
     for (let i = 0; i < 2; i++) {
@@ -3574,10 +3607,13 @@ function quotaWindows(sub) {
   for (const w of sub.windows) {
     const quota = el("div", "quota");
     const labels = el("div", "quota-labels");
-    labels.append(el("span", "", t(w.name)), el("b", "", w.display || t("{n} used", { n: `${Math.round(w.used)}%` })));
+    const n = el("button", "quota-n", quotaText(w));
+    n.title = t(quotaLeft ? "Show how much of each window is used" : "Show how much of each window is left");
+    n.onclick = () => setQuotaLeft(!quotaLeft);
+    labels.append(el("span", "", t(w.name)), n);
     const track = el("div", "quota-track");
     const fill = el("i");
-    fill.style.width = `${Math.max(0, Math.min(100, w.used))}%`;
+    fill.style.width = `${quotaFill(w)}%`;
     track.append(fill);
     quota.append(labels, track);
     if (w.resetsAt) quota.title = t("Resets {when}", { when: new Date(w.resetsAt).toLocaleString() });
