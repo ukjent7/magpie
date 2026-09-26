@@ -324,16 +324,62 @@ fn install(staged: &Path, executable: &Path) -> Result<()> {
 
 #[cfg(windows)]
 fn install(staged: &Path, executable: &Path) -> Result<()> {
-    let old = append_suffix(executable, ".old");
-    if old.exists() {
-        fs::remove_file(&old).context("remove previous staged executable")?;
-    }
-    fs::rename(executable, &old).context("move running executable aside")?;
+    // What the last update moved aside may still be running too (a
+    // `magpie serve` started before it), and can't be removed or replaced
+    // then: this one goes beside it, under a name of its own. The download
+    // is kept, for another try.
+    remove_old(executable);
+    let old = old_name(executable);
+    fs::rename(executable, &old).with_context(|| {
+        format!(
+            "couldn't move {} aside to put the new version in",
+            executable
+                .file_name()
+                .map_or_else(String::new, |name| name.to_string_lossy())
+        )
+    })?;
     if let Err(error) = fs::rename(staged, executable) {
         let _ = fs::rename(&old, executable);
         return Err(error).context("install downloaded executable");
     }
     Ok(())
+}
+
+// old_name is where a running exe is moved aside to: exe.old, or when that
+// is still there (in use), exe.old-2, exe.old-3…
+#[cfg(windows)]
+fn old_name(executable: &Path) -> PathBuf {
+    let mut name = append_suffix(executable, ".old");
+    let mut n = 2;
+    while fs::symlink_metadata(&name).is_ok() {
+        name = append_suffix(executable, &format!(".old-{n}"));
+        n += 1;
+    }
+    name
+}
+
+// remove_old removes what earlier updates moved aside of exe, those no
+// longer running.
+#[cfg(windows)]
+fn remove_old(executable: &Path) {
+    let _ = fs::remove_file(append_suffix(executable, ".old"));
+    let Some(parent) = executable.parent() else {
+        return;
+    };
+    let Ok(entries) = fs::read_dir(parent) else {
+        return;
+    };
+    let file_name = executable
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let prefix = format!("{file_name}.old-");
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.starts_with(&prefix) && name[prefix.len()..].bytes().all(|b| b.is_ascii_digit()) {
+            let _ = fs::remove_file(entry.path());
+        }
+    }
 }
 
 #[cfg(windows)]
