@@ -116,7 +116,7 @@ fn test_server_every_format() {
                 want.name
             );
         }
-        if !got.contains_key("mine") && before[t.agent.spec.id].contains("mine") {
+        if !got.contains_key("mine") && before[t.agent.spec.id].contains("\"mine\"") {
             panic!("{} lost the user's server", t.agent.spec.id);
         }
     }

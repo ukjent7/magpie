@@ -1072,7 +1072,8 @@ pub(crate) fn read_at(store: &Store, homes: &Homes, problems: &[Problem]) -> Res
         }
         let origin = ccswitch::cc_switch_origin(homes, s)
             .map(|mut o| {
-                o.dir = String::new();
+                // where CC Switch put it on disk is no path in the repository
+                o.path = String::new();
                 o.to_string()
             })
             .unwrap_or_default();

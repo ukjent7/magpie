@@ -7,7 +7,7 @@ use std::{path::Path, str::FromStr};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use toml_edit::{DocumentMut, InlineTable, Item, Table};
+use toml_edit::{DocumentMut, Entry, InlineTable, Item, Table};
 
 use crate::config::{self, atomic_write_for_settings};
 use crate::library::{
@@ -783,14 +783,31 @@ fn codex_put(path: &Path, name: &str, entry: &Value) -> Result<()> {
     let Some(servers) = servers.as_table_mut() else {
         bail!("mcp_servers in {} is not a table", path.display());
     };
-    servers.remove(name);
     let mut table = Table::new();
     if let Some(object) = entry.as_object() {
         for (k, v) in object {
             table.insert(k, toml_edit::Item::Value(json_to_toml_value(v)));
         }
     }
-    servers.insert(name, Item::Table(table));
+    match servers.entry(name) {
+        Entry::Vacant(entry) => {
+            entry.insert(Item::Table(table));
+        }
+        Entry::Occupied(mut entry) => match entry.get_mut() {
+            // the server's own table: only its values change, so that the
+            // tables the user wrote after it keep their place in the file
+            Item::Table(old) => {
+                old.clear();
+                for (key, item) in table {
+                    old.insert(&key, item);
+                }
+                old.set_implicit(false);
+            }
+            item => {
+                *item = Item::Table(table);
+            }
+        },
+    }
     atomic_write_for_settings(path, doc.to_string().as_bytes())
 }
 
@@ -801,17 +818,33 @@ fn codex_del(path: &Path, name: &str) -> Result<()> {
         return Ok(());
     };
     let mut changed = false;
+    // the blank line that sets a table apart is its own: once the table that
+    // opened the file is gone, its successor must not lead with that blank line
+    let mut opened = false;
     if let Some(servers) = doc
         .as_table_mut()
         .get_mut("mcp_servers")
         .and_then(Item::as_table_mut)
     {
-        changed |= servers.remove(name).is_some();
+        if let Some(removed) = servers.remove(name) {
+            changed = true;
+            let sep = removed
+                .as_table()
+                .and_then(|t| t.decor().prefix().map(|p| p.as_raw()))
+                .unwrap_or_default();
+            opened = !sep.contains('\n');
+        }
     }
-    if changed {
-        atomic_write_for_settings(path, doc.to_string().as_bytes())?;
+    if !changed {
+        return Ok(());
     }
-    Ok(())
+    let text = doc.to_string();
+    let text = if opened {
+        text.trim_start_matches('\n')
+    } else {
+        text.as_str()
+    };
+    atomic_write_for_settings(path, text.as_bytes())
 }
 
 // ---- sync ------------------------------------------------------------------

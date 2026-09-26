@@ -554,7 +554,7 @@ mod tests {
         let mut data = vec![0u8; 1024];
         data[..8].copy_from_slice(b"top/file");
         data[156] = b'0';
-        data[124..130].copy_from_slice(b"000777\0");
+        data[124..131].copy_from_slice(b"000777\0");
         let dir = std::env::temp_dir().join(format!("magpie-archive-cap-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         assert!(untar(&data, &dir, 100).is_err());
