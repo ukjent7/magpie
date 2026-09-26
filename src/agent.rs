@@ -95,6 +95,18 @@ const fn provider_model(
 }
 
 const CLAUDE_MODEL: FieldSpec = field("model", "model", "model");
+const CLAUDE_GATEWAY_ENV: &[&str] = &[
+    "env.ANTHROPIC_BASE_URL",
+    "env.ANTHROPIC_AUTH_TOKEN",
+    "env.ANTHROPIC_API_KEY",
+    "env.ANTHROPIC_MODEL",
+    "env.ANTHROPIC_DEFAULT_OPUS_MODEL",
+    "env.ANTHROPIC_DEFAULT_SONNET_MODEL",
+    "env.ANTHROPIC_DEFAULT_HAIKU_MODEL",
+    "env.ANTHROPIC_DEFAULT_FABLE_MODEL",
+    "env.ANTHROPIC_SMALL_FAST_MODEL",
+    "env.CLAUDE_CODE_SUBAGENT_MODEL",
+];
 const CODEX_MODEL: FieldSpec = field("model", "model", "model");
 const CODEX_EFFORT: FieldSpec = choices_field(
     "effort",
@@ -365,6 +377,9 @@ impl Agent {
         if self.spec.id == "opencode" && !field.catalog_prefix.is_empty() {
             return self.set_opencode_model(field, value);
         }
+        if self.spec.id == "claude" && field.key == "model" {
+            return self.set_claude_model(value);
+        }
         if self.spec.id == "codex" && field.key == "model" {
             return self.set_codex_model(value);
         }
@@ -475,6 +490,50 @@ impl Agent {
         config::delete(&self.path, self.spec.format, "openai_base_url")?;
         settle_codex_effort(self, value)
     }
+
+    fn set_claude_model(&self, value: &str) -> Result<()> {
+        if value.is_empty() {
+            if claude_gateway_configured(self)? {
+                restore_claude_config(self)?;
+            }
+            return config::delete(&self.path, self.spec.format, "model");
+        }
+
+        if !is_gateway_model(value)? {
+            if claude_gateway_configured(self)? {
+                restore_claude_config(self)?;
+            }
+            return config::set(&self.path, self.spec.format, "model", value);
+        }
+
+        if !claude_gateway_configured(self)? {
+            stash_claude_config(self)?;
+        }
+        stash_claude_api_key_if_unstashed(self)?;
+        config::delete(&self.path, self.spec.format, "env.ANTHROPIC_API_KEY")?;
+        let model = Value::String(value.to_owned());
+        config::set_jsonc_values(
+            &self.path,
+            &[
+                ("model", model.clone()),
+                (
+                    "env.ANTHROPIC_BASE_URL",
+                    Value::String(crate::gateway::url()),
+                ),
+                (
+                    "env.ANTHROPIC_AUTH_TOKEN",
+                    Value::String(crate::gateway::TOKEN.to_owned()),
+                ),
+                ("env.ANTHROPIC_MODEL", model.clone()),
+                ("env.ANTHROPIC_DEFAULT_OPUS_MODEL", model.clone()),
+                ("env.ANTHROPIC_DEFAULT_SONNET_MODEL", model.clone()),
+                ("env.ANTHROPIC_DEFAULT_HAIKU_MODEL", model.clone()),
+                ("env.ANTHROPIC_DEFAULT_FABLE_MODEL", model.clone()),
+                ("env.ANTHROPIC_SMALL_FAST_MODEL", model.clone()),
+                ("env.CLAUDE_CODE_SUBAGENT_MODEL", model),
+            ],
+        )
+    }
 }
 
 pub fn sync_catalog_models() -> Result<()> {
@@ -502,6 +561,97 @@ fn is_gateway_model(value: &str) -> Result<bool> {
         || groups
             .iter()
             .any(|group| !group.hidden && format!("group/{}", group.id) == value))
+}
+
+fn claude_gateway_configured(agent: &Agent) -> Result<bool> {
+    let base_url = config::get(&agent.path, agent.spec.format, "env.ANTHROPIC_BASE_URL")?;
+    let token = config::get(&agent.path, agent.spec.format, "env.ANTHROPIC_AUTH_TOKEN")?;
+    Ok(base_url.as_deref().is_some_and(is_gateway_root_url)
+        && token.as_deref() == Some(crate::gateway::TOKEN))
+}
+
+fn is_gateway_root_url(value: &str) -> bool {
+    if value.trim_end_matches('/') == crate::gateway::url() {
+        return true;
+    }
+    let Ok(url) = url::Url::parse(value) else {
+        return false;
+    };
+    url.scheme() == "http"
+        && url.path() == "/"
+        && url.query().is_none()
+        && matches!(
+            url.host_str(),
+            Some("localhost" | "127.0.0.1" | "0.0.0.0" | "::1")
+        )
+}
+
+fn stash_claude_config(agent: &Agent) -> Result<()> {
+    let mut stash = read_agent_stash()?;
+    for path in CLAUDE_GATEWAY_ENV {
+        let key = claude_stash_key(path);
+        match config::get(&agent.path, agent.spec.format, path)? {
+            Some(value) if !value.is_empty() => {
+                stash.insert(key, value);
+            }
+            _ => {
+                stash.remove(&key);
+            }
+        }
+    }
+    write_agent_stash(&stash)
+}
+
+fn stash_claude_api_key_if_unstashed(agent: &Agent) -> Result<()> {
+    let key = claude_stash_key("env.ANTHROPIC_API_KEY");
+    let Some(value) = config::get(&agent.path, agent.spec.format, "env.ANTHROPIC_API_KEY")?
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(());
+    };
+    let mut stash = read_agent_stash()?;
+    if stash.contains_key(&key) {
+        return Ok(());
+    }
+    stash.insert(key, value);
+    write_agent_stash(&stash)
+}
+
+fn restore_claude_config(agent: &Agent) -> Result<()> {
+    let mut stash = read_agent_stash()?;
+    let restored = CLAUDE_GATEWAY_ENV
+        .iter()
+        .filter_map(|path| {
+            let key = claude_stash_key(path);
+            stash
+                .remove(&key)
+                .map(|value| (*path, Value::String(value)))
+                .or_else(|| {
+                    let legacy_key = match *path {
+                        "env.ANTHROPIC_BASE_URL" => Some("claude.base_url"),
+                        "env.ANTHROPIC_AUTH_TOKEN" => Some("claude.auth_token"),
+                        _ => None,
+                    }?;
+                    stash
+                        .remove(legacy_key)
+                        .map(|value| (*path, Value::String(value)))
+                })
+        })
+        .collect::<Vec<_>>();
+    config::delete_many(&agent.path, agent.spec.format, CLAUDE_GATEWAY_ENV)?;
+    if !restored.is_empty() {
+        config::set_jsonc_values(&agent.path, &restored)?;
+    }
+    stash.remove("claude.model");
+    write_agent_stash(&stash)
+}
+
+fn claude_stash_key(path: &str) -> String {
+    match path {
+        "env.ANTHROPIC_BASE_URL" => "claude.base_url".to_owned(),
+        "env.ANTHROPIC_AUTH_TOKEN" => "claude.auth_token".to_owned(),
+        _ => format!("claude.env.{}", path.trim_start_matches("env.")),
+    }
 }
 
 fn settle_codex_effort(agent: &Agent, model: &str) -> Result<()> {
