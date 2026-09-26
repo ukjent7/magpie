@@ -408,7 +408,14 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 		call.ResponseBody = capture.body.text()
 		call.ResponseTruncated = capture.body.truncated
 	}
-	p, model, ok := provider.Resolve(call.Model)
+	// a model's id without a provider in it that names a routing group is
+	// the group's, as "group/<id>" is, rather than one provider's that
+	// serves it: the Routing view shows the group it went to
+	asked := call.Model
+	if id, ok := provider.GroupFor(asked); ok {
+		asked = id
+	}
+	p, model, ok := provider.Resolve(asked)
 	if !ok {
 		call.Status, call.Error = 404, "unknown model"
 		msg := fmt.Sprintf("magpie knows no model %q", call.Model)
@@ -424,7 +431,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 	}
 	// a routing group's rules pick the member that goes first, looked at
 	// before any image is taken out of the request: one may be for images
-	g, ms, isGroup := provider.FindGroup(call.Model)
+	g, ms, isGroup := provider.FindGroup(asked)
 	var hit *RuleHit
 	var ruled []provider.Member
 	var ruleAt, words string

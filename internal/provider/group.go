@@ -191,6 +191,27 @@ func FindGroup(id string) (Group, []Member, bool) {
 	return GroupFinder()(id)
 }
 
+// GroupFor is the group a model's id without a provider in it names, as
+// "group/<id>": the group of that id, else the group of that model however
+// a vendor spells it ("grok-4.7" is the group grok-4-7 or auto-grok-4-7).
+// A request for the model is the group's then, as it would be for the
+// group's own id; ok is false when no group has it. An id with a provider
+// in it ("a/m") names that provider's model, never a group.
+func GroupFor(id string) (string, bool) {
+	id = strings.TrimSuffix(strings.TrimSpace(id), "[1m]")
+	if id == "" || strings.Contains(id, "/") {
+		return "", false
+	}
+	all := Groups()
+	k := Slug(sameModel(id))
+	for _, gid := range []string{strings.ToLower(id), k, "auto-" + k} {
+		if g, ok := groupOf(all, gid); ok {
+			return GroupPrefix + g.ID, true
+		}
+	}
+	return "", false
+}
+
 // GroupFinder is FindGroup for looking up many: every provider's models
 // are read once, when the first group is looked up, not again for each.
 func GroupFinder() func(id string) (Group, []Member, bool) {
