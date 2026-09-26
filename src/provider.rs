@@ -3404,6 +3404,28 @@ fn same_model(id: &str) -> String {
     key
 }
 
+// group_for is the group a model's id without a provider in it names, as
+// "group/<id>" is: the group of that id, else the group of that model however
+// a vendor spells it ("grok-4.7" is the group grok-4-7 or auto-grok-4-7). A
+// request for the model is the group's then, as it would be for the group's own
+// id; none is when no group has it. An id with a provider in it ("a/m") names
+// that provider's model, never a group.
+pub(crate) fn group_for(id: &str, groups: &[GatewayGroup]) -> Option<String> {
+    let asked = id.trim();
+    let asked = asked.strip_suffix("[1m]").unwrap_or(asked);
+    if asked.is_empty() || asked.contains('/') {
+        return None;
+    }
+    let key = slug(&same_model(asked));
+    let auto = format!("auto-{key}");
+    for candidate in [asked.to_lowercase(), key, auto] {
+        if let Some(group) = groups.iter().find(|group| group.id == candidate) {
+            return Some(format!("group/{}", group.id));
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3610,5 +3632,38 @@ mod tests {
         assert_eq!(normalize_affinity("within-a-turn").unwrap(), "turn");
         assert_eq!(normalize_affinity("never").unwrap(), "off");
         assert!(normalize_affinity("sticky").is_err());
+    }
+
+    fn group(id: &str) -> GatewayGroup {
+        GatewayGroup {
+            id: id.to_owned(),
+            name: id.to_owned(),
+            members: Vec::new(),
+            routing: String::new(),
+            affinity: String::new(),
+            family: String::new(),
+        }
+    }
+
+    #[test]
+    fn a_bare_model_id_names_the_group_it_was_found_by() {
+        let groups = [group("gpt-6-sol"), group("grok-4-7"), group("auto-deepseek")];
+        for (asked, want) in [
+            ("gpt-6-sol", "group/gpt-6-sol"),
+            ("GPT-6-SOL", "group/gpt-6-sol"),
+            ("GPT-6-SOL[1m]", "group/gpt-6-sol"),
+            (" grok-4.7 ", "group/grok-4-7"),
+            ("deepseek", "group/auto-deepseek"),
+        ] {
+            assert_eq!(
+                group_for(asked, &groups).as_deref(),
+                Some(want),
+                "asked for {asked:?}"
+            );
+        }
+        // a provider's model, spelled so, is never a group's
+        for asked in ["anthropic/claude-opus-5", "", "none-of-these"] {
+            assert_eq!(group_for(asked, &groups), None, "asked for {asked:?}");
+        }
     }
 }

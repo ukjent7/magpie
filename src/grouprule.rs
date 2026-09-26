@@ -1013,6 +1013,10 @@ pub struct Classified {
     pub intents: Vec<String>,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub intent: String,
+    // after is what the classifier was told the turn before was: a message
+    // that only carries on from it is of that kind.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub after: String,
     #[serde(skip_serializing_if = "is_false")]
     pub cached: bool,
     #[serde(skip_serializing_if = "is_zero")]
@@ -1028,6 +1032,7 @@ pub trait Classifier: Send + Sync {
         &'a self,
         model: &'a str,
         intents: &'a [String],
+        prev: &'a str,
         text: &'a str,
     ) -> BoxFuture<'a, Result<String>>;
 }
@@ -1160,6 +1165,10 @@ pub async fn rule_for(
         let mut classified = Classified {
             by: classifier.to_owned(),
             intents: intents.clone(),
+            // a message that only carries on is of the turn before's kind
+            after: (had && intents.contains(&tr.intent))
+                .then(|| tr.intent.clone())
+                .unwrap_or_default(),
             ..Classified::default()
         };
         let text = user_text(req);
@@ -1171,7 +1180,14 @@ pub async fn rule_for(
             classified.error = "the message has no words to classify".to_owned();
         } else {
             let started = Instant::now();
-            match classify::classify(ask.expect("checked above"), classifier, &intents, &text).await
+            match classify::classify(
+                ask.expect("checked above"),
+                classifier,
+                &intents,
+                &classified.after,
+                &text,
+            )
+            .await
             {
                 Ok((intent, cached)) => {
                     classified.intent = intent;
@@ -1987,6 +2003,7 @@ mod tests {
             "cls",
             "",
             &["writing or fixing tests".to_owned()],
+            "",
             "add a unit test",
         );
         assert_eq!(body["model"], "cls");
@@ -1997,6 +2014,22 @@ mod tests {
         let user = body["messages"][1]["content"].as_str().unwrap();
         assert!(user.contains("1. writing or fixing tests"));
         assert!(user.contains("add a unit test"));
+        assert!(!user.contains("was of kind"));
+
+        // a turn that only carries on is told what the one before was
+        let carried = classify_body(
+            "cls",
+            "",
+            &["writing or fixing tests".to_owned()],
+            "writing or fixing tests",
+            "go on",
+        );
+        assert!(
+            carried["messages"][1]["content"]
+                .as_str()
+                .unwrap()
+                .contains("was of kind 1")
+        );
 
         let effort = classify_body("cls", "low", &["x".to_owned()], "t");
         assert_eq!(effort["reasoning_effort"], "low");

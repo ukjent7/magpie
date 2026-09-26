@@ -723,15 +723,18 @@ async fn forward(
         Err(error) => return api_error_for(protocol, error.status, error.message),
     };
     let providers = &catalog.providers;
-    let group = model
+    // a model's id without a provider in it that names a routing group is the
+    // group's, as "group/<id>" is, rather than one provider's that serves it
+    let asked = provider::group_for(&model, &catalog.groups).unwrap_or(model.clone());
+    let group = asked
         .strip_prefix("group/")
         .and_then(|id| catalog.groups.iter().find(|group| group.id == id));
     let mut candidates = if let Some(group) = group {
         group_candidates(group, providers, protocol, path_override.is_none())
-    } else if model.starts_with("group/") {
+    } else if asked.starts_with("group/") {
         Vec::new()
     } else {
-        let target = match resolve_model(&model, providers, protocol, path_override.is_none()) {
+        let target = match resolve_model(&asked, providers, protocol, path_override.is_none()) {
             Ok(result) => result,
             Err(ResolveError::Unknown) => {
                 return api_error_for(

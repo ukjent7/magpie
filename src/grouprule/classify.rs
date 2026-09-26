@@ -27,9 +27,11 @@ const CLASSIFY_KEEP: Duration = Duration::from_secs(10 * 60); // an answer, for 
 const CLASSIFY_REST: Duration = Duration::from_secs(30); // after a failure, before the classifier is asked again
 const MAX_CLASSIFIED: usize = 4096;
 
-const CLASSIFY_PROMPT: &str = "You route a user's message to a coding assistant by what it asks for. \
-Given numbered kinds of request and the user's message, answer with the number of the kind the message is, \
-or 0 if it is none of them. Answer with the number only.";
+const CLASSIFY_PROMPT: &str = "You route a user's message to a coding assistant. \
+Given numbered kinds and the user's message, answer with the number of the kind that fits the message best. \
+The kinds may be topics, or levels such as how hard or how big a request is; \
+when they are levels, every message has one, a greeting or a question about the assistant included. \
+Answer 0 only when the message is plainly none of the kinds. Answer with the number only.";
 
 static CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
     reqwest::Client::builder()
@@ -87,19 +89,22 @@ fn hex(bytes: &[u8]) -> String {
 }
 
 // classify is ask's answer for the message, from what was asked before
-// when it can be: the same message and intents within CLASSIFY_KEEP. A
-// classifier that failed is left to rest for CLASSIFY_REST rather than
-// making every turn wait out its timeout.
+// when it can be: the same message, intents and turn-before within
+// CLASSIFY_KEEP. A classifier that failed is left to rest for CLASSIFY_REST
+// rather than making every turn wait out its timeout.
 pub async fn classify(
     ask: &dyn Classifier,
     model: &str,
     intents: &[String],
+    prev: &str,
     text: &str,
 ) -> Result<(String, bool)> {
     let mut hasher = Sha256::new();
     hasher.update(model.as_bytes());
     hasher.update([0]);
     hasher.update(intents.join("\x00").to_ascii_lowercase().as_bytes());
+    hasher.update([0]);
+    hasher.update(prev.as_bytes());
     hasher.update([0]);
     hasher.update(text.as_bytes());
     let key = hex(&hasher.finalize());
@@ -127,7 +132,7 @@ pub async fn classify(
             );
         }
     }
-    let intent = ask.ask(model, intents, text).await;
+    let intent = ask.ask(model, intents, prev, text).await;
     let mut state = ANSWERED
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -166,13 +171,30 @@ pub async fn classify(
 // classifyBody is the Chat request asking model which of intents text is,
 // at effort when it isn't "". A model that reasons does so before it
 // answers, and how long varies: 2048 leaves room for that and the number.
-pub fn classify_body(model: &str, effort: &str, intents: &[String], text: &str) -> Value {
+// When the turn before was one of intents (prev), it is told so: "go on"
+// says nothing of its own, and is of the kind of what it goes on with.
+pub fn classify_body(
+    model: &str,
+    effort: &str,
+    intents: &[String],
+    prev: &str,
+    text: &str,
+) -> Value {
     let mut kinds = String::from("Kinds:\n");
     for (index, intent) in intents.iter().enumerate() {
         let _ = writeln!(kinds, "{}. {intent}", index + 1);
     }
+    if let Some(index) = intents.iter().position(|intent| intent == prev) {
+        let kind = index + 1;
+        let _ = write!(
+            kinds,
+            "\nThe user's message before this one, in the same conversation, was of kind {kind}. \
+A message that only carries on from it — go on, yes, do it, fix that — is of kind {kind} too; \
+one that asks for something of its own is of the kind that fits it.\n"
+        );
+    }
     let message = format!(
-        "{kinds}\nThe user's message:\n<message>\n{text}\n</message>\n\nThe number of its kind (0 for none):"
+        "{kinds}\nThe user's message:\n<message>\n{text}\n</message>\n\nThe number of the kind that fits it best (0 only if none does):"
     );
     let mut body = json!({
         "model": model,
@@ -281,10 +303,11 @@ impl Classifier for GatewayClassifier {
         &'a self,
         model: &'a str,
         intents: &'a [String],
+        prev: &'a str,
         text: &'a str,
     ) -> BoxFuture<'a, Result<String>> {
         Box::pin(async move {
-            let body = classify_body(model, &classify_effort(model), intents, text);
+            let body = classify_body(model, &classify_effort(model), intents, prev, text);
             let response = CLIENT
                 .post(format!("{}/chat/completions", crate::gateway::v1_url()))
                 .header(reqwest::header::USER_AGENT, ROUTER_AGENT)
