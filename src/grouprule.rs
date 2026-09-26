@@ -24,7 +24,7 @@ use crate::{
     provider::{self, Group},
 };
 
-mod classify;
+pub(crate) mod classify;
 
 pub use classify::{
     GatewayClassifier, classify, classify_body, classify_effort, fit_effort, read_intent,
@@ -194,7 +194,7 @@ pub fn intents(rules: &[Rule], q: &RuleRequest) -> Vec<String> {
         }
         if !out
             .iter()
-            .any(|intent| intent.eq_ignore_ascii_case(&rule.intent))
+            .any(|intent| intent.eq_ignore_ascii_case(rule.intent.as_str()))
         {
             out.push(rule.intent.clone());
         }
@@ -2204,7 +2204,7 @@ mod tests {
         assert_eq!(hit.n, 1);
         assert_eq!(hit.use_, "b/big");
         // and the turn's later rounds stay there
-        let hit = rule_for(key, &rules, "", &chat(round), "", &contexts, None)
+        let hit = rule_for(key, &rules, "", &chat(round.clone()), "", &contexts, None)
             .await
             .unwrap();
         assert!(hit.held);

@@ -690,9 +690,9 @@ fn find_password(s: &str) -> Vec<(usize, usize)> {
         {
             r0 -= 1;
         }
-        let Some(start) = (r0..p).find(|&k| b[k].is_ascii_alphabetic()) else {
+        if (r0..p).find(|&k| b[k].is_ascii_alphabetic()).is_none() {
             continue;
-        };
+        }
         let u0 = p + 3;
         let u1 = run(b, u0, user_ch);
         if u1 == u0 || b.get(u1) != Some(&b':') {

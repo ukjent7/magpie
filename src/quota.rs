@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Result, bail};
 use serde::Serialize;
 
 // magpie quota: what is left of every subscription and key balance, for
@@ -178,6 +178,7 @@ fn print_quota(quota: &Quota) {
 
 pub(crate) async fn report() -> Vec<Quota> {
     let mut out = crate::accounts::quota_subscriptions().await;
+    out.extend(crate::provider::planquota::plan_quotas().await);
     for (provider, name, balance) in crate::provider::key_balances().await {
         let (balance, error) = match balance {
             Ok(balance) => (balance, String::new()),

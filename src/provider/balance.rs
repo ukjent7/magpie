@@ -133,15 +133,13 @@ fn source(provider: &Provider) -> Option<Source> {
                 }
                 _ => return None,
             };
-            Some(Source {
-                url,
-                format,
-                token: if matches!(format, Format::AiHubMixAccount) {
-                    provider.balance_token.clone()
-                } else {
-                    String::new()
-                },
-            })
+            // the account's balance is the same whichever key asks
+            let token = if matches!(format, Format::AiHubMixAccount) {
+                provider.balance_token.clone()
+            } else {
+                String::new()
+            };
+            Some(Source { url, format, token })
         })
 }
 
@@ -283,7 +281,7 @@ fn read_balance_one(value: &Value, path: &str) -> Result<String> {
         "no balance path: where in the reply the amount is, e.g. data.balance"
     );
 
-    let expression = BalanceExpression::new(path, value);
+    let mut expression = BalanceExpression::new(path, value);
     if expression.lone() {
         // a path alone: its value, a number or not
         let found = expression.at(path).map_err(|error| anyhow!("{error}"))?;
@@ -345,7 +343,7 @@ impl<'a> BalanceExpression<'a> {
         self.source.get(self.index).copied()
     }
 
-    fn sum(&self) -> std::result::Result<f64, String> {
+    fn sum(&mut self) -> std::result::Result<f64, String> {
         let mut value = self.product()?;
         while let Some(operator) = self.peek() {
             if operator != '+' && operator != '-' {
@@ -362,7 +360,7 @@ impl<'a> BalanceExpression<'a> {
         Ok(value)
     }
 
-    fn product(&self) -> std::result::Result<f64, String> {
+    fn product(&mut self) -> std::result::Result<f64, String> {
         let mut value = self.unary()?;
         while let Some(operator) = self.peek() {
             if operator != '*' && operator != '/' {
@@ -381,7 +379,7 @@ impl<'a> BalanceExpression<'a> {
         Ok(value)
     }
 
-    fn unary(&self) -> std::result::Result<f64, String> {
+    fn unary(&mut self) -> std::result::Result<f64, String> {
         self.space();
         let Some(current) = self.peek() else {
             return Err("the balance path ends where a number or a path should be".to_owned());
@@ -429,7 +427,7 @@ impl<'a> BalanceExpression<'a> {
                     ));
                 }
                 let path: String = self.source[start..self.index].iter().collect();
-                let found = self.at(&path).map_err(|error| anyhow!("{error}"))?;
+                let found = self.at(&path)?;
                 number(found).ok_or_else(|| format!("{path:?} in the reply is not a number"))
             }
         }

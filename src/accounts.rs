@@ -17,8 +17,11 @@ mod copilot_usage;
 mod grok_identity;
 mod grok_oauth;
 mod oauth;
+mod zcode_identity;
+mod zcode_oauth;
+mod zcode_usage;
 
-const USAGE: &str = "usage: magpie accounts [claude|codex|grok|copilot|gemini|antigravity] [--json] | magpie accounts add claude|codex|grok|copilot | magpie accounts switch|forget claude|codex|grok|copilot <user>";
+const USAGE: &str = "usage: magpie accounts [claude|codex|grok|copilot|zcode|gemini|antigravity] [--json] | magpie accounts add claude|codex|grok|copilot|zcode | magpie accounts switch|forget claude|codex|grok|copilot|zcode <user>";
 
 #[derive(Clone, Default, Deserialize, Serialize)]
 #[serde(default)]
@@ -109,7 +112,8 @@ pub(crate) async fn command(args: &[String]) -> Result<()> {
                 copilot_oauth::command(args).await
             }
             Some(agent) if agent.eq_ignore_ascii_case("grok") => grok_oauth::command(args).await,
-            _ => bail!("usage: magpie accounts add claude|codex|grok|copilot"),
+            Some(agent) if agent.eq_ignore_ascii_case("zcode") => zcode_oauth::command(args).await,
+            _ => bail!("usage: magpie accounts add claude|codex|grok|copilot|zcode"),
         };
     }
 
@@ -177,6 +181,18 @@ async fn collected_rows(agent_filter: Option<&str>) -> Result<Vec<AccountRow>> {
     {
         merge_copilot_account(&mut rows, account);
     }
+    if (agent_filter.is_none() || agent_filter == Some("zcode"))
+        && let Some(login) = zcode_identity::live_login()
+    {
+        merge_active(
+            &mut rows,
+            "zcode",
+            login.user,
+            login.plan,
+            login.auth,
+            login.profile,
+        );
+    }
     select_grok_account(&mut rows);
     select_copilot_account(&mut rows);
 
@@ -186,6 +202,7 @@ async fn collected_rows(agent_filter: Option<&str>) -> Result<Vec<AccountRow>> {
     claude_usage::refresh(&mut rows).await;
     codex_usage::refresh(&mut rows).await;
     copilot_usage::refresh(&mut rows).await;
+    zcode_usage::refresh(&mut rows).await;
     rows.sort_by_cached_key(|row| (row.agent.clone(), row.user.to_lowercase()));
     Ok(rows)
 }
@@ -338,8 +355,8 @@ async fn mutate_account(args: &[String]) -> Result<()> {
         bail!("unknown agent {agent:?}\n{USAGE}");
     };
     ensure!(
-        matches!(agent, "claude" | "codex" | "copilot" | "grok"),
-        "Rust account switching and forgetting currently support Claude Code, Codex, Grok, and Copilot"
+        matches!(agent, "claude" | "codex" | "copilot" | "grok" | "zcode"),
+        "Rust account switching and forgetting currently support Claude Code, Codex, Grok, Copilot, and ZCode"
     );
 
     match (action.to_ascii_lowercase().as_str(), agent) {
@@ -351,6 +368,8 @@ async fn mutate_account(args: &[String]) -> Result<()> {
         ("forget", "copilot") => forget_copilot_account(user)?,
         ("switch", "grok") => switch_grok_account(user)?,
         ("forget", "grok") => forget_grok_account(user)?,
+        ("switch", "zcode") => switch_zcode_account(user)?,
+        ("forget", "zcode") => forget_zcode_account(user)?,
         _ => unreachable!("mutate_account only handles switch and forget"),
     }
     if action.eq_ignore_ascii_case("switch") {
@@ -367,6 +386,7 @@ fn canonical_agent(argument: &str) -> Option<&'static str> {
         "codex" => Some("codex"),
         "grok" => Some("grok"),
         "copilot" => Some("copilot"),
+        "zcode" => Some("zcode"),
         "gemini" | "gemini-cli" => Some("gemini"),
         "antigravity" | "ag" => Some("antigravity"),
         _ => None,
@@ -1031,4 +1051,77 @@ fn short_until(reset_at: &str) -> Option<String> {
         value => format!("{}d{}h", value / 86400, (value % 86400) / 3600),
     };
     Some(remaining)
+}
+
+// ---- ZCode ------------------------------------------------------------------
+
+fn zcode_own_user() -> Option<String> {
+    crate::provider::zcode::own().map(|own| own.user)
+}
+
+fn zcode_saved_key(login: &SavedLogin) -> bool {
+    login.agent == "zcode"
+        && login
+            .auth
+            .as_ref()
+            .and_then(|auth| auth.get("apiKey"))
+            .and_then(Value::as_str)
+            .is_some_and(|key| !key.is_empty())
+}
+
+fn switch_zcode_account(user: &str) -> Result<()> {
+    let mut logins = read_saved_logins()?;
+    let own_user = zcode_own_user();
+    let own_target = own_user
+        .as_deref()
+        .is_some_and(|own| own.eq_ignore_ascii_case(user));
+    let target_index = logins.iter().position(|login| {
+        login.agent == "zcode" && login.user.eq_ignore_ascii_case(user) && zcode_saved_key(login)
+    });
+    ensure!(
+        target_index.is_some() || own_target,
+        "no saved ZCode account {user:?}"
+    );
+    for login in logins.iter_mut().filter(|login| login.agent == "zcode") {
+        login.first = false;
+    }
+    if let Some(index) = target_index {
+        logins[index].first = true;
+        logins[index].on = true;
+    }
+    write_saved_logins(&mut logins)
+}
+
+fn forget_zcode_account(user: &str) -> Result<()> {
+    if zcode_own_user().is_some_and(|own| own.eq_ignore_ascii_case(user)) {
+        bail!("{user} is signed in to ZCode itself; sign out there");
+    }
+    let mut logins = read_saved_logins()?;
+    let original_len = logins.len();
+    logins.retain(|login| !(login.agent == "zcode" && login.user.eq_ignore_ascii_case(user)));
+    ensure!(
+        logins.len() != original_len,
+        "no saved ZCode account {user:?}"
+    );
+    write_saved_logins(&mut logins)
+}
+
+// saved_zcode_logins lists the saved ZCode subscriptions' keys, for the
+// providers that serve them besides ZCode's own sign-in.
+pub(crate) fn saved_zcode_logins() -> Result<Vec<(String, crate::provider::zcode::ZcodeKey)>> {
+    let mut out = Vec::new();
+    for login in read_saved_logins()? {
+        if login.agent != "zcode" {
+            continue;
+        }
+        let Some(auth) = login.auth.clone() else {
+            continue;
+        };
+        let Some(key) = serde_json::from_value::<crate::provider::zcode::ZcodeKey>(auth).ok()
+        else {
+            continue;
+        };
+        out.push((login.user, key));
+    }
+    Ok(out)
 }

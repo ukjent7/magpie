@@ -1284,6 +1284,28 @@ async fn send_upstream(
                 None,
             )
         }
+        Some(provider::ProviderAccount::Zcode { key, .. }) => {
+            // ZCode's GLM Coding Plan speaks Anthropic at its own endpoint;
+            // its key authenticates either way Anthropic keys do
+            let mut headers = upstream_headers(
+                provider,
+                upstream_protocol,
+                Some(key.api_key.as_str()),
+                incoming_headers,
+            )
+            .map_err(anyhow::Error::msg)
+            .with_context(|| format!("build headers for provider {}", provider.id))?;
+            headers.insert(
+                header::HeaderName::from_static("authorization"),
+                header::HeaderValue::from_str(&format!("Bearer {}", key.api_key))
+                    .context("build ZCode authorization header")?,
+            );
+            (
+                key.endpoint().to_owned(),
+                headers,
+                Some("application/json, text/event-stream"),
+            )
+        }
         Some(provider::ProviderAccount::Copilot { account }) => {
             let session = crate::copilot::session(&state.client, account).await?;
             crate::copilot::accept_model(&state.client, account, &session, model).await;

@@ -6,7 +6,7 @@ use std::{
     time::Duration,
 };
 
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, anyhow, bail, ensure};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -18,7 +18,9 @@ mod balance;
 mod icon;
 mod import;
 mod import_apps;
+pub(crate) mod planquota;
 mod test;
+pub(crate) mod zcode;
 pub(crate) use import::command as import_command;
 
 const USAGE: &str = "usage: magpie presets | magpie providers | magpie models | magpie provider <id> | magpie provider add <preset> [key] | magpie provider add <name> id=<id> url=<url> key=<key> | magpie provider models <id> [ids…] | magpie provider test <id> | magpie provider icon <id> <file|name> | magpie provider key <id> <key> | magpie provider keys <id> [add <key> [name=<name>] [protocol=<protocol>] | use|on|off|rm <key-id> | rename <key-id> <name> | protocol <key-id> <protocol|any>] | magpie provider routing <id> [smart|order|rotate|usage] | magpie provider affinity <id> [auto|session|turn|off] | magpie provider fallback <id> [provider/model… | none] | magpie provider rm <id>";
@@ -562,8 +564,16 @@ pub(crate) struct Provider {
 
 #[derive(Clone)]
 pub(crate) enum ProviderAccount {
-    Codex { auth_file: PathBuf },
-    Copilot { account: crate::copilot::Account },
+    Codex {
+        auth_file: PathBuf,
+    },
+    Copilot {
+        account: crate::copilot::Account,
+    },
+    Zcode {
+        user: String,
+        key: crate::provider::zcode::ZcodeKey,
+    },
 }
 
 pub(crate) struct GatewayProvider {
@@ -637,6 +647,23 @@ fn providers_with_local_accounts(mut providers: Vec<Provider>) -> Vec<Provider> 
             ..Provider::default()
         });
     }
+    if !providers.iter().any(|provider| provider.id == "zcode")
+        && let Some(own) = crate::provider::zcode::own()
+    {
+        providers.push(Provider {
+            id: "zcode".to_owned(),
+            name: "ZCode".to_owned(),
+            icon: "zcode".to_owned(),
+            anthropic: own.key.endpoint().to_owned(),
+            catalog: "zcode".to_owned(),
+            website: "https://zcode.z.ai".to_owned(),
+            account: Some(ProviderAccount::Zcode {
+                user: own.user,
+                key: own.key,
+            }),
+            ..Provider::default()
+        });
+    }
     providers
 }
 
@@ -654,6 +681,9 @@ fn account_label(account: &ProviderAccount) -> String {
     match account {
         ProviderAccount::Copilot { account } if !account.user.is_empty() => {
             format!("signed in as {}", account.user)
+        }
+        ProviderAccount::Zcode { user, .. } if !user.is_empty() => {
+            format!("signed in as {user}")
         }
         _ => "signed in".to_owned(),
     }
@@ -688,6 +718,7 @@ impl GatewayProvider {
                 crate::codex::signed_in_identity().map_or_else(String::new, |(user, _)| user)
             }
             Some(ProviderAccount::Copilot { account }) => account.user.clone(),
+            Some(ProviderAccount::Zcode { user, .. }) => user.clone(),
             None => String::new(),
         };
         match (host.is_empty(), user.is_empty()) {
@@ -1576,7 +1607,7 @@ pub async fn visible_command(args: &[String]) -> Result<()> {
     models(&[id]).await
 }
 
-fn count_shown(agent: &str, names: &[String]) -> String {
+fn count_shown(_agent: &str, names: &[String]) -> String {
     let providers = providers_with_local_accounts(match load() {
         Ok(file) => file.providers,
         Err(_) => Vec::new(),
@@ -1802,6 +1833,12 @@ async fn refresh_models(provider: &Provider, report_failures: bool) -> Result<us
         }
         Some(ProviderAccount::Copilot { account }) => {
             return crate::copilot::refresh_models(account).await;
+        }
+        Some(ProviderAccount::Zcode { key, .. }) => {
+            let models = crate::provider::zcode::models();
+            let count = models.len();
+            crate::catalog::save_live(&provider.id, &key.root(), models)?;
+            return Ok(count);
         }
         None => {}
     }
